@@ -1,0 +1,14 @@
+build/
+cmake-build-*/
+compile_commands.json
+models/*
+
+.DS_Store
+.cache/
+.idea/
+.vscode/
+
+models/**/*
+!models/README.md
+!models/qwen3-0.6b/
+!models/qwen3-0.6b/README.md
