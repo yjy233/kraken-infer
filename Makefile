@@ -1,5 +1,7 @@
 CXX ?= clang++
 BUILD_DIR ?= build/manual
+MODEL ?= models/qwen3-0.6b
+PROMPT ?= hello
 
 COMMON_FLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Iinclude
 DEBUG_FLAGS := -O0 -g
@@ -14,7 +16,7 @@ CORE_SRCS := \
 	src/runtime/runtime.cpp \
 	src/backends/mps/mps_backend.mm
 
-.PHONY: all debug release test mps-info clean
+.PHONY: all debug release test cli inspect doctor run mps-info clean
 
 all: debug
 
@@ -35,8 +37,20 @@ $(BUILD_DIR)/toyllm_smoke_test: $(CORE_SRCS) tests/smoke_test.cpp | $(BUILD_DIR)
 test: $(BUILD_DIR)/toyllm_smoke_test
 	./$(BUILD_DIR)/toyllm_smoke_test
 
+cli: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm help
+
+inspect: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm inspect $(MODEL)
+
+doctor: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm doctor $(MODEL)
+
+run: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm run --model $(MODEL) --prompt "$(PROMPT)"
+
 mps-info: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm --mps-info
+	./$(BUILD_DIR)/toyllm mps
 
 clean:
 	rm -rf build

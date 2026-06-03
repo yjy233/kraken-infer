@@ -50,12 +50,24 @@ cmake --build --preset release
 ```bash
 make test
 make mps-info
+make inspect
+make doctor
 ```
 
 Makefile 兜底构建后也可以检查模型结构：
 
 ```bash
 ./build/manual/toyllm --inspect-model models/qwen3-0.6b
+```
+
+常用 CLI 子命令：
+
+```bash
+./build/manual/toyllm help
+./build/manual/toyllm mps
+./build/manual/toyllm inspect
+./build/manual/toyllm doctor
+./build/manual/toyllm run --prompt "hello"
 ```
 
 ## 模型

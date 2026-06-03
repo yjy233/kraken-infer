@@ -897,8 +897,7 @@ std::string format_model_summary(const ModelBundle& bundle) {
   output << "Attention dropout: " << model.attention_dropout << '\n';
   output << "Activation: " << model.hidden_act << '\n';
   output << "RMSNorm eps: " << model.rms_norm_eps << '\n';
-  output << "RoPE theta: " << std::fixed << std::setprecision(0) << model.rope_theta << '\n';
-  output.unsetf(std::ios::floatfield);
+  output << "RoPE theta: " << static_cast<std::int64_t>(model.rope_theta) << '\n';
   output << "DType: " << model.torch_dtype << '\n';
   output << "Tie word embeddings: " << bool_to_string(model.tie_word_embeddings) << '\n';
   output << "Use cache: " << bool_to_string(model.use_cache) << '\n';
