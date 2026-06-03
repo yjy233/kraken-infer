@@ -1,7 +1,6 @@
 build/
 cmake-build-*/
 compile_commands.json
-models/*
 
 .DS_Store
 .cache/
