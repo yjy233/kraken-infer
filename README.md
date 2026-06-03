@@ -32,6 +32,12 @@ ctest --preset debug
 ./build/debug/toyllm --mps-info
 ```
 
+检查本地模型结构：
+
+```bash
+./build/debug/toyllm --inspect-model models/qwen3-0.6b
+```
+
 Release 构建：
 
 ```bash
@@ -45,6 +51,26 @@ cmake --build --preset release
 make test
 make mps-info
 ```
+
+Makefile 兜底构建后也可以检查模型结构：
+
+```bash
+./build/manual/toyllm --inspect-model models/qwen3-0.6b
+```
+
+## 模型
+
+当前使用的官方模型地址：
+
+- https://huggingface.co/Qwen/Qwen3-0.6B
+
+模型已下载到：
+
+```text
+models/qwen3-0.6b/
+```
+
+本地目录包含 `config.json`、`generation_config.json`、`tokenizer.json`、`tokenizer_config.json`、`merges.txt`、`vocab.json`、`model.safetensors` 和 `LICENSE`。
 
 ## 目录结构
 

@@ -10,6 +10,7 @@ MPS_LIBS := -framework Foundation -framework Metal -framework MetalPerformanceSh
 CORE_SRCS := \
 	src/core/status.cpp \
 	src/core/tensor.cpp \
+	src/model/model_config.cpp \
 	src/runtime/runtime.cpp \
 	src/backends/mps/mps_backend.mm
 

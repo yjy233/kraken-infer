@@ -27,6 +27,7 @@ target_sources(
   PRIVATE
     src/core/status.cpp
     src/core/tensor.cpp
+    src/model/model_config.cpp
     src/runtime/runtime.cpp
 )
 
