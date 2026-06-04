@@ -1,16 +1,21 @@
 # toy_llm_interface
 
-一个从 0-1 实现 LLM 推理的 C++ 实验仓库。当前目标是先在 macOS 上跑通工程骨架，并为 Qwen3 0.6B 推理实现预留 runtime、device、tensor、MPS backend、CLI 和测试入口。
+一个从 0-1 实现 LLM 推理的 C++ 实验仓库。当前目标是在 macOS 上跑通 Qwen3 0.6B 的本地推理链路，并逐步迁移到 MPS。
 
 ## 当前状态
 
-- C++20 + CMake 项目骨架
+- C++20 + CMake 项目骨架，另有无 CMake 时可用的 Makefile 兜底构建
 - macOS Metal/MPS 后端探测，使用 Objective-C++ 桥接
 - 基础 `Device`、`TensorDesc`、`Tensor`、`Runtime` 类型
-- CLI：`toyllm --mps-info`
+- Qwen3 `config.json`、`generation_config.json`、`tokenizer_config.json` 读取
+- `model.safetensors` 只读 mmap 加载，BF16 权重按 tensor name 绑定
+- Qwen/Qwen3 byte-level BPE tokenizer，支持 chat template 需要的 added tokens
+- CPU correctness path：embedding、RMSNorm、Q/K norm、RoPE、GQA attention、MLP、lm head
+- Decode 阶段 KV cache
+- CLI：`inspect`、`weights`、`doctor`、`infer`、`run`、`chat`
 - CTest smoke test
 
-Qwen3 tokenizer、权重加载、Metal/MPS 算子、KV cache、采样器还没有实现。
+当前 CPU 推理是正确性优先的朴素实现，速度较慢；采样仍为 greedy，MPS 计算路径尚未接入完整 forward。
 
 ## 构建
 
@@ -52,6 +57,8 @@ make test
 make mps-info
 make inspect
 make doctor
+make infer
+make chat
 ```
 
 Makefile 兜底构建后也可以检查模型结构：
@@ -66,8 +73,12 @@ Makefile 兜底构建后也可以检查模型结构：
 ./build/manual/toyllm help
 ./build/manual/toyllm mps
 ./build/manual/toyllm inspect
+./build/manual/toyllm weights
 ./build/manual/toyllm doctor
+./build/manual/toyllm infer --prompt "hello"
+./build/manual/toyllm infer --prompt "hello" --max-new-tokens 8
 ./build/manual/toyllm run --prompt "hello"
+./build/manual/toyllm chat --max-new-tokens 16
 ```
 
 ## 模型
@@ -101,11 +112,12 @@ tests/                smoke tests
 ## 下一步实现顺序
 
 1. 模型配置读取：解析 Qwen3 `config.json`。
-2. tokenizer：接入 BPE/SentencePiece 解析或先实现最小 tokenizer loader。
-3. 权重加载：优先支持 `safetensors`，建立 tensor name 到内存视图的映射。
-4. CPU correctness path：先把 RMSNorm、RoPE、attention、MLP、sampling 用 CPU 跑通小输入。
-5. MPS path：逐步迁移 matmul、RMSNorm、RoPE、attention/KV cache、sampling。
-6. CLI 推理：`--model models/qwen3-0.6b --prompt "..."`
+2. safetensors mmap 权重读取和 Qwen3 权重绑定。
+3. tokenizer、chat prompt formatting、CPU correctness path、KV cache。
+4. CLI 推理和交互式 chat。
+5. OpenAI/OpenAPI-compatible gateway。
+6. MPS path：逐步迁移 matmul、RMSNorm、RoPE、attention/KV cache、sampling。
+7. sampling/streaming/perf：top-k、top-p、temperature、流式输出、tokens/s 指标。
 
 ## 设计原则
 

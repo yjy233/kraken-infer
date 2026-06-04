@@ -28,6 +28,7 @@ target_sources(
     src/core/status.cpp
     src/core/tensor.cpp
     src/model/model_config.cpp
+    src/runtime/cpu_inference.cpp
     src/runtime/runtime.cpp
 )
 

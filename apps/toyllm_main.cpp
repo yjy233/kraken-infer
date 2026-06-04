@@ -1,12 +1,16 @@
 #include "toyllm/backends/mps/mps_backend.hpp"
 #include "toyllm/model/model_config.hpp"
-#include "toyllm/runtime/runtime.hpp"
+#include "toyllm/runtime/cpu_inference.hpp"
 
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -19,8 +23,14 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program << " version\n";
   std::cout << "  " << program << " mps\n";
   std::cout << "  " << program << " inspect [model_dir]\n";
+  std::cout << "  " << program << " weights [model_dir]\n";
   std::cout << "  " << program << " doctor [model_dir]\n";
-  std::cout << "  " << program << " run --prompt <text> [--model <model_dir>]\n\n";
+  std::cout << "  " << program
+            << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]\n";
+  std::cout << "  " << program
+            << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]\n";
+  std::cout << "  " << program
+            << " chat [model_dir] [--max-new-tokens N] [--enable-thinking]\n\n";
   std::cout << "Compatibility flags:\n";
   std::cout << "  " << program << " --mps-info\n";
   std::cout << "  " << program << " --inspect-model <model_dir>\n";
@@ -34,6 +44,20 @@ bool arg_equals(char const* arg, std::string_view expected) {
 
 std::filesystem::path default_model_path() {
   return std::filesystem::path{kDefaultModelPath};
+}
+
+std::optional<std::size_t> parse_size_arg(std::string_view value) {
+  try {
+    std::size_t parsed_chars = 0;
+    const auto parsed = std::stoull(std::string(value), &parsed_chars, 10);
+    if (parsed_chars != value.size() ||
+        parsed > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+      return std::nullopt;
+    }
+    return static_cast<std::size_t>(parsed);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
 }
 
 int inspect_model(const std::filesystem::path& model_path) {
@@ -53,32 +77,92 @@ int print_mps_info() {
   return EXIT_SUCCESS;
 }
 
+int inspect_weights(const std::filesystem::path& model_path) {
+  const auto summary = toyllm::format_weight_summary(model_path);
+  if (!summary.is_ok()) {
+    std::cerr << "Failed to inspect weights: " << summary.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << summary.value();
+  return EXIT_SUCCESS;
+}
+
 int run_doctor(const std::filesystem::path& model_path) {
   std::cout << "toyllm " << kVersion << '\n';
   std::cout << "\n== MPS ==\n";
   (void)print_mps_info();
   std::cout << "\n== Model ==\n";
-  return inspect_model(model_path);
+  const auto model_status = inspect_model(model_path);
+  if (model_status != EXIT_SUCCESS) {
+    return model_status;
+  }
+  std::cout << "\n== Weights ==\n";
+  return inspect_weights(model_path);
 }
 
-int run_placeholder(const std::string& model_path, const std::string& prompt) {
+int run_cpu_generation(const std::string& model_path, const std::string& prompt,
+                       std::size_t max_new_tokens, bool enable_thinking) {
   if (model_path.empty() || prompt.empty()) {
-    std::cerr << "run requires --prompt and a model path.\n";
+    std::cerr << "generation requires --prompt and a model path.\n";
     return EXIT_FAILURE;
   }
 
-  const toyllm::Runtime runtime{toyllm::RuntimeConfig{}};
-  const auto info = runtime.info();
-
-  std::cout << "Model path: " << model_path << '\n';
-  std::cout << "Selected device: " << info.selected_device.to_string() << '\n';
-  if (info.accelerator_available) {
-    std::cout << "Accelerator: " << info.accelerator_name << '\n';
+  toyllm::CpuGenerationRequest request;
+  request.model_dir = std::filesystem::path{model_path};
+  request.prompt = prompt;
+  request.max_new_tokens = max_new_tokens;
+  request.enable_thinking = enable_thinking;
+  const auto result = toyllm::generate_cpu(request);
+  if (!result.is_ok()) {
+    std::cerr << "CPU generation failed: " << result.status().message() << '\n';
+    return EXIT_FAILURE;
   }
-  std::cout << "Prompt: " << prompt << '\n';
-  std::cout << "Inference is not implemented yet.\n";
 
+  std::cout << toyllm::format_cpu_generation_result(result.value());
   return EXIT_SUCCESS;
+}
+
+int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens,
+             bool enable_thinking) {
+  std::cout << "toyllm chat\n";
+  std::cout << "model: " << model_path.string() << '\n';
+  std::cout << "max_new_tokens: " << max_new_tokens << '\n';
+  std::cout << "type /exit to quit\n\n";
+
+  std::vector<toyllm::ChatMessage> messages;
+  std::string line;
+  while (true) {
+    std::cout << "user> ";
+    if (!std::getline(std::cin, line)) {
+      std::cout << '\n';
+      return EXIT_SUCCESS;
+    }
+    if (line == "/exit" || line == "/quit") {
+      return EXIT_SUCCESS;
+    }
+    if (line.empty()) {
+      continue;
+    }
+
+    messages.push_back(toyllm::ChatMessage{"user", line});
+
+    toyllm::CpuGenerationRequest request;
+    request.model_dir = model_path;
+    request.max_new_tokens = max_new_tokens;
+    request.enable_thinking = enable_thinking;
+    request.messages = messages;
+    const auto result = toyllm::generate_cpu(request);
+    if (!result.is_ok()) {
+      std::cout << "assistant> error: " << result.status().message() << "\n\n";
+      messages.pop_back();
+      continue;
+    }
+
+    const auto answer = result.value().text;
+    messages.push_back(toyllm::ChatMessage{"assistant", answer});
+    std::cout << "assistant>\n" << toyllm::format_cpu_generation_result(result.value()) << '\n';
+  }
 }
 
 }  // namespace
@@ -109,6 +193,16 @@ int main(int argc, char** argv) {
     return inspect_model(model_path);
   }
 
+  if (arg_equals(argv[1], "weights")) {
+    if (argc > 3) {
+      std::cerr << "weights accepts at most one model directory.\n";
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    const auto model_path = argc == 3 ? std::filesystem::path{argv[2]} : default_model_path();
+    return inspect_weights(model_path);
+  }
+
   if (arg_equals(argv[1], "doctor")) {
     if (argc > 3) {
       std::cerr << "doctor accepts at most one model directory.\n";
@@ -119,10 +213,54 @@ int main(int argc, char** argv) {
     return run_doctor(model_path);
   }
 
-  const bool explicit_run = arg_equals(argv[1], "run");
-  const int first_option = explicit_run ? 2 : 1;
+  if (arg_equals(argv[1], "chat")) {
+    std::filesystem::path model_path = default_model_path();
+    std::size_t max_new_tokens = 16;
+    bool enable_thinking = false;
+    bool model_path_set = false;
+    for (int index = 2; index < argc; ++index) {
+      if (arg_equals(argv[index], "--model") && index + 1 < argc) {
+        model_path = std::filesystem::path{argv[++index]};
+        model_path_set = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--max-new-tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--max-new-tokens must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        max_new_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--enable-thinking")) {
+        enable_thinking = true;
+        continue;
+      }
+      if (std::string_view(argv[index]).starts_with("-")) {
+        std::cerr << "Unknown chat option: " << argv[index] << '\n';
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+      }
+      if (model_path_set) {
+        std::cerr << "chat accepts at most one model directory.\n";
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+      }
+      model_path = std::filesystem::path{argv[index]};
+      model_path_set = true;
+    }
+    return run_chat(model_path, max_new_tokens, enable_thinking);
+  }
+
+  const bool explicit_generation = arg_equals(argv[1], "run") || arg_equals(argv[1], "infer");
+  const bool legacy_generation = !explicit_generation;
+  const int first_option = explicit_generation ? 2 : 1;
+  std::size_t max_new_tokens = 16;
+  bool enable_thinking = false;
   std::string model_path = std::string(kDefaultModelPath);
   std::string prompt;
+
   for (int index = first_option; index < argc; ++index) {
     if (arg_equals(argv[index], "--model") && index + 1 < argc) {
       model_path = argv[++index];
@@ -132,17 +270,30 @@ int main(int argc, char** argv) {
       prompt = argv[++index];
       continue;
     }
+    if (arg_equals(argv[index], "--max-new-tokens") && index + 1 < argc) {
+      const auto parsed = parse_size_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--max-new-tokens must be a non-negative integer.\n";
+        return EXIT_FAILURE;
+      }
+      max_new_tokens = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--enable-thinking")) {
+      enable_thinking = true;
+      continue;
+    }
 
     std::cerr << "Unknown or incomplete argument: " << argv[index] << '\n';
     print_usage(argv[0]);
     return EXIT_FAILURE;
   }
 
-  if (!explicit_run && prompt.empty()) {
+  if (legacy_generation && prompt.empty()) {
     std::cerr << "Unknown command: " << argv[1] << '\n';
     print_usage(argv[0]);
     return EXIT_FAILURE;
   }
 
-  return run_placeholder(model_path, prompt);
+  return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking);
 }

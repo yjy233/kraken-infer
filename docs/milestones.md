@@ -18,6 +18,17 @@
 - RoPE theta: `1000000`
 - Tied embeddings: `true`
 
+## Current Implementation Status
+
+- [x] M1: model structure and project introspection
+- [x] M2: safetensors mmap reader, Qwen3 weight mapping, shape validation, `weights` CLI
+- [x] M3: CPU correctness inference path, tokenizer, greedy decode, KV cache, `infer`/`run` CLI
+- [x] M4: interactive `chat` CLI with multi-turn history
+- [ ] M5: OpenAI/OpenAPI-compatible HTTP gateway
+- [ ] M6: MPS full forward path and performance optimization
+
+当前 `chat` 已能通过本地 Qwen3 0.6B 真实生成回复；CPU 实现以正确性为先，速度较慢。下面保留原始阶段拆解，后续会按网关、采样/流式、MPS 加速继续细化。
+
 ## M1: Model Structure And Project Introspection
 
 目标：让框架能识别本地模型目录，并准确读取 Qwen3 0.6B 的结构。

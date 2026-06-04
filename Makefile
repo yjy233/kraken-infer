@@ -2,6 +2,7 @@ CXX ?= clang++
 BUILD_DIR ?= build/manual
 MODEL ?= models/qwen3-0.6b
 PROMPT ?= hello
+CHAT_TOKENS ?= 16
 
 COMMON_FLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Iinclude
 DEBUG_FLAGS := -O0 -g
@@ -13,10 +14,11 @@ CORE_SRCS := \
 	src/core/status.cpp \
 	src/core/tensor.cpp \
 	src/model/model_config.cpp \
+	src/runtime/cpu_inference.cpp \
 	src/runtime/runtime.cpp \
 	src/backends/mps/mps_backend.mm
 
-.PHONY: all debug release test cli inspect doctor run mps-info clean
+.PHONY: all debug release test cli inspect weights doctor infer run chat mps-info clean
 
 all: debug
 
@@ -43,11 +45,20 @@ cli: $(BUILD_DIR)/toyllm
 inspect: $(BUILD_DIR)/toyllm
 	./$(BUILD_DIR)/toyllm inspect $(MODEL)
 
+weights: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm weights $(MODEL)
+
 doctor: $(BUILD_DIR)/toyllm
 	./$(BUILD_DIR)/toyllm doctor $(MODEL)
 
+infer: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm infer --model $(MODEL) --prompt "$(PROMPT)"
+
 run: $(BUILD_DIR)/toyllm
 	./$(BUILD_DIR)/toyllm run --model $(MODEL) --prompt "$(PROMPT)"
+
+chat: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm chat --model $(MODEL) --max-new-tokens $(CHAT_TOKENS)
 
 mps-info: $(BUILD_DIR)/toyllm
 	./$(BUILD_DIR)/toyllm mps
