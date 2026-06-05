@@ -49,6 +49,16 @@ void test_mps_backend_query() {
   }
 }
 
+void test_mps_operator_smoke() {
+  const auto info = toyllm::mps::query_backend();
+  const auto status = toyllm::mps::run_operator_smoke_test();
+  if (info.available && info.compute_ready) {
+    assert(status.is_ok());
+  } else {
+    assert(!status.is_ok());
+  }
+}
+
 void test_qwen3_model_config() {
   const std::filesystem::path model_dir{"models/qwen3-0.6b"};
   if (!std::filesystem::exists(model_dir)) {
@@ -201,6 +211,7 @@ int main() {
   test_invalid_shape();
   test_runtime_info();
   test_mps_backend_query();
+  test_mps_operator_smoke();
   test_qwen3_model_config();
   test_cpu_generation_entrypoint();
   test_weight_summary();

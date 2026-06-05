@@ -23,19 +23,23 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program << " help\n";
   std::cout << "  " << program << " version\n";
   std::cout << "  " << program << " mps\n";
+  std::cout << "  " << program << " mps-smoke\n";
   std::cout << "  " << program << " inspect [model_dir]\n";
   std::cout << "  " << program << " weights [model_dir]\n";
   std::cout << "  " << program << " doctor [model_dir]\n";
   std::cout << "  " << program
             << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
+               " [--device cpu|mps]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]\n";
   std::cout << "  " << program
             << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
+               " [--device cpu|mps]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]\n";
   std::cout << "  " << program
             << " chat [model_dir] [--max-new-tokens N] [--enable-thinking] [--dump-dir DIR]"
+               " [--device cpu|mps]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--kv-cache-stats] [--verify-kv-cache]\n\n";
   std::cout << "Compatibility flags:\n";
@@ -93,6 +97,16 @@ std::optional<double> parse_double_arg(std::string_view value) {
   }
 }
 
+std::optional<toyllm::Device> parse_device_arg(std::string_view value) {
+  if (value == "cpu") {
+    return toyllm::Device::cpu();
+  }
+  if (value == "mps" || value == "mps:0") {
+    return toyllm::Device::mps();
+  }
+  return std::nullopt;
+}
+
 int inspect_model(const std::filesystem::path& model_path) {
   auto bundle = toyllm::load_model_bundle(model_path);
   if (!bundle.is_ok()) {
@@ -107,6 +121,16 @@ int inspect_model(const std::filesystem::path& model_path) {
 int print_mps_info() {
   const auto info = toyllm::mps::query_backend();
   std::cout << toyllm::mps::format_backend_info(info);
+  return EXIT_SUCCESS;
+}
+
+int run_mps_smoke() {
+  const auto status = toyllm::mps::run_operator_smoke_test();
+  if (!status.is_ok()) {
+    std::cerr << "MPS operator smoke failed: " << status.message() << '\n';
+    return EXIT_FAILURE;
+  }
+  std::cout << "MPS operator smoke: ok\n";
   return EXIT_SUCCESS;
 }
 
@@ -125,6 +149,12 @@ int run_doctor(const std::filesystem::path& model_path) {
   std::cout << "toyllm " << kVersion << '\n';
   std::cout << "\n== MPS ==\n";
   (void)print_mps_info();
+  const auto mps_smoke = toyllm::mps::run_operator_smoke_test();
+  if (mps_smoke.is_ok()) {
+    std::cout << "MPS operator smoke: ok\n";
+  } else {
+    std::cout << "MPS operator smoke: not ready: " << mps_smoke.message() << '\n';
+  }
   std::cout << "\n== Model ==\n";
   const auto model_status = inspect_model(model_path);
   if (model_status != EXIT_SUCCESS) {
@@ -154,8 +184,8 @@ void print_kv_cache_report(const toyllm::CpuKvCacheReport& report) {
 int run_cpu_generation(const std::string& model_path, const std::string& prompt,
                        std::size_t max_new_tokens, bool enable_thinking,
                        const std::filesystem::path& debug_dump_dir, bool print_kv_cache_stats,
-                       bool verify_kv_cache, const toyllm::CpuSamplingConfig& sampling,
-                       bool stream) {
+                       bool verify_kv_cache, toyllm::Device compute_device,
+                       const toyllm::CpuSamplingConfig& sampling, bool stream) {
   if (model_path.empty() || prompt.empty()) {
     std::cerr << "generation requires --prompt and a model path.\n";
     return EXIT_FAILURE;
@@ -168,6 +198,7 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
   request.enable_thinking = enable_thinking;
   request.debug_dump_dir = debug_dump_dir;
   request.verify_kv_cache = verify_kv_cache;
+  request.compute_device = compute_device;
   request.sampling = sampling;
   if (stream) {
     request.stream_token = [](std::string_view chunk) {
@@ -177,7 +208,7 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
   }
   const auto result = toyllm::generate_cpu(request);
   if (!result.is_ok()) {
-    std::cerr << "CPU generation failed: " << result.status().message() << '\n';
+    std::cerr << "generation failed: " << result.status().message() << '\n';
     return EXIT_FAILURE;
   }
 
@@ -198,10 +229,11 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
 
 int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens,
              bool enable_thinking, const std::filesystem::path& debug_dump_dir,
-             bool print_kv_cache_stats, bool verify_kv_cache,
+             bool print_kv_cache_stats, bool verify_kv_cache, toyllm::Device compute_device,
              const toyllm::CpuSamplingConfig& sampling, bool stream) {
   std::cout << "toyllm chat\n";
   std::cout << "model: " << model_path.string() << '\n';
+  std::cout << "device: " << compute_device.to_string() << '\n';
   std::cout << "max_new_tokens: " << max_new_tokens << '\n';
   std::cout << "type /exit to quit\n\n";
 
@@ -229,6 +261,7 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
     request.messages = messages;
     request.debug_dump_dir = debug_dump_dir;
     request.verify_kv_cache = verify_kv_cache;
+    request.compute_device = compute_device;
     request.sampling = sampling;
     if (stream) {
       std::cout << "assistant>\n";
@@ -280,6 +313,10 @@ int main(int argc, char** argv) {
     return print_mps_info();
   }
 
+  if (arg_equals(argv[1], "mps-smoke")) {
+    return run_mps_smoke();
+  }
+
   if (arg_equals(argv[1], "inspect") || arg_equals(argv[1], "--inspect-model")) {
     if (argc > 3) {
       std::cerr << "inspect accepts at most one model directory.\n";
@@ -317,6 +354,7 @@ int main(int argc, char** argv) {
     bool print_kv_cache_stats = false;
     bool verify_kv_cache = false;
     bool stream = false;
+    toyllm::Device compute_device = toyllm::Device::cpu();
     toyllm::CpuSamplingConfig sampling;
     std::filesystem::path debug_dump_dir;
     bool model_path_set = false;
@@ -337,6 +375,15 @@ int main(int argc, char** argv) {
       }
       if (arg_equals(argv[index], "--enable-thinking")) {
         enable_thinking = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--device") && index + 1 < argc) {
+        const auto parsed = parse_device_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--device must be cpu or mps.\n";
+          return EXIT_FAILURE;
+        }
+        compute_device = *parsed;
         continue;
       }
       if (arg_equals(argv[index], "--sample")) {
@@ -417,7 +464,7 @@ int main(int argc, char** argv) {
       model_path_set = true;
     }
     return run_chat(model_path, max_new_tokens, enable_thinking, debug_dump_dir,
-                    print_kv_cache_stats, verify_kv_cache, sampling, stream);
+                    print_kv_cache_stats, verify_kv_cache, compute_device, sampling, stream);
   }
 
   const bool explicit_generation = arg_equals(argv[1], "run") || arg_equals(argv[1], "infer");
@@ -428,6 +475,7 @@ int main(int argc, char** argv) {
   bool print_kv_cache_stats = false;
   bool verify_kv_cache = false;
   bool stream = false;
+  toyllm::Device compute_device = toyllm::Device::cpu();
   toyllm::CpuSamplingConfig sampling;
   std::filesystem::path debug_dump_dir;
   std::string model_path = std::string(kDefaultModelPath);
@@ -453,6 +501,15 @@ int main(int argc, char** argv) {
     }
     if (arg_equals(argv[index], "--enable-thinking")) {
       enable_thinking = true;
+      continue;
+    }
+    if (arg_equals(argv[index], "--device") && index + 1 < argc) {
+      const auto parsed = parse_device_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--device must be cpu or mps.\n";
+        return EXIT_FAILURE;
+      }
+      compute_device = *parsed;
       continue;
     }
     if (arg_equals(argv[index], "--sample")) {
@@ -532,5 +589,6 @@ int main(int argc, char** argv) {
   }
 
   return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking, debug_dump_dir,
-                            print_kv_cache_stats, verify_kv_cache, sampling, stream);
+                            print_kv_cache_stats, verify_kv_cache, compute_device, sampling,
+                            stream);
 }

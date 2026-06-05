@@ -1,9 +1,11 @@
 #include "toyllm/runtime/cpu_inference.hpp"
 
+#include "toyllm/backends/mps/mps_backend.hpp"
 #include "cpu/qwen_cpu_model.hpp"
 
 #include <sstream>
 #include <stdexcept>
+#include <string>
 
 namespace toyllm {
 
@@ -33,6 +35,14 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
   if (request.max_new_tokens == 0) {
     return Status::invalid_argument("max_new_tokens must be greater than zero");
   }
+  if (request.compute_device.kind == DeviceKind::mps) {
+    const auto backend = mps::query_backend();
+    if (!backend.compute_ready) {
+      auto message = backend.failure_reason.empty() ? std::string{"MPS compute is not ready"}
+                                                    : backend.failure_reason;
+      return Status::unavailable(message);
+    }
+  }
 
   try {
     auto messages = request.messages;
@@ -48,7 +58,7 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
     const auto output =
       cpu::generate_text(request.model_dir, messages, request.max_new_tokens,
                          request.enable_thinking, request.debug_dump_dir, request.verify_kv_cache,
-                         request.sampling, request.stream_token);
+                         request.compute_device, request.sampling, request.stream_token);
     result.text = output.text;
     result.kv_cache = to_public_report(output.kv_cache);
     result.kv_cache_verified = output.kv_cache_verified;

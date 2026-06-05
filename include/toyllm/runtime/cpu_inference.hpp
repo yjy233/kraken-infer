@@ -1,5 +1,6 @@
 #pragma once
 
+#include "toyllm/core/device.hpp"
 #include "toyllm/core/status.hpp"
 
 #include <cstddef>
@@ -37,6 +38,7 @@ struct CpuGenerationRequest {
   std::vector<ChatMessage> messages;
   std::filesystem::path debug_dump_dir;
   bool verify_kv_cache{false};
+  Device compute_device{Device::cpu()};
   CpuSamplingConfig sampling;
   std::function<void(std::string_view)> stream_token;
 };

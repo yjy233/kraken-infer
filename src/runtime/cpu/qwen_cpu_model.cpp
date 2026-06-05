@@ -5,6 +5,7 @@
 #include "safetensors.hpp"
 #include "tokenizer.hpp"
 #include "tokens.hpp"
+#include "toyllm/backends/mps/mps_backend.hpp"
 #include "toyllm/model/model_config.hpp"
 
 #include <algorithm>
@@ -109,12 +110,20 @@ class CpuQwenModel {
 
   CpuModelOutput generate(const std::vector<ChatMessage>& messages, std::size_t max_new_tokens,
                           bool enable_thinking, const std::filesystem::path& debug_dump_dir,
-                          bool verify_kv_cache, const CpuSamplingConfig& sampling,
+                          bool verify_kv_cache, Device compute_device,
+                          const CpuSamplingConfig& sampling,
                           const std::function<void(std::string_view)>& stream_token) {
     DebugDumper dumper(debug_dump_dir);
     DumperScope dumper_scope(dumper_, dumper.enabled() ? &dumper : nullptr);
     const auto effective_sampling = make_effective_sampling(generation_, sampling);
     std::mt19937_64 rng(effective_sampling.seed);
+    const bool use_mps_lm_head = compute_device.kind == DeviceKind::mps;
+    if (use_mps_lm_head) {
+      if (compute_device.index != 0) {
+        throw std::runtime_error("only mps:0 is supported");
+      }
+      prepare_mps_lm_head();
+    }
 
     const auto prompt_tokens = tokenizer_.encode_chat_messages(messages, enable_thinking);
     if (prompt_tokens.empty()) {
@@ -135,7 +144,7 @@ class CpuQwenModel {
     std::vector<std::int64_t> generated;
     generated.reserve(max_new_tokens);
     for (std::size_t step = 0; step < max_new_tokens; ++step) {
-      const auto logits = compute_logits(hidden);
+      const auto logits = compute_logits(hidden, use_mps_lm_head);
       dump_f32(position_tensor_name(position - 1U, "logits"),
                {static_cast<std::uint64_t>(config_.vocab_size)}, logits);
       const auto next_token = select_next_token(logits, rng, effective_sampling);
@@ -155,7 +164,8 @@ class CpuQwenModel {
     bool verified = false;
     if (verify_kv_cache) {
       const auto recomputed =
-        generate_recomputed_tokens(prompt_tokens, max_new_tokens, effective_sampling);
+        generate_recomputed_tokens(prompt_tokens, max_new_tokens, effective_sampling,
+                                   use_mps_lm_head);
       if (recomputed != generated) {
         throw std::runtime_error("KV cache verification failed: cached decode differs from "
                                  "full-prefix recompute");
@@ -175,7 +185,7 @@ class CpuQwenModel {
 
   std::vector<std::int64_t> generate_recomputed_tokens(
     const std::vector<std::int64_t>& prompt_tokens, std::size_t max_new_tokens,
-    const EffectiveSamplingConfig& sampling) {
+    const EffectiveSamplingConfig& sampling, bool use_mps_lm_head) {
     DumperScope disable_dump(dumper_, nullptr);
     std::mt19937_64 rng(sampling.seed);
     std::vector<std::int64_t> tokens = prompt_tokens;
@@ -188,7 +198,7 @@ class CpuQwenModel {
       for (std::size_t position = 0; position < tokens.size(); ++position) {
         hidden = forward_token(tokens[position], position);
       }
-      const auto logits = compute_logits(hidden);
+      const auto logits = compute_logits(hidden, use_mps_lm_head);
       const auto next_token = select_next_token(logits, rng, sampling);
       if (is_eos(next_token)) {
         break;
@@ -219,6 +229,32 @@ class CpuQwenModel {
       layer.up_proj = weights_.at(prefix + "mlp.up_proj.weight");
       layer.down_proj = weights_.at(prefix + "mlp.down_proj.weight");
     }
+  }
+
+  void prepare_mps_lm_head() {
+    if (mps_lm_head_ready_) {
+      return;
+    }
+    auto context_result = mps::MpsContext::create();
+    if (!context_result.is_ok()) {
+      throw std::runtime_error("MPS initialization failed: " +
+                               context_result.status().message());
+    }
+    auto context = std::move(context_result.value());
+    auto buffer_result = context.make_buffer(static_cast<std::size_t>(lm_head_.byte_size));
+    if (!buffer_result.is_ok()) {
+      throw std::runtime_error("MPS lm_head allocation failed: " +
+                               buffer_result.status().message());
+    }
+    auto buffer = std::move(buffer_result.value());
+    const auto copy_status =
+      context.copy_to_buffer(buffer, lm_head_.data, static_cast<std::size_t>(lm_head_.byte_size));
+    if (!copy_status.is_ok()) {
+      throw std::runtime_error("MPS lm_head upload failed: " + copy_status.message());
+    }
+    mps_context_ = std::make_unique<mps::MpsContext>(std::move(context));
+    mps_lm_head_ = std::move(buffer);
+    mps_lm_head_ready_ = true;
   }
 
   std::vector<float> forward_token(std::int64_t token, std::size_t position) {
@@ -428,7 +464,11 @@ class CpuQwenModel {
     }
   }
 
-  std::vector<float> compute_logits(const std::vector<float>& hidden) const {
+  std::vector<float> compute_logits(const std::vector<float>& hidden,
+                                    bool use_mps_lm_head) const {
+    if (use_mps_lm_head) {
+      return compute_logits_mps(hidden);
+    }
     const auto vocab = static_cast<std::size_t>(config_.vocab_size);
     const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
     std::vector<float> logits(vocab);
@@ -441,6 +481,21 @@ class CpuQwenModel {
       logits[row] = logit;
     }
     return logits;
+  }
+
+  std::vector<float> compute_logits_mps(const std::vector<float>& hidden) const {
+    if (mps_context_ == nullptr || !mps_lm_head_.valid()) {
+      throw std::runtime_error("MPS lm_head is not initialized");
+    }
+    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+    const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
+    const auto logits_result =
+      mps_context_->matvec_bf16_f32(mps_lm_head_, vocab, hidden_size, hidden);
+    if (!logits_result.is_ok()) {
+      throw std::runtime_error("MPS lm_head matvec failed: " +
+                               logits_result.status().message());
+    }
+    return logits_result.value();
   }
 
   static std::int64_t select_greedy_token(const std::vector<float>& logits) {
@@ -558,6 +613,9 @@ class CpuQwenModel {
   std::vector<LayerWeights> layers_;
   KvCache kv_cache_;
   DebugDumper* dumper_{nullptr};
+  std::unique_ptr<mps::MpsContext> mps_context_;
+  mps::MpsBuffer mps_lm_head_;
+  bool mps_lm_head_ready_{false};
 };
 
 CpuQwenModel& cached_model(const std::filesystem::path& model_dir) {
@@ -635,11 +693,12 @@ CpuModelOutput generate_text(const std::filesystem::path& model_dir,
                              const std::vector<ChatMessage>& messages,
                              std::size_t max_new_tokens, bool enable_thinking,
                              const std::filesystem::path& debug_dump_dir,
-                             bool verify_kv_cache, const CpuSamplingConfig& sampling,
+                             bool verify_kv_cache, Device compute_device,
+                             const CpuSamplingConfig& sampling,
                              const std::function<void(std::string_view)>& stream_token) {
   return cached_model(model_dir)
-    .generate(messages, max_new_tokens, enable_thinking, debug_dump_dir, verify_kv_cache, sampling,
-              stream_token);
+    .generate(messages, max_new_tokens, enable_thinking, debug_dump_dir, verify_kv_cache,
+              compute_device, sampling, stream_token);
 }
 
 std::string build_weight_summary(const std::filesystem::path& model_dir) {

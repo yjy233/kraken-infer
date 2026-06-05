@@ -25,10 +25,12 @@
 - [x] M3: CPU correctness inference path, tokenizer, greedy decode, KV cache, `infer`/`run` CLI
 - [x] M4: interactive `chat` CLI with multi-turn history
 - [x] M5: basic CPU KV cache abstraction, bounds checks, stats
-- [ ] M6: OpenAI/OpenAPI-compatible HTTP gateway
-- [ ] M7: MPS full forward path and performance optimization
+- [x] M6: sampling and streaming CLI
+- [x] M7: MPS backend bring-up and MPS-assisted `lm_head` logits
+- [ ] M8: MPS full forward path, KV cache, and performance optimization
+- [ ] M9: OpenAI/OpenAPI-compatible HTTP gateway
 
-当前 `chat` 已能通过本地 Qwen3 0.6B 真实生成回复；CPU 实现以正确性为先，速度较慢。下面保留原始阶段拆解，后续会按网关、采样/流式、MPS 加速继续细化。
+当前 `chat` 已能通过本地 Qwen3 0.6B 真实生成回复；CPU path 已支持 KV cache、采样和流式输出。MPS path 已完成 Metal buffer/kernel bring-up，并可把 `lm_head` logits matvec 放到 MPS 执行；完整 attention/MLP/KV cache 迁移继续放在 M8。
 
 ## M1: Model Structure And Project Introspection
 
@@ -176,7 +178,7 @@
   - `--top-k`
   - `--top-p`
   - `--seed`
-  - `--device`
+  - `--sample`
   - `--stream`
 - 实现采样：
   - greedy
@@ -190,42 +192,46 @@
 
 - 能在 CPU 路径生成完整文本
 - 固定 seed 输出可复现
-- 可打印 prefill latency、decode latency、tokens/s
 - eos token 出现时正确停止
+- stream 模式每生成一个 token 立即输出并 flush
+- chat stream 仍保留多轮 history
 
 ## M7: MPS Backend Bring-up
 
-目标：把主要计算迁移到 macOS MPS/Metal 后端。
+目标：建立可测试的 macOS MPS/Metal 计算基础，并先把 `lm_head` logits matvec 接入真实生成路径。
 
 功能范围：
 
 - 建立 MPS memory buffer 抽象
 - 实现 host/device 拷贝
-- 实现或封装 MPS matmul
-- 优先迁移最重算子：
-  - linear projection
-  - Q/K/V projection
-  - attention score matmul
-  - attention value matmul
-  - MLP projection
+- 编译并执行 Metal compute kernel
+- 实现 BF16 weight + F32 activation matvec
+- 上传 `lm_head.weight` 到 MPS buffer，并跨请求复用
+- CLI 支持 `--device cpu|mps`
+- MPS 模式先接管 `lm_head` logits matvec
 - CPU 保留为 reference backend
-- Runtime 支持 backend dispatch
+- MPS 不可用时明确报错，不静默 fallback
 
 验收标准：
 
-- MPS backend 能完成至少一层 forward
-- MPS 单算子输出与 CPU reference 对齐
-- 完整模型能在 MPS 路径生成文本
-- CLI `--device mps` 可用
+- `mps-smoke` 能验证 Metal BF16 matvec kernel
+- CPU 默认路径保持不变
+- `infer/run/chat --device mps` 在有 Metal device 时使用 MPS-assisted logits
+- MPS 不可用时返回明确错误
+- 完整模型仍以 CPU attention/MLP/KV cache 为 reference
 
-## M8: KV Cache And MPS Performance Optimization
+## M8: MPS Full Forward And Performance Optimization
 
-目标：优化 decode 性能，使 Qwen3 0.6B 在 Apple Silicon 上具备可交互速度。
+目标：把 attention、MLP、KV cache 等主要计算迁移到 MPS，使 Qwen3 0.6B 在 Apple Silicon 上具备可交互速度。
 
 功能范围：
 
 - KV cache 预分配，避免 decode 时动态分配
 - cache layout 调整为 MPS-friendly contiguous layout
+- safetensors tensor 上传到 MPS buffer，权重跨请求复用
+- 单算子对齐：embedding、RMSNorm、RoPE、linear、attention、MLP、lm head
+- 单层输出与 CPU reference 对齐
+- 全模型首 token 与 CPU greedy 对齐
 - 减少 CPU/GPU 同步点
 - 减少中间 tensor 分配
 - 融合小算子：
@@ -354,8 +360,8 @@
 4. M4 CPU full forward
 5. M5 KV cache
 6. M6 sampling and CLI
-7. M7 MPS backend
-8. M8 performance optimization
+7. M7 MPS backend bring-up
+8. M8 MPS full forward and performance optimization
 9. M9 inference gateway and OpenAPI protocol
 
 关键原则：

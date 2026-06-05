@@ -14,10 +14,14 @@
 - Decode 阶段 KV cache
 - CPU debug dump：可导出 token ids、每层中间 tensor、final norm、logits
 - CPU KV cache：独立 cache abstraction、capacity 校验、CLI stats
+- CPU sampling：支持 greedy、temperature、top-k、top-p、seed 可复现采样
+- CPU streaming：`infer`、`run`、`chat` 支持 token 级流式输出
+- MPS bring-up：Metal device/context/buffer、BF16 matvec kernel、operator smoke test
+- MPS-assisted logits：`--device mps` 可将 `lm_head` logits matvec 放到 Metal 上执行
 - CLI：`inspect`、`weights`、`doctor`、`infer`、`run`、`chat`
 - CTest smoke test
 
-当前 CPU 推理是正确性优先的朴素实现，速度较慢；采样仍为 greedy，MPS 计算路径尚未接入完整 forward。
+当前 CPU 推理是正确性优先的朴素实现，速度较慢；MPS 已接入 `lm_head` logits matvec，但 attention、MLP、KV cache 尚未迁移到完整 MPS forward。
 
 ## 构建
 
@@ -74,16 +78,21 @@ Makefile 兜底构建后也可以检查模型结构：
 ```bash
 ./build/manual/toyllm help
 ./build/manual/toyllm mps
+./build/manual/toyllm mps-smoke
 ./build/manual/toyllm inspect
 ./build/manual/toyllm weights
 ./build/manual/toyllm doctor
 ./build/manual/toyllm infer --prompt "hello"
+./build/manual/toyllm infer --prompt "hello" --max-new-tokens 1 --device mps
 ./build/manual/toyllm infer --prompt "hello" --max-new-tokens 8
+./build/manual/toyllm infer --prompt "hello" --max-new-tokens 8 --sample --temperature 0.6 --top-k 20 --top-p 0.95 --seed 42
+./build/manual/toyllm infer --prompt "hello" --max-new-tokens 8 --stream
 ./build/manual/toyllm infer --prompt "hello" --max-new-tokens 8 --kv-cache-stats
 ./build/manual/toyllm infer --prompt "hello" --max-new-tokens 1 --verify-kv-cache
 ./build/manual/toyllm infer --prompt "hello" --max-new-tokens 1 --dump-dir build/debug-dump
 ./build/manual/toyllm run --prompt "hello"
 ./build/manual/toyllm chat --max-new-tokens 16
+./build/manual/toyllm chat --max-new-tokens 16 --stream --sample --seed 42
 ```
 
 Transformers/PyTorch logits 对齐：
@@ -131,9 +140,10 @@ tests/                smoke tests
 3. tokenizer、chat prompt formatting、CPU correctness path、KV cache。
 4. CLI 推理和交互式 chat。
 5. Basic KV cache：独立 cache abstraction、capacity 校验、stats。
-6. OpenAI/OpenAPI-compatible gateway。
-7. MPS path：逐步迁移 matmul、RMSNorm、RoPE、attention/KV cache、sampling。
-8. sampling/streaming/perf：top-k、top-p、temperature、流式输出、tokens/s 指标。
+6. Sampling and streaming CLI：top-k、top-p、temperature、seed、流式输出。
+7. MPS backend bring-up：Metal buffer、BF16 matvec、`lm_head` logits MPS-assisted path。
+8. MPS full forward：逐步迁移 RMSNorm、RoPE、attention/KV cache、MLP、sampling。
+9. OpenAI/OpenAPI-compatible gateway。
 
 ## 设计原则
 
