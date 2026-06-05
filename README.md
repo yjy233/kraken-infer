@@ -12,6 +12,8 @@
 - Qwen/Qwen3 byte-level BPE tokenizer，支持 chat template 需要的 added tokens
 - CPU correctness path：embedding、RMSNorm、Q/K norm、RoPE、GQA attention、MLP、lm head
 - Decode 阶段 KV cache
+- CPU debug dump：可导出 token ids、每层中间 tensor、final norm、logits
+- CPU KV cache：独立 cache abstraction、capacity 校验、CLI stats
 - CLI：`inspect`、`weights`、`doctor`、`infer`、`run`、`chat`
 - CTest smoke test
 
@@ -77,9 +79,21 @@ Makefile 兜底构建后也可以检查模型结构：
 ./build/manual/toyllm doctor
 ./build/manual/toyllm infer --prompt "hello"
 ./build/manual/toyllm infer --prompt "hello" --max-new-tokens 8
+./build/manual/toyllm infer --prompt "hello" --max-new-tokens 8 --kv-cache-stats
+./build/manual/toyllm infer --prompt "hello" --max-new-tokens 1 --verify-kv-cache
+./build/manual/toyllm infer --prompt "hello" --max-new-tokens 1 --dump-dir build/debug-dump
 ./build/manual/toyllm run --prompt "hello"
 ./build/manual/toyllm chat --max-new-tokens 16
 ```
+
+Transformers/PyTorch logits 对齐：
+
+```bash
+python3 scripts/compare_cpu_transformers.py --prompt "hello"
+make compare-transformers
+```
+
+脚本会先运行 C++ `infer --dump-dir`，读取 C++ dump 中的 prompt token ids 和 logits，再用同一组 token ids 调 Hugging Face Transformers 对齐首个 next-token logits。
 
 ## 模型
 
@@ -104,7 +118,8 @@ docs/                 架构和路线文档
 include/toyllm/       公共头文件
 models/qwen3-0.6b/    本地模型文件占位目录
 src/core/             基础类型和工具
-src/runtime/          runtime 编排
+src/runtime/          runtime 编排和 public inference wrapper
+src/runtime/cpu/      CPU tokenizer、safetensors、Qwen forward、KV cache
 src/backends/mps/     macOS Metal/MPS backend
 tests/                smoke tests
 ```
@@ -115,9 +130,10 @@ tests/                smoke tests
 2. safetensors mmap 权重读取和 Qwen3 权重绑定。
 3. tokenizer、chat prompt formatting、CPU correctness path、KV cache。
 4. CLI 推理和交互式 chat。
-5. OpenAI/OpenAPI-compatible gateway。
-6. MPS path：逐步迁移 matmul、RMSNorm、RoPE、attention/KV cache、sampling。
-7. sampling/streaming/perf：top-k、top-p、temperature、流式输出、tokens/s 指标。
+5. Basic KV cache：独立 cache abstraction、capacity 校验、stats。
+6. OpenAI/OpenAPI-compatible gateway。
+7. MPS path：逐步迁移 matmul、RMSNorm、RoPE、attention/KV cache、sampling。
+8. sampling/streaming/perf：top-k、top-p、temperature、流式输出、tokens/s 指标。
 
 ## 设计原则
 

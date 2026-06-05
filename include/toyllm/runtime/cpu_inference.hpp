@@ -2,8 +2,12 @@
 
 #include "toyllm/core/status.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace toyllm {
@@ -13,18 +17,49 @@ struct ChatMessage {
   std::string content;
 };
 
+struct CpuSamplingConfig {
+  bool do_sample{false};
+  bool temperature_set{false};
+  bool top_k_set{false};
+  bool top_p_set{false};
+  bool seed_set{false};
+  double temperature{1.0};
+  std::size_t top_k{0};
+  double top_p{1.0};
+  std::uint64_t seed{0};
+};
+
 struct CpuGenerationRequest {
   std::filesystem::path model_dir{"models/qwen3-0.6b"};
   std::string prompt;
   std::size_t max_new_tokens{16};
   bool enable_thinking{false};
   std::vector<ChatMessage> messages;
+  std::filesystem::path debug_dump_dir;
+  bool verify_kv_cache{false};
+  CpuSamplingConfig sampling;
+  std::function<void(std::string_view)> stream_token;
+};
+
+struct CpuKvCacheReport {
+  bool available{false};
+  std::size_t layers{0};
+  std::size_t kv_heads{0};
+  std::size_t head_dim{0};
+  std::size_t kv_dim{0};
+  std::size_t capacity_tokens{0};
+  std::size_t used_tokens{0};
+  std::uint64_t key_bytes{0};
+  std::uint64_t value_bytes{0};
+  std::uint64_t total_bytes{0};
 };
 
 struct CpuGenerationResult {
   bool implemented{false};
   std::string text;
   std::vector<std::string> missing_dependencies;
+  CpuKvCacheReport kv_cache;
+  bool kv_cache_verified{false};
 };
 
 [[nodiscard]] Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request);

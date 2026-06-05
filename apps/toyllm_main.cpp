@@ -2,6 +2,7 @@
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -26,11 +27,17 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program << " weights [model_dir]\n";
   std::cout << "  " << program << " doctor [model_dir]\n";
   std::cout << "  " << program
-            << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]\n";
+            << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
+               " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
+               " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]\n";
   std::cout << "  " << program
-            << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]\n";
+            << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
+               " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
+               " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]\n";
   std::cout << "  " << program
-            << " chat [model_dir] [--max-new-tokens N] [--enable-thinking]\n\n";
+            << " chat [model_dir] [--max-new-tokens N] [--enable-thinking] [--dump-dir DIR]"
+               " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
+               " [--stream] [--kv-cache-stats] [--verify-kv-cache]\n\n";
   std::cout << "Compatibility flags:\n";
   std::cout << "  " << program << " --mps-info\n";
   std::cout << "  " << program << " --inspect-model <model_dir>\n";
@@ -55,6 +62,32 @@ std::optional<std::size_t> parse_size_arg(std::string_view value) {
       return std::nullopt;
     }
     return static_cast<std::size_t>(parsed);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+std::optional<std::uint64_t> parse_u64_arg(std::string_view value) {
+  try {
+    std::size_t parsed_chars = 0;
+    const auto parsed = std::stoull(std::string(value), &parsed_chars, 10);
+    if (parsed_chars != value.size()) {
+      return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(parsed);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+std::optional<double> parse_double_arg(std::string_view value) {
+  try {
+    std::size_t parsed_chars = 0;
+    const auto parsed = std::stod(std::string(value), &parsed_chars);
+    if (parsed_chars != value.size()) {
+      return std::nullopt;
+    }
+    return parsed;
   } catch (const std::exception&) {
     return std::nullopt;
   }
@@ -101,8 +134,28 @@ int run_doctor(const std::filesystem::path& model_path) {
   return inspect_weights(model_path);
 }
 
+void print_kv_cache_report(const toyllm::CpuKvCacheReport& report) {
+  if (!report.available) {
+    return;
+  }
+
+  std::cout << "KV cache:\n";
+  std::cout << "- layers: " << report.layers << '\n';
+  std::cout << "- kv_heads: " << report.kv_heads << '\n';
+  std::cout << "- head_dim: " << report.head_dim << '\n';
+  std::cout << "- kv_dim: " << report.kv_dim << '\n';
+  std::cout << "- capacity_tokens: " << report.capacity_tokens << '\n';
+  std::cout << "- used_tokens: " << report.used_tokens << '\n';
+  std::cout << "- key_bytes: " << report.key_bytes << '\n';
+  std::cout << "- value_bytes: " << report.value_bytes << '\n';
+  std::cout << "- total_bytes: " << report.total_bytes << '\n';
+}
+
 int run_cpu_generation(const std::string& model_path, const std::string& prompt,
-                       std::size_t max_new_tokens, bool enable_thinking) {
+                       std::size_t max_new_tokens, bool enable_thinking,
+                       const std::filesystem::path& debug_dump_dir, bool print_kv_cache_stats,
+                       bool verify_kv_cache, const toyllm::CpuSamplingConfig& sampling,
+                       bool stream) {
   if (model_path.empty() || prompt.empty()) {
     std::cerr << "generation requires --prompt and a model path.\n";
     return EXIT_FAILURE;
@@ -113,18 +166,40 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
   request.prompt = prompt;
   request.max_new_tokens = max_new_tokens;
   request.enable_thinking = enable_thinking;
+  request.debug_dump_dir = debug_dump_dir;
+  request.verify_kv_cache = verify_kv_cache;
+  request.sampling = sampling;
+  if (stream) {
+    request.stream_token = [](std::string_view chunk) {
+      std::cout << chunk;
+      std::cout.flush();
+    };
+  }
   const auto result = toyllm::generate_cpu(request);
   if (!result.is_ok()) {
     std::cerr << "CPU generation failed: " << result.status().message() << '\n';
     return EXIT_FAILURE;
   }
 
-  std::cout << toyllm::format_cpu_generation_result(result.value());
+  if (stream) {
+    std::cout << '\n';
+  } else {
+    std::cout << toyllm::format_cpu_generation_result(result.value());
+  }
+  if (print_kv_cache_stats) {
+    print_kv_cache_report(result.value().kv_cache);
+  }
+  if (verify_kv_cache) {
+    std::cout << "KV cache verification: "
+              << (result.value().kv_cache_verified ? "ok" : "not run") << '\n';
+  }
   return EXIT_SUCCESS;
 }
 
 int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens,
-             bool enable_thinking) {
+             bool enable_thinking, const std::filesystem::path& debug_dump_dir,
+             bool print_kv_cache_stats, bool verify_kv_cache,
+             const toyllm::CpuSamplingConfig& sampling, bool stream) {
   std::cout << "toyllm chat\n";
   std::cout << "model: " << model_path.string() << '\n';
   std::cout << "max_new_tokens: " << max_new_tokens << '\n';
@@ -152,6 +227,16 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
     request.max_new_tokens = max_new_tokens;
     request.enable_thinking = enable_thinking;
     request.messages = messages;
+    request.debug_dump_dir = debug_dump_dir;
+    request.verify_kv_cache = verify_kv_cache;
+    request.sampling = sampling;
+    if (stream) {
+      std::cout << "assistant>\n";
+      request.stream_token = [](std::string_view chunk) {
+        std::cout << chunk;
+        std::cout.flush();
+      };
+    }
     const auto result = toyllm::generate_cpu(request);
     if (!result.is_ok()) {
       std::cout << "assistant> error: " << result.status().message() << "\n\n";
@@ -161,7 +246,19 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
 
     const auto answer = result.value().text;
     messages.push_back(toyllm::ChatMessage{"assistant", answer});
-    std::cout << "assistant>\n" << toyllm::format_cpu_generation_result(result.value()) << '\n';
+    if (stream) {
+      std::cout << "\n\n";
+    } else {
+      std::cout << "assistant>\n" << toyllm::format_cpu_generation_result(result.value()) << '\n';
+    }
+    if (print_kv_cache_stats) {
+      print_kv_cache_report(result.value().kv_cache);
+      std::cout << '\n';
+    }
+    if (verify_kv_cache) {
+      std::cout << "KV cache verification: "
+                << (result.value().kv_cache_verified ? "ok" : "not run") << "\n\n";
+    }
   }
 }
 
@@ -217,6 +314,11 @@ int main(int argc, char** argv) {
     std::filesystem::path model_path = default_model_path();
     std::size_t max_new_tokens = 16;
     bool enable_thinking = false;
+    bool print_kv_cache_stats = false;
+    bool verify_kv_cache = false;
+    bool stream = false;
+    toyllm::CpuSamplingConfig sampling;
+    std::filesystem::path debug_dump_dir;
     bool model_path_set = false;
     for (int index = 2; index < argc; ++index) {
       if (arg_equals(argv[index], "--model") && index + 1 < argc) {
@@ -237,6 +339,70 @@ int main(int argc, char** argv) {
         enable_thinking = true;
         continue;
       }
+      if (arg_equals(argv[index], "--sample")) {
+        sampling.do_sample = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--temperature") && index + 1 < argc) {
+        const auto parsed = parse_double_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--temperature must be a number.\n";
+          return EXIT_FAILURE;
+        }
+        sampling.do_sample = true;
+        sampling.temperature_set = true;
+        sampling.temperature = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--top-k") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--top-k must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        sampling.do_sample = true;
+        sampling.top_k_set = true;
+        sampling.top_k = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--top-p") && index + 1 < argc) {
+        const auto parsed = parse_double_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--top-p must be a number.\n";
+          return EXIT_FAILURE;
+        }
+        sampling.do_sample = true;
+        sampling.top_p_set = true;
+        sampling.top_p = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--seed") && index + 1 < argc) {
+        const auto parsed = parse_u64_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--seed must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        sampling.do_sample = true;
+        sampling.seed_set = true;
+        sampling.seed = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--stream")) {
+        stream = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--dump-dir") && index + 1 < argc) {
+        debug_dump_dir = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--kv-cache-stats")) {
+        print_kv_cache_stats = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--verify-kv-cache")) {
+        verify_kv_cache = true;
+        continue;
+      }
       if (std::string_view(argv[index]).starts_with("-")) {
         std::cerr << "Unknown chat option: " << argv[index] << '\n';
         print_usage(argv[0]);
@@ -250,7 +416,8 @@ int main(int argc, char** argv) {
       model_path = std::filesystem::path{argv[index]};
       model_path_set = true;
     }
-    return run_chat(model_path, max_new_tokens, enable_thinking);
+    return run_chat(model_path, max_new_tokens, enable_thinking, debug_dump_dir,
+                    print_kv_cache_stats, verify_kv_cache, sampling, stream);
   }
 
   const bool explicit_generation = arg_equals(argv[1], "run") || arg_equals(argv[1], "infer");
@@ -258,6 +425,11 @@ int main(int argc, char** argv) {
   const int first_option = explicit_generation ? 2 : 1;
   std::size_t max_new_tokens = 16;
   bool enable_thinking = false;
+  bool print_kv_cache_stats = false;
+  bool verify_kv_cache = false;
+  bool stream = false;
+  toyllm::CpuSamplingConfig sampling;
+  std::filesystem::path debug_dump_dir;
   std::string model_path = std::string(kDefaultModelPath);
   std::string prompt;
 
@@ -283,6 +455,70 @@ int main(int argc, char** argv) {
       enable_thinking = true;
       continue;
     }
+    if (arg_equals(argv[index], "--sample")) {
+      sampling.do_sample = true;
+      continue;
+    }
+    if (arg_equals(argv[index], "--temperature") && index + 1 < argc) {
+      const auto parsed = parse_double_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--temperature must be a number.\n";
+        return EXIT_FAILURE;
+      }
+      sampling.do_sample = true;
+      sampling.temperature_set = true;
+      sampling.temperature = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--top-k") && index + 1 < argc) {
+      const auto parsed = parse_size_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--top-k must be a non-negative integer.\n";
+        return EXIT_FAILURE;
+      }
+      sampling.do_sample = true;
+      sampling.top_k_set = true;
+      sampling.top_k = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--top-p") && index + 1 < argc) {
+      const auto parsed = parse_double_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--top-p must be a number.\n";
+        return EXIT_FAILURE;
+      }
+      sampling.do_sample = true;
+      sampling.top_p_set = true;
+      sampling.top_p = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--seed") && index + 1 < argc) {
+      const auto parsed = parse_u64_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--seed must be a non-negative integer.\n";
+        return EXIT_FAILURE;
+      }
+      sampling.do_sample = true;
+      sampling.seed_set = true;
+      sampling.seed = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--stream")) {
+      stream = true;
+      continue;
+    }
+    if (arg_equals(argv[index], "--dump-dir") && index + 1 < argc) {
+      debug_dump_dir = std::filesystem::path{argv[++index]};
+      continue;
+    }
+    if (arg_equals(argv[index], "--kv-cache-stats")) {
+      print_kv_cache_stats = true;
+      continue;
+    }
+    if (arg_equals(argv[index], "--verify-kv-cache")) {
+      verify_kv_cache = true;
+      continue;
+    }
 
     std::cerr << "Unknown or incomplete argument: " << argv[index] << '\n';
     print_usage(argv[0]);
@@ -295,5 +531,6 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking);
+  return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking, debug_dump_dir,
+                            print_kv_cache_stats, verify_kv_cache, sampling, stream);
 }

@@ -5,7 +5,10 @@ compile_commands.json
 .DS_Store
 .cache/
 .idea/
-.vscode/
+.vscode/*
+!.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
 
 models/**/*
 !models/README.md

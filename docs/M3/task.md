@@ -56,6 +56,10 @@ models/qwen3-0.6b/
 - [x] final norm
 - [x] lm head logits
 - [x] greedy next-token selection
+- [x] 单层和中间 tensor dump
+- [x] prompt token ids dump
+- [x] final norm dump
+- [x] logits dump
 
 ### KV Cache
 
@@ -73,7 +77,16 @@ models/qwen3-0.6b/
 - [x] 支持 `--model <model_dir>`
 - [x] 支持 `--max-new-tokens N`
 - [x] 支持 `--enable-thinking`
+- [x] 支持 `--dump-dir DIR`
 - [x] 保留 `inspect`、`doctor`、`mps` 行为
+
+### Correctness Alignment
+
+- [x] 提供 `scripts/compare_cpu_transformers.py`
+- [x] 对齐脚本读取 C++ dump 中的 prompt token ids
+- [x] 对齐脚本用同一组 token ids 调 Hugging Face Transformers
+- [x] 对齐脚本比较首个 next-token logits
+- [x] 输出 top token、max abs diff、mean abs diff
 
 ### Tests
 
@@ -89,6 +102,8 @@ models/qwen3-0.6b/
 - [x] KV cache decode 能继续生成 token
 - [x] CLI `infer` 返回真实模型输出
 - [x] 构建无严格编译 warning
+- [x] 能通过 `--dump-dir` 导出单层和中间 tensor
+- [x] 提供 Transformers/PyTorch logits 对齐脚本
 
 ## Known Limitations
 
@@ -96,3 +111,4 @@ models/qwen3-0.6b/
 - [ ] 当前实现没有流式 token 输出
 - [ ] 当前 CPU matvec 未优化，速度较慢
 - [ ] 当前 MPS backend 仅完成设备探测，尚未接入完整 forward
+- [ ] Transformers/PyTorch 对齐脚本依赖本机安装 `torch`、`transformers`、`numpy`

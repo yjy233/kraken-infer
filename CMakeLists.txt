@@ -28,6 +28,12 @@ target_sources(
     src/core/status.cpp
     src/core/tensor.cpp
     src/model/model_config.cpp
+    src/runtime/cpu/debug_dump.cpp
+    src/runtime/cpu/json_scanner.cpp
+    src/runtime/cpu/kv_cache.cpp
+    src/runtime/cpu/qwen_cpu_model.cpp
+    src/runtime/cpu/safetensors.cpp
+    src/runtime/cpu/tokenizer.cpp
     src/runtime/cpu_inference.cpp
     src/runtime/runtime.cpp
 )
