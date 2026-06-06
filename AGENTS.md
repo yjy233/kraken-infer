@@ -7,10 +7,10 @@ This is a C++20 toy LLM runtime focused on macOS Metal/MPS experiments. Public h
 ## Build, Test, and Development Commands
 
 - `cmake --preset debug`: configure a Debug build in `build/debug` with tests enabled.
-- `cmake --build --preset debug`: build `toyllm`, `toyllm_core`, and the smoke test.
+- `cmake --build --preset debug`: build `kraken-infer`, `kraken_infer_core`, and the smoke test.
 - `ctest --preset debug`: run CTest with failure output.
 - `cmake --preset release && cmake --build --preset release`: produce an optimized Release build.
-- `./build/debug/toyllm --mps-info`: inspect local Metal/MPS availability.
+- `./build/debug/kraken-infer --mps-info`: inspect local Metal/MPS availability.
 - `make test` and `make mps-info`: fallback commands using macOS `clang++` when CMake is unavailable.
 
 ## Coding Style & Naming Conventions

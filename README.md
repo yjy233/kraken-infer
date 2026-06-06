@@ -1,41 +1,48 @@
-# toy_llm_interface
+# kraken-infer
 
-一个从零实现的 C++20 toy LLM runtime，当前目标模型是本地
-`Qwen/Qwen3-0.6B`。项目已经跑通 CPU reference inference、Apple
-Silicon Metal/MPS full-forward、KV cache、sampling/streaming CLI，以及
-OpenAI-compatible HTTP gateway。
+<p align="center">
+  <img src="docs/assets/kraken-logo.svg" alt="kraken-infer logo" width="180">
+</p>
 
-![Current architecture](docs/assets/current-architecture.svg)
+`kraken-infer` 是一个 C++20 本地 LLM inference runtime，当前目标模型是
+`Qwen/Qwen3-0.6B`。项目已经具备从模型目录检查、权重解析、CPU reference
+forward、Apple Silicon Metal/MPS forward、KV cache decode、采样、streaming CLI，
+到 OpenAI-compatible HTTP gateway 和浏览器对话页的一条完整本地推理链路。
 
-## Current Status
+核心定位：
 
-M1 到 M9 已完成：
+- 不依赖现成 LLM runtime，关键推理链路自己实现。
+- CPU path 作为 correctness reference。
+- MPS path 逐算子对齐 CPU，再做后续性能优化。
+- 公共 C++ 头文件保持平台无关，Apple API 隔离在 Objective-C++ `.mm` 文件。
 
-- Model/config/tokenizer：读取 Qwen3 `config.json`、`generation_config.json`、
-  `tokenizer.json`，支持 Qwen chat prompt formatting。
-- Weights：只读 mmap 解析 `model.safetensors`，按 Qwen3 权重名绑定 tensor view，
-  校验 embedding、attention、MLP、norm、lm head shape。
-- CPU reference：完整 batch=1 forward，包含 embedding、RMSNorm、Q/K norm、RoPE、
-  GQA attention、MLP、residual、final norm、lm head。
-- KV cache：CPU 和 MPS decode 路径都支持 per-layer K/V cache，带 capacity 校验、
-  stats 和 verify path。
-- Sampling：greedy、temperature、top-k、top-p、seed，可 token 级 streaming。
-- MPS backend：Metal device/context/buffer、BF16 matvec、embedding、RMSNorm、
-  Q/K norm、RoPE、attention、MLP、residual add、device-resident KV cache、lm head。
-- CLI：`inspect`、`weights`、`doctor`、`infer`、`run`、`chat`、`serve`、
-  `mps`、`mps-smoke`。
-- HTTP gateway：OpenAI-compatible `/v1/models`、`/v1/completions`、
-  `/v1/chat/completions`、SSE streaming、basic tools/tool_choice protocol、
-  OpenAPI schema。
+## Current Features
 
-## MPS Forward
+### Model And Weights
 
-`--device mps` 当前会把主要 forward 算子放到 MPS 上执行，CPU 仍保留为 reference
-backend 和 sampling host。
+- 读取 Qwen3 `config.json`、`generation_config.json`、`tokenizer.json`、
+  `tokenizer_config.json` 和 `vocab.json`。
+- 支持 Qwen chat prompt formatting。
+- 只读 mmap 解析 `model.safetensors`。
+- 按 Qwen3 权重名绑定 tensor view，并校验 embedding、attention、MLP、norm、
+  lm head shape。
+- 支持 tied lm head 检查、dtype 统计、tensor 摘要和权重结构诊断。
 
-![MPS forward path](docs/assets/mps-forward.svg)
+### CPU Runtime
 
-MPS 已完成：
+- 完整 batch=1 CPU reference forward。
+- 覆盖 embedding、RMSNorm、Q/K norm、RoPE、GQA attention、MLP、residual、
+  final norm、lm head。
+- 支持 KV cache decode、cache stats、debug dump 和 KV cache verification。
+- 支持 greedy、temperature、top-k、top-p、seed。
+- 支持 token-level streaming。
+
+### Metal/MPS Runtime
+
+`--device mps` 会把主要 forward 算子放到 Apple Silicon Metal/MPS 路径执行，
+CPU 仍负责 tokenizer、host sampling 和 correctness reference。
+
+已实现的 MPS 算子：
 
 - BF16 weight + F32 activation matvec
 - token embedding lookup
@@ -46,26 +53,89 @@ MPS 已完成：
 - residual add
 - final norm + lm head logits
 
-当前仍有优化空间：
+![MPS forward path](docs/assets/mps-forward.svg)
 
-- 许多 kernel dispatch 仍逐 op 等待 command buffer 完成。
-- attention kernel 可进一步做 threadgroup-level score/softmax/value reduction。
-- logits 仍会读回 CPU 做 sampling。
-- KV cache 当前用 F32，后续可做 BF16/FP16 KV 或 paged KV。
-- prefill 仍以 batch=1/token-wise 路径为主，尚未做 sequence GEMM 化。
+### CLI
 
-## OpenAI-Compatible Gateway
+当前可用子命令：
+
+- `inspect`: 检查模型配置和 tokenizer 结构。
+- `weights`: 检查 safetensors 文件和 Qwen3 权重映射。
+- `doctor`: 一次性输出 MPS、模型、权重诊断。
+- `infer`: 单轮 prompt 推理。
+- `run`: `infer` 的兼容入口。
+- `chat`: 终端交互式对话。
+- `serve`: 启动 OpenAI-compatible HTTP gateway。
+- `mps`: 输出本机 Metal/MPS 状态。
+- `mps-smoke`: 跑 MPS operator smoke test。
+
+### HTTP Gateway
+
+Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
+
+- `GET /health`
+- `GET /v1/health`
+- `GET /chat_page`
+- `GET /v1/models`
+- `GET /openapi.json`
+- `GET /v1/openapi.json`
+- `POST /v1/completions`
+- `POST /v1/chat/completions`
+
+支持能力：
+
+- Legacy text completions。
+- Chat completions。
+- SSE streaming。
+- `temperature`、`top_p`、`seed`、`max_tokens`、`max_completion_tokens`。
+- 非标准但实用的 per-request `device`。
+- 基础 tools/tool_choice 协议兼容，返回 OpenAI-style `tool_calls`。
+- 浏览器对话页 `/chat_page`，直接调用 `/v1/chat/completions`。
+
+Tool calling 只做协议兼容：gateway 返回 `tool_calls`，不执行外部工具。
 
 ![Gateway flow](docs/assets/openai-gateway.svg)
 
-启动本地服务：
+## Quick Start
+
+准备模型文件：
+
+```text
+models/qwen3-0.6b/
+```
+
+配置和构建：
 
 ```bash
-cd /Users/bill/code/toy_llm_interface
 source ~/.zshrc
+cmake --preset debug
 cmake --build --preset debug
+ctest --preset debug
+```
 
-./build/debug/toyllm serve \
+检查模型和权重：
+
+```bash
+./build/debug/kraken-infer inspect models/qwen3-0.6b
+./build/debug/kraken-infer weights models/qwen3-0.6b
+./build/debug/kraken-infer doctor models/qwen3-0.6b
+```
+
+运行一次 CLI 推理：
+
+```bash
+./build/debug/kraken-infer infer \
+  --model models/qwen3-0.6b \
+  --prompt "hello" \
+  --device mps \
+  --max-new-tokens 32 \
+  --stream
+```
+
+启动本地 HTTP gateway：
+
+```bash
+./build/debug/kraken-infer serve \
   --host 127.0.0.1 \
   --port 8080 \
   --model models/qwen3-0.6b \
@@ -74,21 +144,19 @@ cmake --build --preset debug
   --max-new-tokens 32
 ```
 
+浏览器对话页：
+
+```text
+http://127.0.0.1:8080/chat_page
+```
+
 OpenAI-compatible base URL：
 
 ```text
 http://127.0.0.1:8080/v1
 ```
 
-支持的 endpoints：
-
-- `GET /health`
-- `GET /v1/health`
-- `GET /v1/models`
-- `GET /openapi.json`
-- `GET /v1/openapi.json`
-- `POST /v1/completions`
-- `POST /v1/chat/completions`
+## HTTP Examples
 
 Chat completion：
 
@@ -98,11 +166,12 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{
     "model": "qwen3-0.6b",
     "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 16
+    "max_tokens": 16,
+    "device": "mps"
   }'
 ```
 
-Streaming：
+Streaming chat：
 
 ```bash
 curl -N http://127.0.0.1:8080/v1/chat/completions \
@@ -111,7 +180,20 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
     "model": "qwen3-0.6b",
     "messages": [{"role": "user", "content": "hello"}],
     "max_tokens": 16,
-    "stream": true
+    "stream": true,
+    "device": "mps"
+  }'
+```
+
+Text completion：
+
+```bash
+curl http://127.0.0.1:8080/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3-0.6b",
+    "prompt": "hello",
+    "max_tokens": 16
   }'
 ```
 
@@ -135,31 +217,53 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-Tool calling 只实现协议兼容：gateway 返回 `tool_calls`，不执行外部工具。
+## Common Commands
 
-## Build And Test
-
-依赖：
-
-- macOS
-- Xcode Command Line Tools
-- CMake 3.24+
-
-Debug build：
+MPS status：
 
 ```bash
-source ~/.zshrc
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
+./build/debug/kraken-infer mps
+./build/debug/kraken-infer mps-smoke
 ```
 
-Release build：
+Interactive terminal chat：
 
 ```bash
-source ~/.zshrc
-cmake --preset release
-cmake --build --preset release
+./build/debug/kraken-infer chat \
+  --model models/qwen3-0.6b \
+  --device mps \
+  --stream
+```
+
+Sampling：
+
+```bash
+./build/debug/kraken-infer infer \
+  --model models/qwen3-0.6b \
+  --prompt "hello" \
+  --sample \
+  --temperature 0.6 \
+  --top-k 20 \
+  --top-p 0.95 \
+  --seed 42
+```
+
+Debug dump and KV cache verification：
+
+```bash
+./build/debug/kraken-infer infer \
+  --model models/qwen3-0.6b \
+  --prompt "hello" \
+  --device mps \
+  --max-new-tokens 1 \
+  --dump-dir build/debug-dump
+
+./build/debug/kraken-infer infer \
+  --model models/qwen3-0.6b \
+  --prompt "hello" \
+  --device mps \
+  --max-new-tokens 2 \
+  --verify-kv-cache
 ```
 
 Makefile fallback：
@@ -173,50 +277,7 @@ make chat
 make serve
 ```
 
-## Common Commands
-
-Inspect model and weights：
-
-```bash
-./build/debug/toyllm inspect models/qwen3-0.6b
-./build/debug/toyllm weights models/qwen3-0.6b
-./build/debug/toyllm doctor models/qwen3-0.6b
-```
-
-MPS status：
-
-```bash
-./build/debug/toyllm mps
-./build/debug/toyllm mps-smoke
-```
-
-Inference：
-
-```bash
-./build/debug/toyllm infer --model models/qwen3-0.6b --prompt "hello"
-./build/debug/toyllm infer --model models/qwen3-0.6b --prompt "hello" --device mps
-./build/debug/toyllm infer --model models/qwen3-0.6b --prompt "hello" --stream
-./build/debug/toyllm infer --model models/qwen3-0.6b --prompt "hello" \
-  --sample --temperature 0.6 --top-k 20 --top-p 0.95 --seed 42
-```
-
-Interactive chat：
-
-```bash
-./build/debug/toyllm chat --model models/qwen3-0.6b --device mps --stream
-```
-
-Debug dump / KV verification：
-
-```bash
-./build/debug/toyllm infer --model models/qwen3-0.6b --prompt "hello" \
-  --device mps --max-new-tokens 1 --dump-dir build/debug-dump
-
-./build/debug/toyllm infer --model models/qwen3-0.6b --prompt "hello" \
-  --device mps --max-new-tokens 2 --verify-kv-cache
-```
-
-## Model Files
+## Model Target
 
 当前目标模型：
 
@@ -234,7 +295,7 @@ Debug dump / KV verification：
 - RoPE theta: `1000000`
 - Tied embeddings: `true`
 
-模型权重不应该提交到 git。真实模型文件放在：
+真实模型权重不提交到 git，放在：
 
 ```text
 models/qwen3-0.6b/
@@ -246,6 +307,7 @@ models/qwen3-0.6b/
 apps/                    CLI entrypoints
 cmake/                   CMake helpers and warning policy
 docs/                    Architecture notes, milestones, milestone tasks
+docs/assets/             README and architecture images
 include/toyllm/          Public C++ headers
 models/                  Local model placeholders and downloaded model files
 src/core/                Status, device, tensor primitives
@@ -259,38 +321,14 @@ tests/                   CTest smoke tests
 ## Current Boundaries
 
 - 主要支持 batch size `1`。
-- 当前模型目标是 dense `Qwen3ForCausalLM`，不直接支持 Qwen3.5 hybrid
-  architecture 或 MoE expert routing。
+- 当前模型目标是 dense `Qwen3ForCausalLM`。
+- 暂不直接支持 Qwen3.5 hybrid architecture 或 MoE expert routing。
 - MPS path 已 full-forward，但仍是 correctness-first/initial performance path。
+- 许多 MPS kernel dispatch 仍逐 op 等待 command buffer 完成。
+- logits 仍会读回 CPU 做 sampling。
+- KV cache 当前用 F32，后续可做 BF16/FP16 KV 或 paged KV。
+- prefill 仍以 batch=1/token-wise 路径为主，尚未做 sequence GEMM 化。
 - Gateway 是顺序 POSIX HTTP server，不是并发生产 server。
 - Gateway usage token 统计当前返回 `0`。
 - Tool calling 只做 OpenAI-compatible 协议，不执行工具。
 - Vision、audio、embeddings、Responses API 不在当前范围。
-
-## Next Work
-
-推荐后续里程碑：
-
-- M10: MPS performance pass
-  - command buffer batching
-  - fused kernels
-  - optimized attention
-  - GPU-side logits top-k/top-p
-  - BF16/FP16 KV cache
-- M11: Prompt cache / cache-control
-  - prefix token hash
-  - cross-request KV snapshot
-  - LRU/TTL/memory budget
-  - cached last logits or last hidden
-- M12: Model family expansion
-  - Qwen3.5 text/hybrid architecture
-  - optional MoE routing path
-  - model-specific weight mapping adapters
-
-## Design Principles
-
-- 不依赖现成 LLM runtime，核心推理链路自己实现。
-- CPU path 优先作为 correctness reference。
-- MPS path 逐算子对齐，再做性能优化。
-- Apple API 只放在 Objective-C++ `.mm` 文件里，公共头文件保持 C++。
-- 模型文件和本机构建产物不提交到 git。

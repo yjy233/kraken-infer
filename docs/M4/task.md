@@ -31,8 +31,8 @@
 ### Verification
 
 - [x] `make test` 通过
-- [x] `./build/manual/toyllm help` 展示 chat 参数
-- [x] `./build/manual/toyllm chat --max-new-tokens 8` 能进入 REPL
+- [x] `./build/manual/kraken-infer help` 展示 chat 参数
+- [x] `./build/manual/kraken-infer chat --max-new-tokens 8` 能进入 REPL
 - [x] 输入 `hello` 后返回真实模型回复
 - [x] 已验证输出：`Hello! How can I assist you today`
 - [x] 输入 `/exit` 后进程正常退出

@@ -331,13 +331,13 @@ std::filesystem::path create_tiny_model_dir(std::string_view name) {
 }
 
 void test_weight_summary_regressions() {
-  auto invalid_header_dir = create_tiny_model_dir("toyllm-invalid-header-smoke");
+  auto invalid_header_dir = create_tiny_model_dir("kraken-infer-invalid-header-smoke");
   write_fake_safetensors(invalid_header_dir / "model.safetensors", R"({})", 0);
   const auto invalid_header = toyllm::format_weight_summary(invalid_header_dir);
   assert(!invalid_header.is_ok());
   assert(invalid_header.status().message().find("header size") != std::string::npos);
 
-  auto missing_tensor_dir = create_tiny_model_dir("toyllm-missing-tensor-smoke");
+  auto missing_tensor_dir = create_tiny_model_dir("kraken-infer-missing-tensor-smoke");
   write_fake_safetensors(
     missing_tensor_dir / "model.safetensors",
     R"({"model.embed_tokens.weight":{"dtype":"BF16","shape":[4,2],"data_offsets":[0,16]}})",
@@ -346,7 +346,7 @@ void test_weight_summary_regressions() {
   assert(!missing_tensor.is_ok());
   assert(missing_tensor.status().message().find("missing tensor") != std::string::npos);
 
-  auto shape_mismatch_dir = create_tiny_model_dir("toyllm-shape-mismatch-smoke");
+  auto shape_mismatch_dir = create_tiny_model_dir("kraken-infer-shape-mismatch-smoke");
   write_fake_safetensors(
     shape_mismatch_dir / "model.safetensors",
     R"({"model.embed_tokens.weight":{"dtype":"BF16","shape":[3,2],"data_offsets":[0,12]}})",

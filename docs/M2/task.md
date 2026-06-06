@@ -101,8 +101,8 @@ config.json
 ### CLI
 
 - [x] 增加 `weights` 子命令
-- [x] `toyllm weights` 默认读取 `models/qwen3-0.6b`
-- [x] `toyllm weights <model_dir>` 支持指定模型目录
+- [x] `kraken-infer weights` 默认读取 `models/qwen3-0.6b`
+- [x] `kraken-infer weights <model_dir>` 支持指定模型目录
 - [x] 输出 safetensors 文件大小
 - [x] 输出 tensor 数量
 - [x] 输出 dtype 统计
@@ -181,8 +181,8 @@ lm_head.weight                             [151936, 1024] or tied
 ## Acceptance
 
 - [x] `make test` 通过
-- [x] `./build/manual/toyllm weights` 返回成功
-- [x] `./build/manual/toyllm doctor` 包含模型结构和权重检查
+- [x] `./build/manual/kraken-infer weights` 返回成功
+- [x] `./build/manual/kraken-infer doctor` 包含模型结构和权重检查
 - [x] 输出 tensor 总数、dtype 统计、Qwen3 映射摘要
 - [x] 不把整个 `model.safetensors` 复制进 heap
 - [x] 所有 Qwen3 0.6B 必需权重 shape 校验通过

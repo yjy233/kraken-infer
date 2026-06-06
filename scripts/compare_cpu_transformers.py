@@ -16,7 +16,7 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default="./build/manual/toyllm")
+    parser.add_argument("--binary", default="./build/manual/kraken-infer")
     parser.add_argument("--model", default="models/qwen3-0.6b")
     parser.add_argument("--prompt", default="hello")
     parser.add_argument("--dump-dir", default="build/cpu-transformers-compare")

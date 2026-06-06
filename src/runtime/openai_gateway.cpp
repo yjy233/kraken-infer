@@ -643,6 +643,17 @@ void send_json_response(int fd, int status, std::string_view body) {
   (void)write_all(fd, response.str());
 }
 
+void send_html_response(int fd, int status, std::string_view body) {
+  std::ostringstream response;
+  response << "HTTP/1.1 " << status << ' ' << http_status_text(status) << "\r\n";
+  response << "Content-Type: text/html; charset=utf-8\r\n";
+  response << "Cache-Control: no-store\r\n";
+  response << "Content-Length: " << body.size() << "\r\n";
+  response << "Connection: close\r\n\r\n";
+  response << body;
+  (void)write_all(fd, response.str());
+}
+
 void send_sse_headers(int fd) {
   const std::string headers =
     "HTTP/1.1 200 OK\r\n"
@@ -668,17 +679,18 @@ std::string error_body(std::string_view message, std::string_view type = "invali
 std::string models_body(const OpenAIGatewayConfig& config) {
   std::ostringstream output;
   output << "{\"object\":\"list\",\"data\":[{\"id\":\"" << json_escape(config.model_id)
-         << "\",\"object\":\"model\",\"created\":0,\"owned_by\":\"toyllm\"}]}";
+         << "\",\"object\":\"model\",\"created\":0,\"owned_by\":\"kraken-infer\"}]}";
   return output.str();
 }
 
 std::string openapi_body(const OpenAIGatewayConfig& config) {
   std::ostringstream output;
-  output << "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"toy_llm_interface "
+  output << "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"kraken-infer "
             "OpenAI-compatible Gateway\",\"version\":\"0.1.0\"},\"servers\":[{\"url\":\"http://"
          << json_escape(config.host) << ':' << config.port
          << "\"}],\"paths\":{\"/health\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Gateway "
-            "health\"}}}},\"/v1/models\":{\"get\":{\"responses\":{\"200\":{\"description\":\"List "
+            "health\"}}}},\"/chat_page\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Browser "
+            "chat page\",\"content\":{\"text/html\":{}}}}}},\"/v1/models\":{\"get\":{\"responses\":{\"200\":{\"description\":\"List "
             "models\"}}}},\"/v1/completions\":{\"post\":{\"requestBody\":{\"required\":true,"
             "\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{"
             "\"model\":{\"type\":\"string\"},\"prompt\":{\"oneOf\":[{\"type\":\"string\"},"
@@ -696,6 +708,457 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
             "\"device\":{\"type\":\"string\",\"enum\":[\"cpu\",\"mps\",\"mps:0\"]}},\"required\":"
             "[\"messages\"]}}}},\"responses\":{\"200\":{\"description\":\"Chat completion, tool "
             "call, or SSE stream\"}}}}}}";
+  return output.str();
+}
+
+std::string chat_page_body(const OpenAIGatewayConfig& config) {
+  std::ostringstream output;
+  output << R"HTML(<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kraken-infer Chat</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --line: #d7dce2;
+      --text: #18202a;
+      --muted: #667384;
+      --accent: #146c5d;
+      --accent-dark: #0d4f44;
+      --warn: #9b5b00;
+      --user: #e4f4ef;
+      --assistant: #ffffff;
+      --error: #fff0f0;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+    .status {
+      min-width: 64px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      text-align: right;
+    }
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+    label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    input,
+    select,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      outline: none;
+    }
+    input,
+    select {
+      height: 36px;
+      padding: 0 10px;
+    }
+    textarea {
+      min-height: 54px;
+      max-height: 180px;
+      padding: 10px;
+      line-height: 1.4;
+      resize: vertical;
+    }
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(20, 108, 93, 0.14);
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 36px;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .toggle input {
+      width: 18px;
+      height: 18px;
+    }
+    main {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      min-height: 100vh;
+    }
+    .messages {
+      overflow: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .empty {
+      margin: auto;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .message {
+      max-width: min(760px, 92%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px 14px;
+      background: var(--assistant);
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .message.user {
+      align-self: flex-end;
+      background: var(--user);
+      border-color: #b8ddd1;
+    }
+    .message.assistant {
+      align-self: flex-start;
+    }
+    .message.error {
+      align-self: flex-start;
+      background: var(--error);
+      border-color: #efc3c3;
+      color: #7b1d1d;
+    }
+    form {
+      border-top: 1px solid var(--line);
+      background: var(--panel);
+      padding: 14px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 10px;
+      align-items: end;
+    }
+    button {
+      height: 42px;
+      min-width: 74px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 0 14px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover {
+      background: var(--accent-dark);
+    }
+    button.secondary {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--line);
+    }
+    button.secondary:hover {
+      background: #f0f2f4;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    @media (max-width: 780px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+      aside {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      main {
+        min-height: calc(100vh - 286px);
+      }
+      .messages {
+        padding: 16px;
+      }
+      form {
+        grid-template-columns: 1fr;
+      }
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <header>
+        <h1>kraken-infer</h1>
+        <div class="status" id="status">Ready</div>
+      </header>
+      <div class="field">
+        <label for="model">Model</label>
+        <input id="model" autocomplete="off">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="device">Device</label>
+          <select id="device">
+            <option value="cpu">cpu</option>
+            <option value="mps:0">mps:0</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="tokens">Tokens</label>
+          <input id="tokens" type="number" min="1" max="4096" step="1">
+        </div>
+      </div>
+      <div class="field">
+        <label for="temperature">Temperature</label>
+        <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.6">
+      </div>
+      <label class="toggle" for="stream">
+        <span>Stream</span>
+        <input id="stream" type="checkbox" checked>
+      </label>
+    </aside>
+    <main>
+      <section class="messages" id="messages">
+        <div class="empty" id="empty">No messages</div>
+      </section>
+      <form id="composer">
+        <textarea id="prompt" rows="2" autocomplete="off" spellcheck="true"></textarea>
+        <button id="send" type="submit">Send</button>
+        <button id="stop" class="secondary" type="button" disabled>Stop</button>
+      </form>
+    </main>
+  </div>
+  <script>
+    const defaultModel = ")HTML"
+         << json_escape(config.model_id) << R"HTML(";
+    const defaultDevice = ")HTML"
+         << json_escape(config.compute_device.to_string()) << R"HTML(";
+    const defaultTokens = )HTML"
+         << config.default_max_tokens << R"HTML(;
+
+    const modelInput = document.getElementById("model");
+    const deviceInput = document.getElementById("device");
+    const tokensInput = document.getElementById("tokens");
+    const temperatureInput = document.getElementById("temperature");
+    const streamInput = document.getElementById("stream");
+    const messagesEl = document.getElementById("messages");
+    const emptyEl = document.getElementById("empty");
+    const form = document.getElementById("composer");
+    const promptInput = document.getElementById("prompt");
+    const sendButton = document.getElementById("send");
+    const stopButton = document.getElementById("stop");
+    const statusEl = document.getElementById("status");
+
+    const messages = [];
+    let controller = null;
+
+    modelInput.value = defaultModel;
+    tokensInput.value = String(defaultTokens);
+    deviceInput.value = defaultDevice === "mps" ? "mps:0" : defaultDevice;
+
+    function setStatus(value) {
+      statusEl.textContent = value;
+    }
+
+    function setBusy(value) {
+      sendButton.disabled = value;
+      stopButton.disabled = !value;
+      promptInput.disabled = value;
+      setStatus(value ? "Busy" : "Ready");
+    }
+
+    function scrollToBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function addBubble(role, text) {
+      emptyEl.hidden = true;
+      const node = document.createElement("div");
+      node.className = "message " + role;
+      node.textContent = text;
+      messagesEl.appendChild(node);
+      scrollToBottom();
+      return node;
+    }
+
+    function requestBody(history) {
+      const maxTokens = Math.max(1, Number.parseInt(tokensInput.value || "1", 10));
+      const temperature = Number.parseFloat(temperatureInput.value);
+      const body = {
+        model: modelInput.value.trim() || defaultModel,
+        messages: history,
+        max_tokens: maxTokens,
+        stream: streamInput.checked,
+        device: deviceInput.value
+      };
+      if (Number.isFinite(temperature)) {
+        body.temperature = temperature;
+      }
+      return body;
+    }
+
+    function contentFromPayload(payload) {
+      return payload && payload.choices && payload.choices[0] &&
+        payload.choices[0].message && payload.choices[0].message.content || "";
+    }
+
+    async function readStream(response, bubble) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let text = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          break;
+        }
+        buffer += decoder.decode(chunk.value, {stream: true});
+        let split = buffer.indexOf("\n\n");
+        while (split !== -1) {
+          const eventText = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          for (const rawLine of eventText.split("\n")) {
+            const line = rawLine.trim();
+            if (!line.startsWith("data:")) {
+              continue;
+            }
+            const data = line.slice(5).trim();
+            if (data === "[DONE]") {
+              return text;
+            }
+            const payload = JSON.parse(data);
+            const delta = payload && payload.choices && payload.choices[0] &&
+              payload.choices[0].delta && payload.choices[0].delta.content || "";
+            if (delta) {
+              text += delta;
+              bubble.textContent = text;
+              scrollToBottom();
+            }
+          }
+          split = buffer.indexOf("\n\n");
+        }
+      }
+      return text;
+    }
+
+    async function sendMessage(text) {
+      const nextMessages = messages.concat([{role: "user", content: text}]);
+      addBubble("user", text);
+      const assistantBubble = addBubble("assistant", "");
+      controller = new AbortController();
+      setBusy(true);
+      try {
+        const response = await fetch("/v1/chat/completions", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(requestBody(nextMessages)),
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          let errorText = "HTTP " + response.status;
+          try {
+            const payload = await response.json();
+            errorText = payload.error && payload.error.message || errorText;
+          } catch (_) {
+          }
+          throw new Error(errorText);
+        }
+        let answer = "";
+        if (streamInput.checked) {
+          answer = await readStream(response, assistantBubble);
+        } else {
+          const payload = await response.json();
+          answer = contentFromPayload(payload);
+          assistantBubble.textContent = answer;
+        }
+        messages.push({role: "user", content: text});
+        messages.push({role: "assistant", content: answer});
+        scrollToBottom();
+      } catch (error) {
+        assistantBubble.remove();
+        addBubble("error", error.name === "AbortError" ? "Stopped" : error.message);
+      } finally {
+        controller = null;
+        setBusy(false);
+        promptInput.focus();
+      }
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = promptInput.value.trim();
+      if (!text || controller) {
+        return;
+      }
+      promptInput.value = "";
+      void sendMessage(text);
+    });
+
+    stopButton.addEventListener("click", () => {
+      if (controller) {
+        controller.abort();
+      }
+    });
+
+    promptInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+  </script>
+</body>
+</html>
+)HTML";
   return output.str();
 }
 
@@ -986,6 +1449,14 @@ void handle_client(int fd, const OpenAIGatewayConfig& config) {
         return;
       }
       send_json_response(fd, 200, models_body(config));
+      return;
+    }
+    if (request.path == "/chat_page") {
+      if (request.method != "GET") {
+        send_json_response(fd, 405, error_body("method not allowed"));
+        return;
+      }
+      send_html_response(fd, 200, chat_page_body(config));
       return;
     }
     if (request.path == "/openapi.json" || request.path == "/v1/openapi.json") {

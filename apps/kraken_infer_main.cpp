@@ -150,7 +150,7 @@ int inspect_weights(const std::filesystem::path& model_path) {
 }
 
 int run_doctor(const std::filesystem::path& model_path) {
-  std::cout << "toyllm " << kVersion << '\n';
+  std::cout << "kraken-infer " << kVersion << '\n';
   std::cout << "\n== MPS ==\n";
   (void)print_mps_info();
   const auto mps_smoke = toyllm::mps::run_operator_smoke_test();
@@ -235,7 +235,7 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
              bool enable_thinking, const std::filesystem::path& debug_dump_dir,
              bool print_kv_cache_stats, bool verify_kv_cache, toyllm::Device compute_device,
              const toyllm::CpuSamplingConfig& sampling, bool stream) {
-  std::cout << "toyllm chat\n";
+  std::cout << "kraken-infer chat\n";
   std::cout << "model: " << model_path.string() << '\n';
   std::cout << "device: " << compute_device.to_string() << '\n';
   std::cout << "max_new_tokens: " << max_new_tokens << '\n';
@@ -318,7 +318,7 @@ int main(int argc, char** argv) {
   }
 
   if (arg_equals(argv[1], "version") || arg_equals(argv[1], "--version")) {
-    std::cout << "toyllm " << kVersion << '\n';
+    std::cout << "kraken-infer " << kVersion << '\n';
     return EXIT_SUCCESS;
   }
 

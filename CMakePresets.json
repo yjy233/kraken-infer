@@ -13,8 +13,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "TOYLLM_BUILD_TESTS": "ON",
-        "TOYLLM_ENABLE_MPS": "ON"
+        "KRAKEN_INFER_BUILD_TESTS": "ON",
+        "KRAKEN_INFER_ENABLE_MPS": "ON"
       }
     },
     {
@@ -24,8 +24,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "TOYLLM_BUILD_TESTS": "ON",
-        "TOYLLM_ENABLE_MPS": "ON"
+        "KRAKEN_INFER_BUILD_TESTS": "ON",
+        "KRAKEN_INFER_ENABLE_MPS": "ON"
       }
     }
   ],

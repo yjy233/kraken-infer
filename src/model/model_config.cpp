@@ -463,7 +463,7 @@ Result<ModelConfig> parse_model_config(const JsonValue& json) {
 
   ModelConfig config{};
 
-#define TOYLLM_ASSIGN_REQUIRED_STRING(field, key) \
+#define KRAKEN_INFER_ASSIGN_REQUIRED_STRING(field, key) \
   do {                                            \
     auto result = require_string(object, key);    \
     if (!result.is_ok()) {                        \
@@ -472,7 +472,7 @@ Result<ModelConfig> parse_model_config(const JsonValue& json) {
     config.field = result.value();                \
   } while (false)
 
-#define TOYLLM_ASSIGN_REQUIRED_INT(field, key) \
+#define KRAKEN_INFER_ASSIGN_REQUIRED_INT(field, key) \
   do {                                         \
     auto result = require_int(object, key);    \
     if (!result.is_ok()) {                     \
@@ -481,7 +481,7 @@ Result<ModelConfig> parse_model_config(const JsonValue& json) {
     config.field = result.value();             \
   } while (false)
 
-#define TOYLLM_ASSIGN_REQUIRED_NUMBER(field, key) \
+#define KRAKEN_INFER_ASSIGN_REQUIRED_NUMBER(field, key) \
   do {                                            \
     auto result = require_number(object, key);    \
     if (!result.is_ok()) {                        \
@@ -490,7 +490,7 @@ Result<ModelConfig> parse_model_config(const JsonValue& json) {
     config.field = result.value();                \
   } while (false)
 
-#define TOYLLM_ASSIGN_REQUIRED_BOOL(field, key) \
+#define KRAKEN_INFER_ASSIGN_REQUIRED_BOOL(field, key) \
   do {                                          \
     auto result = require_bool(object, key);    \
     if (!result.is_ok()) {                      \
@@ -513,34 +513,34 @@ Result<ModelConfig> parse_model_config(const JsonValue& json) {
   }
   config.architecture = *architecture;
 
-  TOYLLM_ASSIGN_REQUIRED_BOOL(attention_bias, "attention_bias");
-  TOYLLM_ASSIGN_REQUIRED_NUMBER(attention_dropout, "attention_dropout");
-  TOYLLM_ASSIGN_REQUIRED_INT(bos_token_id, "bos_token_id");
-  TOYLLM_ASSIGN_REQUIRED_INT(eos_token_id, "eos_token_id");
-  TOYLLM_ASSIGN_REQUIRED_INT(head_dim, "head_dim");
-  TOYLLM_ASSIGN_REQUIRED_STRING(hidden_act, "hidden_act");
-  TOYLLM_ASSIGN_REQUIRED_INT(hidden_size, "hidden_size");
-  TOYLLM_ASSIGN_REQUIRED_NUMBER(initializer_range, "initializer_range");
-  TOYLLM_ASSIGN_REQUIRED_INT(intermediate_size, "intermediate_size");
-  TOYLLM_ASSIGN_REQUIRED_INT(max_position_embeddings, "max_position_embeddings");
-  TOYLLM_ASSIGN_REQUIRED_INT(max_window_layers, "max_window_layers");
-  TOYLLM_ASSIGN_REQUIRED_STRING(model_type, "model_type");
-  TOYLLM_ASSIGN_REQUIRED_INT(num_attention_heads, "num_attention_heads");
-  TOYLLM_ASSIGN_REQUIRED_INT(num_hidden_layers, "num_hidden_layers");
-  TOYLLM_ASSIGN_REQUIRED_INT(num_key_value_heads, "num_key_value_heads");
-  TOYLLM_ASSIGN_REQUIRED_NUMBER(rms_norm_eps, "rms_norm_eps");
-  TOYLLM_ASSIGN_REQUIRED_NUMBER(rope_theta, "rope_theta");
-  TOYLLM_ASSIGN_REQUIRED_BOOL(tie_word_embeddings, "tie_word_embeddings");
-  TOYLLM_ASSIGN_REQUIRED_STRING(torch_dtype, "torch_dtype");
-  TOYLLM_ASSIGN_REQUIRED_STRING(transformers_version, "transformers_version");
-  TOYLLM_ASSIGN_REQUIRED_BOOL(use_cache, "use_cache");
-  TOYLLM_ASSIGN_REQUIRED_BOOL(use_sliding_window, "use_sliding_window");
-  TOYLLM_ASSIGN_REQUIRED_INT(vocab_size, "vocab_size");
+  KRAKEN_INFER_ASSIGN_REQUIRED_BOOL(attention_bias, "attention_bias");
+  KRAKEN_INFER_ASSIGN_REQUIRED_NUMBER(attention_dropout, "attention_dropout");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(bos_token_id, "bos_token_id");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(eos_token_id, "eos_token_id");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(head_dim, "head_dim");
+  KRAKEN_INFER_ASSIGN_REQUIRED_STRING(hidden_act, "hidden_act");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(hidden_size, "hidden_size");
+  KRAKEN_INFER_ASSIGN_REQUIRED_NUMBER(initializer_range, "initializer_range");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(intermediate_size, "intermediate_size");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(max_position_embeddings, "max_position_embeddings");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(max_window_layers, "max_window_layers");
+  KRAKEN_INFER_ASSIGN_REQUIRED_STRING(model_type, "model_type");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(num_attention_heads, "num_attention_heads");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(num_hidden_layers, "num_hidden_layers");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(num_key_value_heads, "num_key_value_heads");
+  KRAKEN_INFER_ASSIGN_REQUIRED_NUMBER(rms_norm_eps, "rms_norm_eps");
+  KRAKEN_INFER_ASSIGN_REQUIRED_NUMBER(rope_theta, "rope_theta");
+  KRAKEN_INFER_ASSIGN_REQUIRED_BOOL(tie_word_embeddings, "tie_word_embeddings");
+  KRAKEN_INFER_ASSIGN_REQUIRED_STRING(torch_dtype, "torch_dtype");
+  KRAKEN_INFER_ASSIGN_REQUIRED_STRING(transformers_version, "transformers_version");
+  KRAKEN_INFER_ASSIGN_REQUIRED_BOOL(use_cache, "use_cache");
+  KRAKEN_INFER_ASSIGN_REQUIRED_BOOL(use_sliding_window, "use_sliding_window");
+  KRAKEN_INFER_ASSIGN_REQUIRED_INT(vocab_size, "vocab_size");
 
-#undef TOYLLM_ASSIGN_REQUIRED_STRING
-#undef TOYLLM_ASSIGN_REQUIRED_INT
-#undef TOYLLM_ASSIGN_REQUIRED_NUMBER
-#undef TOYLLM_ASSIGN_REQUIRED_BOOL
+#undef KRAKEN_INFER_ASSIGN_REQUIRED_STRING
+#undef KRAKEN_INFER_ASSIGN_REQUIRED_INT
+#undef KRAKEN_INFER_ASSIGN_REQUIRED_NUMBER
+#undef KRAKEN_INFER_ASSIGN_REQUIRED_BOOL
 
   return config;
 }

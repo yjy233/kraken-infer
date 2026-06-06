@@ -60,7 +60,7 @@ vocab.json
 目标命令：
 
 ```bash
-./build/manual/toyllm --inspect-model models/qwen3-0.6b
+./build/manual/kraken-infer --inspect-model models/qwen3-0.6b
 ```
 
 输出应包含：

@@ -263,12 +263,13 @@
 
 功能范围：
 
-- 实现 `toyllm serve` 推理服务进程
+- 实现 `kraken-infer serve` 推理服务进程
 - 支持 OpenAPI 3.0 schema 描述：
   - `GET /openapi.json`
   - `GET /v1/openapi.json`
 - 提供基础 REST endpoints：
   - `GET /health`
+  - `GET /chat_page`
   - `GET /v1/health`
   - `GET /v1/models`
   - `POST /v1/completions`
@@ -339,7 +340,7 @@
 最终命令形态：
 
 ```bash
-./build/release/toyllm \
+./build/release/kraken-infer \
   --model models/qwen3-0.6b \
   --prompt "你好，介绍一下你自己" \
   --device mps \

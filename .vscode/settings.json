@@ -10,7 +10,7 @@
     "${workspaceFolder}/tests"
   ],
   "C_Cpp.default.defines": [
-    "TOYLLM_ENABLE_MPS=1"
+    "KRAKEN_INFER_ENABLE_MPS=1"
   ],
   "clangd.arguments": [
     "--background-index",

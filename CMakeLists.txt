@@ -1,14 +1,22 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(
-  toy_llm_interface
+  kraken-infer
   VERSION 0.1.0
   DESCRIPTION "A small from-scratch LLM inference runtime for macOS MPS experiments"
   LANGUAGES CXX
 )
 
-option(TOYLLM_ENABLE_MPS "Enable Metal Performance Shaders backend on macOS" ON)
-option(TOYLLM_BUILD_TESTS "Build smoke tests" ON)
+if(DEFINED TOYLLM_ENABLE_MPS AND NOT DEFINED KRAKEN_INFER_ENABLE_MPS)
+  set(KRAKEN_INFER_ENABLE_MPS "${TOYLLM_ENABLE_MPS}" CACHE BOOL
+      "Enable Metal Performance Shaders backend on macOS" FORCE)
+endif()
+if(DEFINED TOYLLM_BUILD_TESTS AND NOT DEFINED KRAKEN_INFER_BUILD_TESTS)
+  set(KRAKEN_INFER_BUILD_TESTS "${TOYLLM_BUILD_TESTS}" CACHE BOOL "Build smoke tests" FORCE)
+endif()
+
+option(KRAKEN_INFER_ENABLE_MPS "Enable Metal Performance Shaders backend on macOS" ON)
+option(KRAKEN_INFER_BUILD_TESTS "Build smoke tests" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,11 +27,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(ProjectWarnings)
 
-add_library(toyllm_core)
-add_library(toyllm::core ALIAS toyllm_core)
+add_library(kraken_infer_core)
+add_library(kraken_infer::core ALIAS kraken_infer_core)
 
 target_sources(
-  toyllm_core
+  kraken_infer_core
   PRIVATE
     src/core/status.cpp
     src/core/tensor.cpp
@@ -40,39 +48,39 @@ target_sources(
 )
 
 target_include_directories(
-  toyllm_core
+  kraken_infer_core
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
 
-target_compile_features(toyllm_core PUBLIC cxx_std_20)
-toyllm_set_project_warnings(toyllm_core)
+target_compile_features(kraken_infer_core PUBLIC cxx_std_20)
+kraken_infer_set_project_warnings(kraken_infer_core)
 
-if(APPLE AND TOYLLM_ENABLE_MPS)
+if(APPLE AND KRAKEN_INFER_ENABLE_MPS)
   enable_language(OBJCXX)
-  target_sources(toyllm_core PRIVATE src/backends/mps/mps_backend.mm)
-  target_compile_definitions(toyllm_core PUBLIC TOYLLM_ENABLE_MPS=1)
+  target_sources(kraken_infer_core PRIVATE src/backends/mps/mps_backend.mm)
+  target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_MPS=1)
   target_link_libraries(
-    toyllm_core
+    kraken_infer_core
     PUBLIC
       "-framework Foundation"
       "-framework Metal"
       "-framework MetalPerformanceShaders"
   )
 else()
-  target_sources(toyllm_core PRIVATE src/backends/mps/mps_backend_stub.cpp)
-  target_compile_definitions(toyllm_core PUBLIC TOYLLM_ENABLE_MPS=0)
+  target_sources(kraken_infer_core PRIVATE src/backends/mps/mps_backend_stub.cpp)
+  target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_MPS=0)
 endif()
 
-add_executable(toyllm apps/toyllm_main.cpp)
-target_link_libraries(toyllm PRIVATE toyllm::core)
-toyllm_set_project_warnings(toyllm)
+add_executable(kraken-infer apps/kraken_infer_main.cpp)
+target_link_libraries(kraken-infer PRIVATE kraken_infer::core)
+kraken_infer_set_project_warnings(kraken-infer)
 
-if(TOYLLM_BUILD_TESTS)
+if(KRAKEN_INFER_BUILD_TESTS)
   enable_testing()
-  add_executable(toyllm_smoke_test tests/smoke_test.cpp)
-  target_link_libraries(toyllm_smoke_test PRIVATE toyllm::core)
-  toyllm_set_project_warnings(toyllm_smoke_test)
-  add_test(NAME toyllm_smoke_test COMMAND toyllm_smoke_test)
+  add_executable(kraken-infer-smoke-test tests/smoke_test.cpp)
+  target_link_libraries(kraken-infer-smoke-test PRIVATE kraken_infer::core)
+  kraken_infer_set_project_warnings(kraken-infer-smoke-test)
+  add_test(NAME kraken-infer-smoke-test COMMAND kraken-infer-smoke-test)
 endif()

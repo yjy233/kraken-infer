@@ -6,4 +6,4 @@
 -Wshadow
 -Iinclude
 -Isrc
--DTOYLLM_ENABLE_MPS=1
+-DKRAKEN_INFER_ENABLE_MPS=1

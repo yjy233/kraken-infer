@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560" role="img" aria-label="toy_llm_interface current architecture">
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560" role="img" aria-label="kraken-infer current architecture">
   <defs>
     <style>
       .bg { fill: #f7f8fb; }
@@ -16,7 +16,7 @@
   </defs>
 
   <rect class="bg" x="0" y="0" width="1100" height="560"/>
-  <text class="title" x="48" y="58">toy_llm_interface current architecture</text>
+  <text class="title" x="48" y="58">kraken-infer current architecture</text>
   <text class="subtitle" x="48" y="84">C++20 Qwen3 0.6B runtime with CPU reference, Apple MPS full forward, and OpenAI-compatible gateway</text>
 
   <rect class="box" x="54" y="130" width="190" height="86" fill="#e8f1ff"/>

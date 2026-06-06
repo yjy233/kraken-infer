@@ -3,11 +3,13 @@ BUILD_DIR ?= build/manual
 MODEL ?= models/qwen3-0.6b
 PROMPT ?= hello
 CHAT_TOKENS ?= 16
+BINARY := kraken-infer
+SMOKE_TEST := kraken-infer-smoke-test
 
 COMMON_FLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Iinclude
 DEBUG_FLAGS := -O0 -g
 RELEASE_FLAGS := -O3 -DNDEBUG
-MPS_FLAGS := -DTOYLLM_ENABLE_MPS=1
+MPS_FLAGS := -DKRAKEN_INFER_ENABLE_MPS=1
 MPS_LIBS := -framework Foundation -framework Metal -framework MetalPerformanceShaders
 
 CORE_SRCS := \
@@ -29,7 +31,7 @@ CORE_SRCS := \
 
 all: debug
 
-debug: $(BUILD_DIR)/toyllm $(BUILD_DIR)/toyllm_smoke_test
+debug: $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(SMOKE_TEST)
 
 release:
 	$(MAKE) BUILD_DIR=build/release EXTRA_FLAGS="$(RELEASE_FLAGS)" debug
@@ -37,44 +39,44 @@ release:
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/toyllm: $(CORE_SRCS) apps/toyllm_main.cpp | $(BUILD_DIR)
+$(BUILD_DIR)/$(BINARY): $(CORE_SRCS) apps/kraken_infer_main.cpp | $(BUILD_DIR)
 	$(CXX) $(COMMON_FLAGS) $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MPS_FLAGS) $^ $(MPS_LIBS) -o $@
 
-$(BUILD_DIR)/toyllm_smoke_test: $(CORE_SRCS) tests/smoke_test.cpp | $(BUILD_DIR)
+$(BUILD_DIR)/$(SMOKE_TEST): $(CORE_SRCS) tests/smoke_test.cpp | $(BUILD_DIR)
 	$(CXX) $(COMMON_FLAGS) $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MPS_FLAGS) $^ $(MPS_LIBS) -o $@
 
-test: $(BUILD_DIR)/toyllm_smoke_test
-	./$(BUILD_DIR)/toyllm_smoke_test
+test: $(BUILD_DIR)/$(SMOKE_TEST)
+	./$(BUILD_DIR)/$(SMOKE_TEST)
 
-cli: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm help
+cli: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) help
 
-inspect: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm inspect $(MODEL)
+inspect: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) inspect $(MODEL)
 
-weights: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm weights $(MODEL)
+weights: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) weights $(MODEL)
 
-doctor: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm doctor $(MODEL)
+doctor: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) doctor $(MODEL)
 
-infer: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm infer --model $(MODEL) --prompt "$(PROMPT)"
+infer: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) infer --model $(MODEL) --prompt "$(PROMPT)"
 
-run: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm run --model $(MODEL) --prompt "$(PROMPT)"
+run: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) run --model $(MODEL) --prompt "$(PROMPT)"
 
-chat: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm chat --model $(MODEL) --max-new-tokens $(CHAT_TOKENS)
+chat: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) chat --model $(MODEL) --max-new-tokens $(CHAT_TOKENS)
 
-serve: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm serve --model $(MODEL)
+serve: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) serve --model $(MODEL)
 
-compare-transformers: $(BUILD_DIR)/toyllm
-	python3 scripts/compare_cpu_transformers.py --binary ./$(BUILD_DIR)/toyllm --model $(MODEL) --prompt "$(PROMPT)"
+compare-transformers: $(BUILD_DIR)/$(BINARY)
+	python3 scripts/compare_cpu_transformers.py --binary ./$(BUILD_DIR)/$(BINARY) --model $(MODEL) --prompt "$(PROMPT)"
 
-mps-info: $(BUILD_DIR)/toyllm
-	./$(BUILD_DIR)/toyllm mps
+mps-info: $(BUILD_DIR)/$(BINARY)
+	./$(BUILD_DIR)/$(BINARY) mps
 
 clean:
 	rm -rf build

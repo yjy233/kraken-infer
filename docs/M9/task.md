@@ -10,7 +10,7 @@ M9 实现本项目需要的 OpenAI-compatible 子集：模型列表、legacy tex
 
 ### Server Foundation
 
-- [x] 新增 `toyllm serve` CLI
+- [x] 新增 `kraken-infer serve` CLI
 - [x] 支持 `--host`
 - [x] 支持 `--port`
 - [x] 支持 `--model`
@@ -21,11 +21,13 @@ M9 实现本项目需要的 OpenAI-compatible 子集：模型列表、legacy tex
 - [x] 实现 request line、headers、Content-Length body 解析
 - [x] 返回 `Connection: close`
 - [x] 实现 `/health` 和 `/v1/health`
+- [x] 实现 `/chat_page` browser chat UI
 - [x] 实现 `/openapi.json` 和 `/v1/openapi.json`
 
 ### OpenAI-Compatible Routes
 
 - [x] `GET /v1/models`
+- [x] `GET /chat_page`
 - [x] `POST /v1/completions`
 - [x] `POST /v1/chat/completions`
 - [x] 非流式 `text_completion` JSON 响应
@@ -83,7 +85,7 @@ M9 实现本项目需要的 OpenAI-compatible 子集：模型列表、legacy tex
 
 - [x] `cmake --build --preset debug` 通过
 - [x] `ctest --preset debug` 通过
-- [x] `toyllm help` 显示 `serve`
+- [x] `kraken-infer help` 显示 `serve`
 - [x] `GET /v1/models` 返回 OpenAI-compatible model list
 - [x] `GET /openapi.json` 返回 OpenAPI 3.0 schema
 - [x] `POST /v1/completions` 非流式可生成文本

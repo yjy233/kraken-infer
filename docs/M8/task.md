@@ -72,7 +72,7 @@ M8 的最终完成标准是 `--device mps` 能把主要 forward 算子放到 MPS
 ## Acceptance
 
 - [x] `ctest --preset debug` 通过
-- [x] `toyllm mps-smoke` 在 Apple Silicon 上通过
+- [x] `kraken-infer mps-smoke` 在 Apple Silicon 上通过
 - [x] `infer --device mps --prompt hello --max-new-tokens 1` 可运行
 - [x] `infer --device mps --prompt hello --max-new-tokens 8 --seed 1` 可运行
 - [x] CPU/MPS greedy 首 token 对齐
