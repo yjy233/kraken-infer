@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620" role="img" aria-label="MPS full forward path">
+  <defs>
+    <style>
+      .bg { fill: #f8faf9; }
+      .title { fill: #142030; font: 700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #586778; font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .step { fill: #172334; font: 700 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #506174; font: 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .box { stroke: #bfccd8; stroke-width: 1.4; rx: 8; }
+      .arrow { stroke: #647385; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #8290a1; stroke-width: 2; stroke-dasharray: 7 6; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#647385"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1100" height="620"/>
+  <text class="title" x="48" y="58">MPS full-forward path</text>
+  <text class="subtitle" x="48" y="84">One token through Qwen3 0.6B on Apple Metal/MPS, with CPU kept as reference and sampling host</text>
+
+  <rect class="box" x="54" y="136" width="150" height="82" fill="#eaf3ff"/>
+  <text class="step" x="78" y="168">Token id</text>
+  <text class="small" x="78" y="191">chat prompt token</text>
+
+  <rect class="box" x="248" y="136" width="158" height="82" fill="#edf8f0"/>
+  <text class="step" x="272" y="168">Embedding</text>
+  <text class="small" x="272" y="191">BF16 weight to F32</text>
+
+  <rect class="box" x="450" y="136" width="168" height="82" fill="#fff6dc"/>
+  <text class="step" x="474" y="168">Layer loop x28</text>
+  <text class="small" x="474" y="191">device-resident hidden</text>
+
+  <rect class="box" x="662" y="136" width="154" height="82" fill="#edf8f0"/>
+  <text class="step" x="686" y="168">Final norm</text>
+  <text class="small" x="686" y="191">RMSNorm kernel</text>
+
+  <rect class="box" x="860" y="136" width="168" height="82" fill="#edf8f0"/>
+  <text class="step" x="884" y="168">LM head</text>
+  <text class="small" x="884" y="191">BF16 matvec logits</text>
+
+  <path class="arrow" d="M204 177 L248 177"/>
+  <path class="arrow" d="M406 177 L450 177"/>
+  <path class="arrow" d="M618 177 L662 177"/>
+  <path class="arrow" d="M816 177 L860 177"/>
+
+  <rect class="box" x="118" y="294" width="150" height="82" fill="#f4edff"/>
+  <text class="step" x="142" y="326">Input norm</text>
+  <text class="small" x="142" y="349">RMSNorm</text>
+
+  <rect class="box" x="306" y="294" width="150" height="82" fill="#eaf3ff"/>
+  <text class="step" x="330" y="326">Q/K/V</text>
+  <text class="small" x="330" y="349">3 matvec kernels</text>
+
+  <rect class="box" x="494" y="294" width="150" height="82" fill="#f4edff"/>
+  <text class="step" x="518" y="326">QK norm</text>
+  <text class="small" x="518" y="349">per-head RMSNorm</text>
+
+  <rect class="box" x="682" y="294" width="150" height="82" fill="#f4edff"/>
+  <text class="step" x="706" y="326">RoPE</text>
+  <text class="small" x="706" y="349">Q/K rotation</text>
+
+  <rect class="box" x="870" y="294" width="150" height="82" fill="#eafaf7"/>
+  <text class="step" x="894" y="326">KV cache</text>
+  <text class="small" x="894" y="349">store K/V on device</text>
+
+  <path class="arrow" d="M268 335 L306 335"/>
+  <path class="arrow" d="M456 335 L494 335"/>
+  <path class="arrow" d="M644 335 L682 335"/>
+  <path class="arrow" d="M832 335 L870 335"/>
+
+  <rect class="box" x="162" y="446" width="150" height="82" fill="#eafaf7"/>
+  <text class="step" x="186" y="478">Attention</text>
+  <text class="small" x="186" y="501">GQA over KV cache</text>
+
+  <rect class="box" x="350" y="446" width="150" height="82" fill="#eaf3ff"/>
+  <text class="step" x="374" y="478">O proj + add</text>
+  <text class="small" x="374" y="501">matvec + residual</text>
+
+  <rect class="box" x="538" y="446" width="150" height="82" fill="#fff6dc"/>
+  <text class="step" x="562" y="478">Post norm</text>
+  <text class="small" x="562" y="501">RMSNorm</text>
+
+  <rect class="box" x="726" y="446" width="150" height="82" fill="#eaf3ff"/>
+  <text class="step" x="750" y="478">MLP</text>
+  <text class="small" x="750" y="501">gate/up/down + SiLU</text>
+
+  <rect class="box" x="914" y="446" width="120" height="82" fill="#edf8f0"/>
+  <text class="step" x="938" y="478">Add</text>
+  <text class="small" x="938" y="501">layer output</text>
+
+  <path class="dash" d="M945 376 C945 414 237 410 237 446"/>
+  <path class="arrow" d="M312 487 L350 487"/>
+  <path class="arrow" d="M500 487 L538 487"/>
+  <path class="arrow" d="M688 487 L726 487"/>
+  <path class="arrow" d="M876 487 L914 487"/>
+
+  <path class="dash" d="M534 218 C534 252 193 252 193 294"/>
+  <path class="dash" d="M974 446 C1038 420 1038 286 618 220"/>
+
+  <text class="small" x="860" y="250">CPU reads logits for sampling today</text>
+  <path class="dash" d="M944 218 C944 248 944 260 944 286"/>
+</svg>

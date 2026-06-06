@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560" role="img" aria-label="toy_llm_interface current architecture">
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .title { fill: #162033; font: 700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #536173; font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .label { fill: #1e2a3a; font: 700 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #4e5b6c; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .tiny { fill: #607083; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .box { stroke: #c9d2df; stroke-width: 1.5; rx: 8; }
+      .arrow { stroke: #617084; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#617084"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1100" height="560"/>
+  <text class="title" x="48" y="58">toy_llm_interface current architecture</text>
+  <text class="subtitle" x="48" y="84">C++20 Qwen3 0.6B runtime with CPU reference, Apple MPS full forward, and OpenAI-compatible gateway</text>
+
+  <rect class="box" x="54" y="130" width="190" height="86" fill="#e8f1ff"/>
+  <text class="label" x="78" y="164">CLI</text>
+  <text class="small" x="78" y="188">inspect, weights, doctor</text>
+  <text class="small" x="78" y="207">infer, run, chat, serve</text>
+
+  <rect class="box" x="54" y="254" width="190" height="86" fill="#eef8f3"/>
+  <text class="label" x="78" y="288">HTTP Gateway</text>
+  <text class="small" x="78" y="312">/v1/chat/completions</text>
+  <text class="small" x="78" y="331">tools + SSE streaming</text>
+
+  <rect class="box" x="318" y="145" width="210" height="180" fill="#fff9e8"/>
+  <text class="label" x="346" y="180">Runtime API</text>
+  <text class="small" x="346" y="207">CpuGenerationRequest</text>
+  <text class="small" x="346" y="228">chat prompt formatting</text>
+  <text class="small" x="346" y="249">sampling config</text>
+  <text class="small" x="346" y="270">stream callbacks</text>
+  <text class="small" x="346" y="291">device selection</text>
+
+  <rect class="box" x="608" y="112" width="214" height="120" fill="#f1edff"/>
+  <text class="label" x="634" y="147">Model Assets</text>
+  <text class="small" x="634" y="174">config + generation config</text>
+  <text class="small" x="634" y="195">tokenizer.json</text>
+  <text class="small" x="634" y="216">safetensors mmap</text>
+
+  <rect class="box" x="608" y="276" width="214" height="146" fill="#f5fbff"/>
+  <text class="label" x="634" y="311">CPU Reference</text>
+  <text class="small" x="634" y="338">full Qwen3 forward</text>
+  <text class="small" x="634" y="359">KV cache + verification</text>
+  <text class="small" x="634" y="380">debug tensor dumps</text>
+  <text class="small" x="634" y="401">sampling host path</text>
+
+  <rect class="box" x="884" y="276" width="166" height="146" fill="#ebf7ef"/>
+  <text class="label" x="910" y="311">MPS Backend</text>
+  <text class="small" x="910" y="338">Metal kernels</text>
+  <text class="small" x="910" y="359">BF16 weights</text>
+  <text class="small" x="910" y="380">device KV cache</text>
+  <text class="small" x="910" y="401">full forward</text>
+
+  <rect class="box" x="318" y="380" width="210" height="90" fill="#fff2ee"/>
+  <text class="label" x="346" y="414">Outputs</text>
+  <text class="small" x="346" y="441">text, token stream</text>
+  <text class="small" x="346" y="462">OpenAI-compatible JSON</text>
+
+  <path class="arrow" d="M244 173 L318 206"/>
+  <path class="arrow" d="M244 297 L318 264"/>
+  <path class="arrow" d="M528 204 L608 172"/>
+  <path class="arrow" d="M528 257 L608 349"/>
+  <path class="arrow" d="M822 349 L884 349"/>
+  <path class="arrow" d="M608 381 L528 424"/>
+  <path class="arrow" d="M884 393 L528 441"/>
+
+  <text class="tiny" x="52" y="518">Current boundary: batch size 1, dense Qwen3ForCausalLM, sequential gateway, correctness-first MPS path.</text>
+</svg>

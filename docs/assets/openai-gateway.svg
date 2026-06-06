@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="520" viewBox="0 0 1100 520" role="img" aria-label="OpenAI compatible gateway flow">
+  <defs>
+    <style>
+      .bg { fill: #f8f9fb; }
+      .title { fill: #142033; font: 700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #5b697a; font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .label { fill: #1a2637; font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #526274; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .tiny { fill: #657588; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .box { stroke: #c5cfdb; stroke-width: 1.5; rx: 8; }
+      .arrow { stroke: #617083; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+      .sse { stroke: #3c8874; stroke-width: 2.2; fill: none; marker-end: url(#arrow-green); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#617083"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#3c8874"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1100" height="520"/>
+  <text class="title" x="48" y="58">OpenAI-compatible inference gateway</text>
+  <text class="subtitle" x="48" y="84">Local HTTP server exposes Qwen3 CPU/MPS runtime through /v1 endpoints</text>
+
+  <rect class="box" x="54" y="142" width="174" height="102" fill="#eaf3ff"/>
+  <text class="label" x="82" y="176">Client</text>
+  <text class="small" x="82" y="202">OpenAI SDK</text>
+  <text class="small" x="82" y="223">curl / agent loop</text>
+
+  <rect class="box" x="286" y="116" width="210" height="154" fill="#fff6dc"/>
+  <text class="label" x="316" y="150">POSIX HTTP server</text>
+  <text class="small" x="316" y="177">request line + headers</text>
+  <text class="small" x="316" y="198">Content-Length body</text>
+  <text class="small" x="316" y="219">Connection: close</text>
+  <text class="small" x="316" y="240">OpenAI-style errors</text>
+
+  <rect class="box" x="554" y="116" width="220" height="154" fill="#f1edff"/>
+  <text class="label" x="586" y="150">Protocol adapter</text>
+  <text class="small" x="586" y="177">messages + prompt parse</text>
+  <text class="small" x="586" y="198">sampling options</text>
+  <text class="small" x="586" y="219">tools/tool_choice</text>
+  <text class="small" x="586" y="240">SSE chunk formatting</text>
+
+  <rect class="box" x="832" y="116" width="210" height="154" fill="#edf8f0"/>
+  <text class="label" x="862" y="150">Qwen runtime</text>
+  <text class="small" x="862" y="177">generate_cpu wrapper</text>
+  <text class="small" x="862" y="198">CPU reference</text>
+  <text class="small" x="862" y="219">MPS full forward</text>
+  <text class="small" x="862" y="240">token stream callback</text>
+
+  <path class="arrow" d="M228 193 L286 193"/>
+  <path class="arrow" d="M496 193 L554 193"/>
+  <path class="arrow" d="M774 193 L832 193"/>
+
+  <rect class="box" x="122" y="338" width="194" height="90" fill="#eef8f3"/>
+  <text class="label" x="150" y="372">Model metadata</text>
+  <text class="small" x="150" y="399">GET /v1/models</text>
+
+  <rect class="box" x="364" y="338" width="214" height="90" fill="#eef8f3"/>
+  <text class="label" x="392" y="372">Schema</text>
+  <text class="small" x="392" y="399">GET /openapi.json</text>
+
+  <rect class="box" x="626" y="338" width="244" height="90" fill="#eafaf7"/>
+  <text class="label" x="654" y="372">Chat/completions</text>
+  <text class="small" x="654" y="399">JSON or data: ... [DONE]</text>
+
+  <path class="sse" d="M932 270 C932 324 820 326 748 338"/>
+  <path class="sse" d="M626 384 C450 474 142 464 142 244"/>
+  <text class="tiny" x="690" y="472">Tool calling returns protocol-compatible tool_calls; external execution stays in the client/agent loop.</text>
+</svg>
