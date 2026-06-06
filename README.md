@@ -1,7 +1,7 @@
 # kraken-infer
 
 <p align="center">
-  <img src="docs/assets/kraken-logo.svg" alt="kraken-infer logo" width="180">
+  <img src="docs/assets/kraken-logo.png" alt="kraken-infer logo" width="180">
 </p>
 
 `kraken-infer` 是一个 C++20 本地 LLM inference runtime，当前目标模型是
@@ -88,9 +88,10 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
 - Chat completions。
 - SSE streaming。
 - `temperature`、`top_p`、`seed`、`max_tokens`、`max_completion_tokens`。
+- `enable_thinking`，用于打开或关闭 Qwen3 thinking 输出。
 - 非标准但实用的 per-request `device`。
 - 基础 tools/tool_choice 协议兼容，返回 OpenAI-style `tool_calls`。
-- 浏览器对话页 `/chat_page`，直接调用 `/v1/chat/completions`。
+- 浏览器对话页 `/chat_page`，支持 max new tokens、streaming 和 thinking 开关。
 
 Tool calling 只做协议兼容：gateway 返回 `tool_calls`，不执行外部工具。
 
@@ -107,7 +108,6 @@ models/qwen3-0.6b/
 配置和构建：
 
 ```bash
-source ~/.zshrc
 cmake --preset debug
 cmake --build --preset debug
 ctest --preset debug
@@ -166,7 +166,8 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{
     "model": "qwen3-0.6b",
     "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 16,
+    "max_completion_tokens": 16,
+    "enable_thinking": false,
     "device": "mps"
   }'
 ```
@@ -179,7 +180,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   -d '{
     "model": "qwen3-0.6b",
     "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 16,
+    "max_completion_tokens": 16,
     "stream": true,
     "device": "mps"
   }'
@@ -316,6 +317,7 @@ src/runtime/             Runtime orchestration and public inference wrapper
 src/runtime/cpu/         Tokenizer, safetensors, Qwen CPU reference, KV cache
 src/backends/mps/        Objective-C++ Metal/MPS backend
 tests/                   CTest smoke tests
+web/                     Static browser chat page assets
 ```
 
 ## Current Boundaries

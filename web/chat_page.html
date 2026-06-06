@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kraken-infer Chat</title>
+  <link rel="stylesheet" href="/chat_page.css">
+  <script defer src="/chat_page.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <header>
+        <h1>kraken-infer</h1>
+        <div class="status" id="status">Ready</div>
+      </header>
+      <div class="field">
+        <label for="model">Model</label>
+        <input id="model" autocomplete="off">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="device">Device</label>
+          <select id="device">
+            <option value="cpu">cpu</option>
+            <option value="mps:0">mps:0</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="tokens">Max new tokens</label>
+          <input id="tokens" type="number" min="1" max="4096" step="1">
+        </div>
+      </div>
+      <div class="field">
+        <label for="temperature">Temperature</label>
+        <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.6">
+      </div>
+      <label class="toggle" for="stream">
+        <span>Stream</span>
+        <input id="stream" type="checkbox" checked>
+      </label>
+      <label class="toggle" for="thinking">
+        <span>Thinking</span>
+        <input id="thinking" type="checkbox">
+      </label>
+    </aside>
+    <main>
+      <section class="messages" id="messages">
+        <div class="empty" id="empty">No messages</div>
+      </section>
+      <form id="composer">
+        <textarea id="prompt" rows="2" autocomplete="off" spellcheck="true"></textarea>
+        <button id="send" type="submit">Send</button>
+        <button id="stop" class="secondary" type="button" disabled>Stop</button>
+      </form>
+    </main>
+  </div>
+</body>
+</html>
