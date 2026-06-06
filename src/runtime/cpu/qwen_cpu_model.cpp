@@ -37,6 +37,38 @@ struct LayerWeights {
   TensorView down_proj;
 };
 
+struct MpsLayerWeights {
+  mps::MpsBuffer input_norm;
+  mps::MpsBuffer q_proj;
+  mps::MpsBuffer q_norm;
+  mps::MpsBuffer k_proj;
+  mps::MpsBuffer k_norm;
+  mps::MpsBuffer v_proj;
+  mps::MpsBuffer o_proj;
+  mps::MpsBuffer post_norm;
+  mps::MpsBuffer gate_proj;
+  mps::MpsBuffer up_proj;
+  mps::MpsBuffer down_proj;
+};
+
+struct MpsWorkspace {
+  mps::MpsBuffer hidden;
+  mps::MpsBuffer normed;
+  mps::MpsBuffer q;
+  mps::MpsBuffer k;
+  mps::MpsBuffer v;
+  mps::MpsBuffer attn_out;
+  mps::MpsBuffer projected;
+  mps::MpsBuffer gate;
+  mps::MpsBuffer up;
+  mps::MpsBuffer down;
+  mps::MpsBuffer logits;
+  mps::MpsBuffer key_cache;
+  mps::MpsBuffer value_cache;
+  std::size_t capacity_tokens{0};
+  std::size_t used_tokens{0};
+};
+
 struct EffectiveSamplingConfig {
   bool do_sample{false};
   double temperature{1.0};
@@ -115,15 +147,13 @@ class CpuQwenModel {
                           const std::function<void(std::string_view)>& stream_token) {
     DebugDumper dumper(debug_dump_dir);
     DumperScope dumper_scope(dumper_, dumper.enabled() ? &dumper : nullptr);
+    if (compute_device.kind == DeviceKind::mps) {
+      return generate_mps(messages, max_new_tokens, enable_thinking, verify_kv_cache,
+                          compute_device, sampling, stream_token);
+    }
+
     const auto effective_sampling = make_effective_sampling(generation_, sampling);
     std::mt19937_64 rng(effective_sampling.seed);
-    const bool use_mps_lm_head = compute_device.kind == DeviceKind::mps;
-    if (use_mps_lm_head) {
-      if (compute_device.index != 0) {
-        throw std::runtime_error("only mps:0 is supported");
-      }
-      prepare_mps_lm_head();
-    }
 
     const auto prompt_tokens = tokenizer_.encode_chat_messages(messages, enable_thinking);
     if (prompt_tokens.empty()) {
@@ -144,7 +174,7 @@ class CpuQwenModel {
     std::vector<std::int64_t> generated;
     generated.reserve(max_new_tokens);
     for (std::size_t step = 0; step < max_new_tokens; ++step) {
-      const auto logits = compute_logits(hidden, use_mps_lm_head);
+      const auto logits = compute_logits(hidden, false);
       dump_f32(position_tensor_name(position - 1U, "logits"),
                {static_cast<std::uint64_t>(config_.vocab_size)}, logits);
       const auto next_token = select_next_token(logits, rng, effective_sampling);
@@ -165,7 +195,7 @@ class CpuQwenModel {
     if (verify_kv_cache) {
       const auto recomputed =
         generate_recomputed_tokens(prompt_tokens, max_new_tokens, effective_sampling,
-                                   use_mps_lm_head);
+                                   false);
       if (recomputed != generated) {
         throw std::runtime_error("KV cache verification failed: cached decode differs from "
                                  "full-prefix recompute");
@@ -231,6 +261,403 @@ class CpuQwenModel {
     }
   }
 
+  CpuModelOutput generate_mps(const std::vector<ChatMessage>& messages,
+                              std::size_t max_new_tokens, bool enable_thinking,
+                              bool verify_kv_cache, Device compute_device,
+                              const CpuSamplingConfig& sampling,
+                              const std::function<void(std::string_view)>& stream_token) {
+    if (compute_device.index != 0) {
+      throw std::runtime_error("only mps:0 is supported");
+    }
+    const auto effective_sampling = make_effective_sampling(generation_, sampling);
+    std::mt19937_64 rng(effective_sampling.seed);
+    const auto prompt_tokens = tokenizer_.encode_chat_messages(messages, enable_thinking);
+    if (prompt_tokens.empty()) {
+      throw std::runtime_error("tokenizer produced no prompt tokens");
+    }
+    dump_i64("prompt_tokens", {static_cast<std::uint64_t>(prompt_tokens.size())}, prompt_tokens);
+
+    const auto total_tokens = prompt_tokens.size() + max_new_tokens + 1U;
+    prepare_mps_full_forward(total_tokens);
+
+    std::size_t position = 0;
+    for (const auto token : prompt_tokens) {
+      forward_token_mps(token, position);
+      ++position;
+    }
+
+    std::vector<std::int64_t> generated;
+    generated.reserve(max_new_tokens);
+    for (std::size_t step = 0; step < max_new_tokens; ++step) {
+      const auto logits = compute_logits_mps_device();
+      dump_f32(position_tensor_name(position - 1U, "logits"),
+               {static_cast<std::uint64_t>(config_.vocab_size)}, logits);
+      const auto next_token = select_next_token(logits, rng, effective_sampling);
+      if (is_eos(next_token)) {
+        break;
+      }
+      generated.push_back(next_token);
+      if (stream_token) {
+        const auto token_text = tokenizer_.decode(std::vector<std::int64_t>{next_token});
+        stream_token(token_text);
+      }
+      forward_token_mps(next_token, position);
+      ++position;
+    }
+    dump_i64("generated_tokens", {static_cast<std::uint64_t>(generated.size())}, generated);
+
+    const auto cached_stats = mps_kv_stats();
+    bool verified = false;
+    if (verify_kv_cache) {
+      const auto recomputed =
+        generate_mps_recomputed_tokens(prompt_tokens, max_new_tokens, effective_sampling);
+      if (recomputed != generated) {
+        throw std::runtime_error("MPS KV cache verification failed: cached decode differs from "
+                                 "full-prefix recompute");
+      }
+      verified = true;
+    }
+
+    return CpuModelOutput{tokenizer_.decode(generated), cached_stats, verified};
+  }
+
+  std::vector<std::int64_t> generate_mps_recomputed_tokens(
+    const std::vector<std::int64_t>& prompt_tokens, std::size_t max_new_tokens,
+    const EffectiveSamplingConfig& sampling) {
+    DumperScope disable_dump(dumper_, nullptr);
+    std::mt19937_64 rng(sampling.seed);
+    std::vector<std::int64_t> tokens = prompt_tokens;
+    std::vector<std::int64_t> generated;
+    generated.reserve(max_new_tokens);
+
+    for (std::size_t step = 0; step < max_new_tokens; ++step) {
+      reset_mps_workspace(tokens.size() + 1U);
+      for (std::size_t position = 0; position < tokens.size(); ++position) {
+        forward_token_mps(tokens[position], position);
+      }
+      const auto logits = compute_logits_mps_device();
+      const auto next_token = select_next_token(logits, rng, sampling);
+      if (is_eos(next_token)) {
+        break;
+      }
+      generated.push_back(next_token);
+      tokens.push_back(next_token);
+    }
+    return generated;
+  }
+
+  void ensure_mps_context() {
+    if (mps_context_ != nullptr) {
+      return;
+    }
+    auto context_result = mps::MpsContext::create();
+    if (!context_result.is_ok()) {
+      throw std::runtime_error("MPS initialization failed: " +
+                               context_result.status().message());
+    }
+    auto context = std::move(context_result.value());
+    mps_context_ = std::make_unique<mps::MpsContext>(std::move(context));
+  }
+
+  std::size_t f32_bytes(std::size_t values) const {
+    if (values > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
+      throw std::runtime_error("MPS f32 buffer byte count overflow");
+    }
+    return values * sizeof(float);
+  }
+
+  mps::MpsBuffer make_mps_buffer(std::size_t byte_size, std::string_view name) {
+    auto result = mps_context_->make_buffer(byte_size);
+    if (!result.is_ok()) {
+      throw std::runtime_error("MPS " + std::string{name} + " allocation failed: " +
+                               result.status().message());
+    }
+    return std::move(result.value());
+  }
+
+  mps::MpsBuffer upload_tensor_to_mps(const TensorView& tensor, std::string_view name) {
+    auto buffer = make_mps_buffer(static_cast<std::size_t>(tensor.byte_size), name);
+    const auto status =
+      mps_context_->copy_to_buffer(buffer, tensor.data, static_cast<std::size_t>(tensor.byte_size));
+    if (!status.is_ok()) {
+      throw std::runtime_error("MPS " + std::string{name} + " upload failed: " +
+                               status.message());
+    }
+    return buffer;
+  }
+
+  void prepare_mps_full_forward(std::size_t capacity_tokens) {
+    ensure_mps_context();
+    if (!mps_weights_ready_) {
+      mps_embedding_ = upload_tensor_to_mps(embedding_, "embedding");
+      mps_final_norm_ = upload_tensor_to_mps(final_norm_, "final_norm");
+      mps_lm_head_ = upload_tensor_to_mps(lm_head_, "lm_head");
+      mps_layers_.resize(layers_.size());
+      for (std::size_t i = 0; i < layers_.size(); ++i) {
+        auto& target = mps_layers_[i];
+        const auto prefix = "layer." + std::to_string(i) + ".";
+        target.input_norm = upload_tensor_to_mps(layers_[i].input_norm, prefix + "input_norm");
+        target.q_proj = upload_tensor_to_mps(layers_[i].q_proj, prefix + "q_proj");
+        target.q_norm = upload_tensor_to_mps(layers_[i].q_norm, prefix + "q_norm");
+        target.k_proj = upload_tensor_to_mps(layers_[i].k_proj, prefix + "k_proj");
+        target.k_norm = upload_tensor_to_mps(layers_[i].k_norm, prefix + "k_norm");
+        target.v_proj = upload_tensor_to_mps(layers_[i].v_proj, prefix + "v_proj");
+        target.o_proj = upload_tensor_to_mps(layers_[i].o_proj, prefix + "o_proj");
+        target.post_norm = upload_tensor_to_mps(layers_[i].post_norm, prefix + "post_norm");
+        target.gate_proj = upload_tensor_to_mps(layers_[i].gate_proj, prefix + "gate_proj");
+        target.up_proj = upload_tensor_to_mps(layers_[i].up_proj, prefix + "up_proj");
+        target.down_proj = upload_tensor_to_mps(layers_[i].down_proj, prefix + "down_proj");
+      }
+      mps_weights_ready_ = true;
+      mps_lm_head_ready_ = true;
+    }
+    reset_mps_workspace(capacity_tokens);
+  }
+
+  void reset_mps_workspace(std::size_t capacity_tokens) {
+    if (capacity_tokens == 0) {
+      throw std::runtime_error("MPS KV cache capacity must be positive");
+    }
+    if (mps_workspace_.capacity_tokens >= capacity_tokens && mps_workspace_.hidden.valid()) {
+      mps_workspace_.used_tokens = 0;
+      return;
+    }
+
+    const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
+    const auto head_dim = static_cast<std::size_t>(config_.head_dim);
+    const auto heads = static_cast<std::size_t>(config_.num_attention_heads);
+    const auto kv_heads = static_cast<std::size_t>(config_.num_key_value_heads);
+    const auto layers = static_cast<std::size_t>(config_.num_hidden_layers);
+    const auto intermediate = static_cast<std::size_t>(config_.intermediate_size);
+    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+    const auto attn_dim = heads * head_dim;
+    const auto kv_dim = kv_heads * head_dim;
+
+    MpsWorkspace workspace;
+    workspace.hidden = make_mps_buffer(f32_bytes(hidden_size), "hidden");
+    workspace.normed = make_mps_buffer(f32_bytes(hidden_size), "normed");
+    workspace.q = make_mps_buffer(f32_bytes(attn_dim), "q");
+    workspace.k = make_mps_buffer(f32_bytes(kv_dim), "k");
+    workspace.v = make_mps_buffer(f32_bytes(kv_dim), "v");
+    workspace.attn_out = make_mps_buffer(f32_bytes(attn_dim), "attention_out");
+    workspace.projected = make_mps_buffer(f32_bytes(hidden_size), "projected");
+    workspace.gate = make_mps_buffer(f32_bytes(intermediate), "gate");
+    workspace.up = make_mps_buffer(f32_bytes(intermediate), "up");
+    workspace.down = make_mps_buffer(f32_bytes(hidden_size), "down");
+    workspace.logits = make_mps_buffer(f32_bytes(vocab), "logits");
+    workspace.key_cache =
+      make_mps_buffer(f32_bytes(layers * capacity_tokens * kv_dim), "key_cache");
+    workspace.value_cache =
+      make_mps_buffer(f32_bytes(layers * capacity_tokens * kv_dim), "value_cache");
+    workspace.capacity_tokens = capacity_tokens;
+    workspace.used_tokens = 0;
+    mps_workspace_ = std::move(workspace);
+  }
+
+  KvCacheStats mps_kv_stats() const {
+    const auto layers = static_cast<std::size_t>(config_.num_hidden_layers);
+    const auto kv_heads = static_cast<std::size_t>(config_.num_key_value_heads);
+    const auto head_dim = static_cast<std::size_t>(config_.head_dim);
+    const auto kv_dim = kv_heads * head_dim;
+    const auto values = layers * mps_workspace_.capacity_tokens * kv_dim;
+    const auto key_bytes = static_cast<std::uint64_t>(f32_bytes(values));
+    const auto value_bytes = static_cast<std::uint64_t>(f32_bytes(values));
+    return KvCacheStats{true,
+                        layers,
+                        kv_heads,
+                        head_dim,
+                        kv_dim,
+                        mps_workspace_.capacity_tokens,
+                        mps_workspace_.used_tokens,
+                        key_bytes,
+                        value_bytes,
+                        key_bytes + value_bytes};
+  }
+
+  void expect_mps(Status status, std::string_view operation) const {
+    if (!status.is_ok()) {
+      throw std::runtime_error("MPS " + std::string{operation} + " failed: " +
+                               status.message());
+    }
+  }
+
+  void dump_mps_f32(std::string_view name, const std::vector<std::uint64_t>& shape,
+                    const mps::MpsBuffer& buffer, std::size_t values) const {
+    if (dumper_ == nullptr) {
+      return;
+    }
+    std::vector<float> output(values);
+    expect_mps(mps_context_->copy_from_buffer(buffer, output.data(), f32_bytes(values)),
+               "debug dump readback");
+    dumper_->write_f32(name, shape, output);
+  }
+
+  void forward_token_mps(std::int64_t token, std::size_t position) {
+    if (position >= mps_workspace_.capacity_tokens) {
+      throw std::runtime_error("MPS KV cache position exceeds capacity");
+    }
+    const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
+    expect_mps(mps_context_->embedding_bf16_f32(mps_embedding_, token, hidden_size,
+                                               mps_workspace_.hidden),
+               "embedding");
+    dump_mps_f32(position_tensor_name(position, "embedding"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.hidden,
+                 hidden_size);
+
+    for (std::size_t layer_index = 0; layer_index < mps_layers_.size(); ++layer_index) {
+      apply_layer_mps(mps_layers_[layer_index], layer_index, position);
+    }
+
+    expect_mps(mps_context_->rms_norm_f32_bf16(
+                 mps_workspace_.hidden, mps_final_norm_, hidden_size,
+                 static_cast<float>(config_.rms_norm_eps), mps_workspace_.normed),
+               "final_norm");
+    dump_mps_f32(position_tensor_name(position, "final_norm"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.normed,
+                 hidden_size);
+    mps_workspace_.used_tokens = std::max(mps_workspace_.used_tokens, position + 1U);
+  }
+
+  void apply_layer_mps(const MpsLayerWeights& layer, std::size_t layer_index,
+                       std::size_t position) {
+    const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
+    const auto head_dim = static_cast<std::size_t>(config_.head_dim);
+    const auto heads = static_cast<std::size_t>(config_.num_attention_heads);
+    const auto kv_heads = static_cast<std::size_t>(config_.num_key_value_heads);
+    const auto intermediate = static_cast<std::size_t>(config_.intermediate_size);
+    const auto attn_dim = heads * head_dim;
+    const auto kv_dim = kv_heads * head_dim;
+    const auto eps = static_cast<float>(config_.rms_norm_eps);
+
+    expect_mps(mps_context_->rms_norm_f32_bf16(mps_workspace_.hidden, layer.input_norm,
+                                               hidden_size, eps, mps_workspace_.normed),
+               "input_norm");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "input_norm"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.normed,
+                 hidden_size);
+    expect_mps(mps_context_->matvec_bf16_f32_device(layer.q_proj, attn_dim, hidden_size,
+                                                    mps_workspace_.normed, mps_workspace_.q),
+               "q_proj");
+    expect_mps(mps_context_->matvec_bf16_f32_device(layer.k_proj, kv_dim, hidden_size,
+                                                    mps_workspace_.normed, mps_workspace_.k),
+               "k_proj");
+    expect_mps(mps_context_->matvec_bf16_f32_device(layer.v_proj, kv_dim, hidden_size,
+                                                    mps_workspace_.normed, mps_workspace_.v),
+               "v_proj");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "q_proj"),
+                 {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)},
+                 mps_workspace_.q, attn_dim);
+    dump_mps_f32(layer_tensor_name(position, layer_index, "k_proj"),
+                 {static_cast<std::uint64_t>(kv_heads), static_cast<std::uint64_t>(head_dim)},
+                 mps_workspace_.k, kv_dim);
+    dump_mps_f32(layer_tensor_name(position, layer_index, "v_proj"),
+                 {static_cast<std::uint64_t>(kv_heads), static_cast<std::uint64_t>(head_dim)},
+                 mps_workspace_.v, kv_dim);
+    expect_mps(mps_context_->qk_norm_f32_bf16(mps_workspace_.q, layer.q_norm, heads,
+                                              head_dim, eps),
+               "q_norm");
+    expect_mps(mps_context_->qk_norm_f32_bf16(mps_workspace_.k, layer.k_norm, kv_heads,
+                                              head_dim, eps),
+               "k_norm");
+    expect_mps(mps_context_->rope_f32(mps_workspace_.q, heads, head_dim, position,
+                                      static_cast<float>(config_.rope_theta)),
+               "q_rope");
+    expect_mps(mps_context_->rope_f32(mps_workspace_.k, kv_heads, head_dim, position,
+                                      static_cast<float>(config_.rope_theta)),
+               "k_rope");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "q_norm_rope"),
+                 {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)},
+                 mps_workspace_.q, attn_dim);
+    dump_mps_f32(layer_tensor_name(position, layer_index, "k_norm_rope"),
+                 {static_cast<std::uint64_t>(kv_heads), static_cast<std::uint64_t>(head_dim)},
+                 mps_workspace_.k, kv_dim);
+
+    const auto cache_offset =
+      (layer_index * mps_workspace_.capacity_tokens + position) * kv_dim;
+    expect_mps(mps_context_->copy_f32_region(mps_workspace_.k, mps_workspace_.key_cache, 0,
+                                             cache_offset, kv_dim),
+               "store_k");
+    expect_mps(mps_context_->copy_f32_region(mps_workspace_.v, mps_workspace_.value_cache, 0,
+                                             cache_offset, kv_dim),
+               "store_v");
+
+    expect_mps(mps_context_->attention_f32(mps_workspace_.q, mps_workspace_.key_cache,
+                                           mps_workspace_.value_cache, layer_index, position,
+                                           mps_workspace_.capacity_tokens, heads, kv_heads,
+                                           head_dim, mps_workspace_.attn_out),
+               "attention");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "attention_out"),
+                 {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)},
+                 mps_workspace_.attn_out, attn_dim);
+    expect_mps(mps_context_->matvec_bf16_f32_device(layer.o_proj, hidden_size, attn_dim,
+                                                    mps_workspace_.attn_out,
+                                                    mps_workspace_.projected),
+               "o_proj");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "attention_projected"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.projected,
+                 hidden_size);
+    expect_mps(mps_context_->add_f32_in_place(mps_workspace_.hidden,
+                                              mps_workspace_.projected, hidden_size),
+               "attention_residual");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "attention_residual"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.hidden,
+                 hidden_size);
+
+    expect_mps(mps_context_->rms_norm_f32_bf16(mps_workspace_.hidden, layer.post_norm,
+                                               hidden_size, eps, mps_workspace_.normed),
+               "post_attention_norm");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "post_attention_norm"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.normed,
+                 hidden_size);
+    expect_mps(mps_context_->matvec_bf16_f32_device(layer.gate_proj, intermediate,
+                                                    hidden_size, mps_workspace_.normed,
+                                                    mps_workspace_.gate),
+               "gate_proj");
+    expect_mps(mps_context_->matvec_bf16_f32_device(layer.up_proj, intermediate,
+                                                    hidden_size, mps_workspace_.normed,
+                                                    mps_workspace_.up),
+               "up_proj");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_gate_proj"),
+                 {static_cast<std::uint64_t>(intermediate)}, mps_workspace_.gate,
+                 intermediate);
+    dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_up_proj"),
+                 {static_cast<std::uint64_t>(intermediate)}, mps_workspace_.up,
+                 intermediate);
+    expect_mps(mps_context_->silu_mul_f32_in_place(mps_workspace_.gate, mps_workspace_.up,
+                                                   intermediate),
+               "silu_gate_mul");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_gate_silu_mul"),
+                 {static_cast<std::uint64_t>(intermediate)}, mps_workspace_.gate,
+                 intermediate);
+    expect_mps(mps_context_->matvec_bf16_f32_device(layer.down_proj, hidden_size,
+                                                    intermediate, mps_workspace_.gate,
+                                                    mps_workspace_.down),
+               "down_proj");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_down_proj"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.down,
+                 hidden_size);
+    expect_mps(mps_context_->add_f32_in_place(mps_workspace_.hidden, mps_workspace_.down,
+                                              hidden_size),
+               "mlp_residual");
+    dump_mps_f32(layer_tensor_name(position, layer_index, "layer_output"),
+                 {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.hidden,
+                 hidden_size);
+  }
+
+  std::vector<float> compute_logits_mps_device() {
+    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+    const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
+    expect_mps(mps_context_->matvec_bf16_f32_device(mps_lm_head_, vocab, hidden_size,
+                                                    mps_workspace_.normed,
+                                                    mps_workspace_.logits),
+               "lm_head");
+    std::vector<float> logits(vocab);
+    expect_mps(mps_context_->copy_from_buffer(mps_workspace_.logits, logits.data(),
+                                              f32_bytes(vocab)),
+               "logits readback");
+    return logits;
+  }
+
   void prepare_mps_lm_head() {
     if (mps_lm_head_ready_) {
       return;
@@ -252,8 +679,16 @@ class CpuQwenModel {
     if (!copy_status.is_ok()) {
       throw std::runtime_error("MPS lm_head upload failed: " + copy_status.message());
     }
+    auto workspace_result = context.make_matvec_workspace(
+      static_cast<std::size_t>(config_.vocab_size),
+      static_cast<std::size_t>(config_.hidden_size));
+    if (!workspace_result.is_ok()) {
+      throw std::runtime_error("MPS lm_head workspace allocation failed: " +
+                               workspace_result.status().message());
+    }
     mps_context_ = std::make_unique<mps::MpsContext>(std::move(context));
     mps_lm_head_ = std::move(buffer);
+    mps_lm_head_workspace_ = std::move(workspace_result.value());
     mps_lm_head_ready_ = true;
   }
 
@@ -487,10 +922,8 @@ class CpuQwenModel {
     if (mps_context_ == nullptr || !mps_lm_head_.valid()) {
       throw std::runtime_error("MPS lm_head is not initialized");
     }
-    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
-    const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
     const auto logits_result =
-      mps_context_->matvec_bf16_f32(mps_lm_head_, vocab, hidden_size, hidden);
+      mps_context_->matvec_bf16_f32(mps_lm_head_, mps_lm_head_workspace_, hidden);
     if (!logits_result.is_ok()) {
       throw std::runtime_error("MPS lm_head matvec failed: " +
                                logits_result.status().message());
@@ -614,7 +1047,13 @@ class CpuQwenModel {
   KvCache kv_cache_;
   DebugDumper* dumper_{nullptr};
   std::unique_ptr<mps::MpsContext> mps_context_;
+  mps::MpsBuffer mps_embedding_;
+  mps::MpsBuffer mps_final_norm_;
   mps::MpsBuffer mps_lm_head_;
+  mutable mps::MpsMatVecWorkspace mps_lm_head_workspace_;
+  std::vector<MpsLayerWeights> mps_layers_;
+  MpsWorkspace mps_workspace_;
+  bool mps_weights_ready_{false};
   bool mps_lm_head_ready_{false};
 };
 

@@ -5,12 +5,16 @@
 #include "toyllm/runtime/runtime.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -57,6 +61,154 @@ void test_mps_operator_smoke() {
   } else {
     assert(!status.is_ok());
   }
+}
+
+std::uint16_t float_to_bf16(float value) {
+  std::uint32_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return static_cast<std::uint16_t>(bits >> 16U);
+}
+
+toyllm::mps::MpsBuffer make_f32_buffer(toyllm::mps::MpsContext& context,
+                                       const std::vector<float>& values) {
+  auto buffer_result = context.make_buffer(values.size() * sizeof(float));
+  assert(buffer_result.is_ok());
+  auto buffer = std::move(buffer_result.value());
+  const auto status = context.copy_to_buffer(buffer, values.data(), values.size() * sizeof(float));
+  assert(status.is_ok());
+  return buffer;
+}
+
+toyllm::mps::MpsBuffer make_bf16_buffer(toyllm::mps::MpsContext& context,
+                                        const std::vector<float>& values) {
+  std::vector<std::uint16_t> bf16_values;
+  bf16_values.reserve(values.size());
+  for (const auto value : values) {
+    bf16_values.push_back(float_to_bf16(value));
+  }
+  auto buffer_result = context.make_buffer(bf16_values.size() * sizeof(std::uint16_t));
+  assert(buffer_result.is_ok());
+  auto buffer = std::move(buffer_result.value());
+  const auto status =
+    context.copy_to_buffer(buffer, bf16_values.data(),
+                           bf16_values.size() * sizeof(std::uint16_t));
+  assert(status.is_ok());
+  return buffer;
+}
+
+std::vector<float> read_f32_buffer(const toyllm::mps::MpsContext& context,
+                                   const toyllm::mps::MpsBuffer& buffer,
+                                   std::size_t values) {
+  std::vector<float> output(values);
+  const auto status = context.copy_from_buffer(buffer, output.data(), values * sizeof(float));
+  assert(status.is_ok());
+  return output;
+}
+
+void assert_close(float actual, float expected) {
+  assert(std::abs(actual - expected) < 1e-5F);
+}
+
+void test_mps_matvec_workspace_reuse() {
+  auto context_result = toyllm::mps::MpsContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  const std::uint16_t weight[] = {
+    float_to_bf16(1.0F),
+    float_to_bf16(2.0F),
+    float_to_bf16(3.0F),
+    float_to_bf16(1.0F),
+  };
+  auto weight_buffer_result = context.make_buffer(sizeof(weight));
+  assert(weight_buffer_result.is_ok());
+  auto weight_buffer = std::move(weight_buffer_result.value());
+  const auto copy_status = context.copy_to_buffer(weight_buffer, weight, sizeof(weight));
+  assert(copy_status.is_ok());
+
+  auto workspace_result = context.make_matvec_workspace(2, 2);
+  assert(workspace_result.is_ok());
+  auto workspace = std::move(workspace_result.value());
+  assert(workspace.valid());
+  assert(workspace.rows() == 2);
+  assert(workspace.cols() == 2);
+
+  const auto first = context.matvec_bf16_f32(weight_buffer, workspace, {3.0F, 4.0F});
+  assert(first.is_ok());
+  assert(first.value().size() == 2);
+  assert(std::abs(first.value()[0] - 11.0F) < 1e-5F);
+  assert(std::abs(first.value()[1] - 13.0F) < 1e-5F);
+
+  const auto second = context.matvec_bf16_f32(weight_buffer, workspace, {1.0F, 1.0F});
+  assert(second.is_ok());
+  assert(second.value().size() == 2);
+  assert(std::abs(second.value()[0] - 3.0F) < 1e-5F);
+  assert(std::abs(second.value()[1] - 4.0F) < 1e-5F);
+}
+
+void test_mps_full_forward_operators() {
+  auto context_result = toyllm::mps::MpsContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  auto embedding_weight = make_bf16_buffer(context, {1.0F, 2.0F, 3.0F, 4.0F});
+  auto embedding_output = make_f32_buffer(context, {0.0F, 0.0F});
+  assert(context.embedding_bf16_f32(embedding_weight, 1, 2, embedding_output).is_ok());
+  auto output = read_f32_buffer(context, embedding_output, 2);
+  assert_close(output[0], 3.0F);
+  assert_close(output[1], 4.0F);
+
+  auto norm_input = make_f32_buffer(context, {1.0F, 1.0F});
+  auto norm_weight = make_bf16_buffer(context, {2.0F, 3.0F});
+  auto norm_output = make_f32_buffer(context, {0.0F, 0.0F});
+  assert(context.rms_norm_f32_bf16(norm_input, norm_weight, 2, 0.0F, norm_output).is_ok());
+  output = read_f32_buffer(context, norm_output, 2);
+  assert_close(output[0], 2.0F);
+  assert_close(output[1], 3.0F);
+
+  auto q_values = make_f32_buffer(context, {1.0F, 1.0F});
+  assert(context.qk_norm_f32_bf16(q_values, norm_weight, 1, 2, 0.0F).is_ok());
+  assert(context.rope_f32(q_values, 1, 2, 0, 10000.0F).is_ok());
+  output = read_f32_buffer(context, q_values, 2);
+  assert_close(output[0], 2.0F);
+  assert_close(output[1], 3.0F);
+
+  auto target = make_f32_buffer(context, {1.0F, 2.0F});
+  auto delta = make_f32_buffer(context, {3.0F, 4.0F});
+  assert(context.add_f32_in_place(target, delta, 2).is_ok());
+  output = read_f32_buffer(context, target, 2);
+  assert_close(output[0], 4.0F);
+  assert_close(output[1], 6.0F);
+
+  auto gate = make_f32_buffer(context, {0.0F, 0.0F});
+  auto up = make_f32_buffer(context, {5.0F, 6.0F});
+  assert(context.silu_mul_f32_in_place(gate, up, 2).is_ok());
+  output = read_f32_buffer(context, gate, 2);
+  assert_close(output[0], 0.0F);
+  assert_close(output[1], 0.0F);
+
+  auto destination = make_f32_buffer(context, {0.0F, 0.0F, 0.0F});
+  assert(context.copy_f32_region(delta, destination, 0, 1, 2).is_ok());
+  output = read_f32_buffer(context, destination, 3);
+  assert_close(output[0], 0.0F);
+  assert_close(output[1], 3.0F);
+  assert_close(output[2], 4.0F);
+
+  auto query = make_f32_buffer(context, {1.0F, 0.0F});
+  auto key_cache = make_f32_buffer(context, {1.0F, 0.0F});
+  auto value_cache = make_f32_buffer(context, {5.0F, 6.0F});
+  auto attention_output = make_f32_buffer(context, {0.0F, 0.0F});
+  assert(context.attention_f32(query, key_cache, value_cache, 0, 0, 1, 1, 1, 2,
+                               attention_output)
+           .is_ok());
+  output = read_f32_buffer(context, attention_output, 2);
+  assert_close(output[0], 5.0F);
+  assert_close(output[1], 6.0F);
 }
 
 void test_qwen3_model_config() {
@@ -212,6 +364,8 @@ int main() {
   test_runtime_info();
   test_mps_backend_query();
   test_mps_operator_smoke();
+  test_mps_matvec_workspace_reuse();
+  test_mps_full_forward_operators();
   test_qwen3_model_config();
   test_cpu_generation_entrypoint();
   test_weight_summary();

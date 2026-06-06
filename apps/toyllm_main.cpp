@@ -1,6 +1,7 @@
 #include "toyllm/backends/mps/mps_backend.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
+#include "toyllm/runtime/openai_gateway.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -42,6 +43,9 @@ void print_usage(std::string_view program) {
                " [--device cpu|mps]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--kv-cache-stats] [--verify-kv-cache]\n\n";
+  std::cout << "  " << program
+            << " serve [--host 127.0.0.1] [--port 8080] [--model <model_dir>]"
+               " [--model-id ID] [--device cpu|mps] [--max-new-tokens N]\n\n";
   std::cout << "Compatibility flags:\n";
   std::cout << "  " << program << " --mps-info\n";
   std::cout << "  " << program << " --inspect-model <model_dir>\n";
@@ -295,6 +299,15 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
   }
 }
 
+int run_gateway(const toyllm::OpenAIGatewayConfig& config) {
+  const auto status = toyllm::serve_openai_gateway(config);
+  if (!status.is_ok()) {
+    std::cerr << "gateway failed: " << status.message() << '\n';
+    return EXIT_FAILURE;
+  }
+  return EXIT_SUCCESS;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -345,6 +358,56 @@ int main(int argc, char** argv) {
     }
     const auto model_path = argc == 3 ? std::filesystem::path{argv[2]} : default_model_path();
     return run_doctor(model_path);
+  }
+
+  if (arg_equals(argv[1], "serve")) {
+    toyllm::OpenAIGatewayConfig config;
+    config.model_dir = default_model_path();
+    for (int index = 2; index < argc; ++index) {
+      if (arg_equals(argv[index], "--host") && index + 1 < argc) {
+        config.host = argv[++index];
+        continue;
+      }
+      if (arg_equals(argv[index], "--port") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0 || *parsed > 65535U) {
+          std::cerr << "--port must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.port = static_cast<int>(*parsed);
+        continue;
+      }
+      if (arg_equals(argv[index], "--model") && index + 1 < argc) {
+        config.model_dir = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--model-id") && index + 1 < argc) {
+        config.model_id = argv[++index];
+        continue;
+      }
+      if (arg_equals(argv[index], "--device") && index + 1 < argc) {
+        const auto parsed = parse_device_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--device must be cpu or mps.\n";
+          return EXIT_FAILURE;
+        }
+        config.compute_device = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--max-new-tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--max-new-tokens must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.default_max_tokens = *parsed;
+        continue;
+      }
+      std::cerr << "Unknown serve option: " << argv[index] << '\n';
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    return run_gateway(config);
   }
 
   if (arg_equals(argv[1], "chat")) {

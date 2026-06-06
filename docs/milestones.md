@@ -27,10 +27,10 @@
 - [x] M5: basic CPU KV cache abstraction, bounds checks, stats
 - [x] M6: sampling and streaming CLI
 - [x] M7: MPS backend bring-up and MPS-assisted `lm_head` logits
-- [ ] M8: MPS full forward path, KV cache, and performance optimization
-- [ ] M9: OpenAI/OpenAPI-compatible HTTP gateway
+- [x] M8: MPS full forward path, KV cache, and performance optimization
+- [x] M9: OpenAI-compatible HTTP gateway and OpenAPI schema
 
-当前 `chat` 已能通过本地 Qwen3 0.6B 真实生成回复；CPU path 已支持 KV cache、采样和流式输出。MPS path 已完成 Metal buffer/kernel bring-up，并可把 `lm_head` logits matvec 放到 MPS 执行；完整 attention/MLP/KV cache 迁移继续放在 M8。
+当前 `chat` 已能通过本地 Qwen3 0.6B 真实生成回复；CPU path 已支持 KV cache、采样和流式输出。MPS path 已完成 full forward：embedding、RMSNorm、RoPE、linear projections、attention、MLP、device-resident KV cache 和 `lm_head` logits 都能在 MPS 上执行；CPU 仍保留为 reference backend。HTTP gateway 已支持 OpenAI-compatible `/v1/models`、`/v1/completions`、`/v1/chat/completions`、SSE streaming、基础 tools/tool_choice 协议和 OpenAPI schema。
 
 ## M1: Model Structure And Project Introspection
 
@@ -257,16 +257,19 @@
 - cache 内存占用可估算、可打印
 - 生成长文本时没有明显内存增长泄漏
 
-## M9: Inference Gateway And OpenAPI Protocol
+## M9: Inference Gateway And OpenAI-Compatible Protocol
 
 目标：在本地推理 runtime 之上提供 HTTP 网关，使外部应用可以通过标准 API 调用模型。
 
 功能范围：
 
-- 实现推理服务进程
-- 支持 OpenAPI 3.0 schema 描述
+- 实现 `toyllm serve` 推理服务进程
+- 支持 OpenAPI 3.0 schema 描述：
+  - `GET /openapi.json`
+  - `GET /v1/openapi.json`
 - 提供基础 REST endpoints：
   - `GET /health`
+  - `GET /v1/health`
   - `GET /v1/models`
   - `POST /v1/completions`
   - `POST /v1/chat/completions`
@@ -278,19 +281,20 @@
   - `temperature`
   - `top_p`
   - `stream`
+- 支持基础 tool calling 协议：
+  - `tools`
+  - `tool_choice: "none" | "auto" | "required"`
+  - forced function tool choice object
+  - `message.tool_calls`
+  - streaming `delta.tool_calls`
 - 支持 streaming response
 - 支持单实例请求队列
-- 暴露基础性能指标：
-  - prefill latency
-  - decode latency
-  - tokens/s
-  - current queue size
 - 支持 runtime 参数：
   - bind host
   - port
   - model path
   - device
-  - max context length
+  - default max generation tokens
 
 实现策略：
 
@@ -299,13 +303,17 @@
 - streaming 先支持 server-sent events
 - OpenAPI schema 作为独立文档或服务 endpoint 暴露
 - API 错误返回统一结构，避免底层异常直接泄漏
+- Tool calling 只返回协议兼容的 tool call；外部工具执行由客户端负责
 
 验收标准：
 
+- 能通过 HTTP 请求完成一次非流式 text completion
+- 能通过 HTTP 请求完成一次流式 text completion
 - 能通过 HTTP 请求完成一次非流式 chat completion
 - 能通过 HTTP 请求完成一次流式 chat completion
 - `GET /v1/models` 返回当前加载模型
 - OpenAPI schema 能描述已支持 endpoints
+- forced tool call 能返回 OpenAI-compatible `tool_calls`
 - 网关异常不会导致推理进程崩溃
 - CLI 推理和 HTTP 推理共享同一套 runtime
 

@@ -52,20 +52,31 @@
 - [x] `infer --device cpu --prompt hello --max-new-tokens 1` 可运行
 - [x] 当前无 Metal device 环境下，`mps-smoke` 返回明确 unavailable
 - [x] 当前无 Metal device 环境下，`infer --device mps` 返回明确 unavailable
+- [x] Apple M4 本机 `mps-smoke` 可运行
+- [x] Apple M4 本机 `infer --device mps --prompt hello --max-new-tokens 1` 可运行
 
-## Known Limitations
+## Historical Limitations Resolved In M8
 
-- [ ] 还没有完整 MPS forward
-- [ ] attention、MLP、RMSNorm、RoPE、KV cache 仍在 CPU
-- [ ] MPS matvec 当前一行一个 thread，未做 tile/reduction 优化
-- [ ] `lm_head.weight` 上传为 shared buffer，后续需要按 Apple Silicon 实测调整 storage mode
-- [ ] 当前执行环境没有 Metal default device，`--device mps` 的真实文本输出需要在 Apple Silicon 本机验证
+- [x] 完整 MPS forward 已在 M8 实现
+- [x] attention、MLP、RMSNorm、RoPE、KV cache 已在 M8 迁到 MPS
+- [x] `lm_head.weight` 之外的 Qwen 权重已在 M8 上传到 MPS buffer 并跨请求复用
 
-## Next Slice
+## Resolved After M7
 
-1. MPS embedding lookup
-2. MPS RMSNorm
-3. MPS linear projection with reusable uploaded layer weights
-4. 单层 attention + MLP CPU/MPS tensor 对齐
-5. MPS KV cache device-resident layout
-6. 全模型 `--device mps` greedy token 与 CPU reference 对齐
+- [x] MPS matvec 已从一行一个 thread 改为每行一个 threadgroup，并在 threadgroup 内做并行归约
+- [x] 固定尺寸 matvec 已增加 reusable workspace，减少每个 generated token 的 input/output buffer 分配
+- [x] 当前 Apple M4 环境可以枚举 Metal default device，并已验证 `--device mps` 真实文本输出
+
+## Remaining Performance Follow-up
+
+- [ ] 当前 storage mode 策略仍以 Apple Silicon shared buffer 为主；后续性能专项可评估 private buffer 和 blit/upload
+- [ ] layer projection 目前使用 BF16 matvec 打通 full forward；后续性能专项可继续做 tiled matmul 或 fused kernels
+
+## Next Slice Completed In M8
+
+1. [x] MPS embedding lookup
+2. [x] MPS RMSNorm
+3. [x] MPS linear projection with reusable uploaded layer weights
+4. [x] 单层 attention + MLP CPU/MPS tensor 对齐
+5. [x] MPS KV cache device-resident layout
+6. [x] 全模型 `--device mps` greedy token 与 CPU reference 对齐

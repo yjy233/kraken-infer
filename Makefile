@@ -21,10 +21,11 @@ CORE_SRCS := \
 	src/runtime/cpu/safetensors.cpp \
 	src/runtime/cpu/tokenizer.cpp \
 	src/runtime/cpu_inference.cpp \
+	src/runtime/openai_gateway.cpp \
 	src/runtime/runtime.cpp \
 	src/backends/mps/mps_backend.mm
 
-.PHONY: all debug release test cli inspect weights doctor infer run chat compare-transformers mps-info clean
+.PHONY: all debug release test cli inspect weights doctor infer run chat serve compare-transformers mps-info clean
 
 all: debug
 
@@ -65,6 +66,9 @@ run: $(BUILD_DIR)/toyllm
 
 chat: $(BUILD_DIR)/toyllm
 	./$(BUILD_DIR)/toyllm chat --model $(MODEL) --max-new-tokens $(CHAT_TOKENS)
+
+serve: $(BUILD_DIR)/toyllm
+	./$(BUILD_DIR)/toyllm serve --model $(MODEL)
 
 compare-transformers: $(BUILD_DIR)/toyllm
 	python3 scripts/compare_cpu_transformers.py --binary ./$(BUILD_DIR)/toyllm --model $(MODEL) --prompt "$(PROMPT)"
