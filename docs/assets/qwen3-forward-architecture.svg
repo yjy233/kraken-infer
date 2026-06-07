@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="620" viewBox="0 0 1180 620" role="img" aria-label="Qwen3 forward architecture">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 700 28px Arial, sans-serif; fill: #111827; }
+      .label { font: 700 17px Arial, sans-serif; fill: #111827; }
+      .small { font: 15px Arial, sans-serif; fill: #374151; }
+      .tiny { font: 13px Arial, sans-serif; fill: #6b7280; }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; rx: 8; }
+      .asset { fill: #eff6ff; stroke: #60a5fa; }
+      .core { fill: #ecfdf5; stroke: #34d399; }
+      .attn { fill: #fff7ed; stroke: #f59e0b; }
+      .mlp { fill: #f5f3ff; stroke: #8b5cf6; }
+      .out { fill: #ecfeff; stroke: #06b6d4; }
+      .cache { fill: #fdf2f8; stroke: #ec4899; }
+      .arrow { stroke: #475569; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dashed { stroke: #64748b; stroke-width: 2; fill: none; stroke-dasharray: 8 6; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#475569" />
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1180" height="620"/>
+  <text class="title" x="44" y="54">Qwen3 0.6B Forward 架构</text>
+  <text class="small" x="44" y="84">token ids 进入 dense decoder-only Transformer，逐 token 产生 logits，再采样下一个 token。</text>
+
+  <rect class="box asset" x="44" y="128" width="190" height="96"/>
+  <text class="label" x="68" y="164">模型资产</text>
+  <text class="small" x="68" y="194">config / tokenizer</text>
+  <text class="small" x="68" y="216">safetensors BF16</text>
+
+  <rect class="box asset" x="44" y="286" width="190" height="96"/>
+  <text class="label" x="68" y="322">输入</text>
+  <text class="small" x="68" y="352">messages / prompt</text>
+  <text class="small" x="68" y="374">token ids</text>
+
+  <rect class="box core" x="282" y="286" width="160" height="96"/>
+  <text class="label" x="306" y="322">Embedding</text>
+  <text class="small" x="306" y="352">id -&gt; hidden</text>
+  <text class="tiny" x="306" y="374">[1024]</text>
+
+  <rect class="box core" x="490" y="126" width="320" height="364"/>
+  <text class="label" x="520" y="164">28 x Decoder Layer</text>
+  <rect class="box attn" x="524" y="196" width="252" height="108"/>
+  <text class="label" x="548" y="232">Self Attention</text>
+  <text class="small" x="548" y="262">RMSNorm, Q/K/V, QKNorm</text>
+  <text class="small" x="548" y="286">RoPE, GQA, O projection</text>
+  <rect class="box mlp" x="524" y="336" width="252" height="96"/>
+  <text class="label" x="548" y="372">Gated MLP</text>
+  <text class="small" x="548" y="402">gate/up, SiLU*up, down</text>
+  <path class="dashed" d="M648 304 L648 336"/>
+
+  <rect class="box cache" x="850" y="214" width="220" height="128"/>
+  <text class="label" x="874" y="250">KV Cache</text>
+  <text class="small" x="874" y="280">[layer, position, kv]</text>
+  <text class="small" x="874" y="306">K/V reused in decode</text>
+
+  <rect class="box out" x="850" y="404" width="220" height="96"/>
+  <text class="label" x="874" y="440">Final Head</text>
+  <text class="small" x="874" y="470">final RMSNorm + lm_head</text>
+  <text class="tiny" x="874" y="492">logits [151936]</text>
+
+  <rect class="box out" x="932" y="128" width="170" height="64"/>
+  <text class="label" x="956" y="166">Sampler</text>
+
+  <rect class="box asset" x="932" y="524" width="170" height="56"/>
+  <text class="label" x="956" y="558">next token / text</text>
+
+  <path class="arrow" d="M234 334 L282 334"/>
+  <path class="arrow" d="M442 334 L490 334"/>
+  <path class="arrow" d="M810 276 L850 276"/>
+  <path class="arrow" d="M850 316 C820 354, 816 414, 850 452"/>
+  <path class="arrow" d="M810 452 L850 452"/>
+  <path class="arrow" d="M960 404 L960 192"/>
+  <path class="arrow" d="M1017 192 C1058 258, 1062 450, 1017 524"/>
+  <path class="arrow" d="M139 224 L139 286"/>
+  <path class="arrow" d="M650 490 C650 542, 888 542, 932 552"/>
+</svg>

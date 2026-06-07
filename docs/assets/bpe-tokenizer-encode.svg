@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-label="BPE tokenizer encode flow">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 700 28px Arial, sans-serif; fill: #111827; }
+      .label { font: 700 17px Arial, sans-serif; fill: #111827; }
+      .small { font: 15px Arial, sans-serif; fill: #374151; }
+      .tiny { font: 13px Arial, sans-serif; fill: #6b7280; }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; rx: 8; }
+      .step1 { fill: #eff6ff; stroke: #3b82f6; }
+      .step2 { fill: #f0fdf4; stroke: #22c55e; }
+      .step3 { fill: #fff7ed; stroke: #f97316; }
+      .step4 { fill: #f5f3ff; stroke: #8b5cf6; }
+      .step5 { fill: #ecfeff; stroke: #06b6d4; }
+      .arrow { stroke: #475569; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .code { font: 14px Menlo, Consolas, monospace; fill: #1f2937; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#475569" />
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1120" height="520"/>
+  <text class="title" x="44" y="54">Encode: 文本到 token id</text>
+  <text class="small" x="44" y="84">本项目先套 Qwen chat 模板，再把文本按 byte-level BPE 编码为 token id。</text>
+
+  <rect class="box step1" x="44" y="130" width="188" height="132"/>
+  <text class="label" x="66" y="166">1. Chat messages</text>
+  <text class="small" x="66" y="198">role + content</text>
+  <text class="code" x="66" y="228">user: 你好</text>
+
+  <rect class="box step2" x="282" y="130" width="196" height="132"/>
+  <text class="label" x="304" y="166">2. Qwen 模板</text>
+  <text class="code" x="304" y="198">&lt;|im_start|&gt;</text>
+  <text class="code" x="304" y="224">user\n...</text>
+  <text class="code" x="304" y="250">&lt;|im_end|&gt;</text>
+
+  <rect class="box step3" x="528" y="130" width="188" height="132"/>
+  <text class="label" x="550" y="166">3. UTF-8 bytes</text>
+  <text class="small" x="550" y="198">逐 byte 处理</text>
+  <text class="tiny" x="550" y="226">中文会展开为多个 byte</text>
+
+  <rect class="box step4" x="766" y="130" width="188" height="132"/>
+  <text class="label" x="788" y="166">4. byte map</text>
+  <text class="small" x="788" y="198">byte -&gt; 可见符号</text>
+  <text class="tiny" x="788" y="226">space 常见为 Ġ</text>
+  <text class="tiny" x="788" y="248">newline 常见为 Ċ</text>
+
+  <rect class="box step5" x="44" y="336" width="258" height="122"/>
+  <text class="label" x="66" y="372">5. BPE merge loop</text>
+  <text class="small" x="66" y="404">扫描相邻 pair</text>
+  <text class="small" x="66" y="430">选择 rank 最小的 pair 合并</text>
+
+  <rect class="box" x="372" y="336" width="258" height="122"/>
+  <text class="label" x="394" y="372">6. token string</text>
+  <text class="small" x="394" y="404">最终分片如</text>
+  <text class="code" x="394" y="432">["Ġthe", "re"]</text>
+
+  <rect class="box" x="700" y="336" width="258" height="122"/>
+  <text class="label" x="722" y="372">7. token id</text>
+  <text class="small" x="722" y="404">查 token_to_id_</text>
+  <text class="code" x="722" y="432">[151644, ..., 151645]</text>
+
+  <path class="arrow" d="M232 196 L282 196"/>
+  <path class="arrow" d="M478 196 L528 196"/>
+  <path class="arrow" d="M716 196 L766 196"/>
+  <path class="arrow" d="M860 262 C860 300, 190 292, 176 336"/>
+  <path class="arrow" d="M302 398 L372 398"/>
+  <path class="arrow" d="M630 398 L700 398"/>
+</svg>

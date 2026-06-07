@@ -304,6 +304,10 @@ models/qwen3-0.6b/
 
 ## Project Layout
 
+更多实现说明：
+
+- [CPU forward inference](docs/forward.md)
+
 ```text
 apps/                    CLI entrypoints
 cmake/                   CMake helpers and warning policy

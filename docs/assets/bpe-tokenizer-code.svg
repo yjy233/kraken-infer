@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-label="Project tokenizer code map">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 700 28px Arial, sans-serif; fill: #111827; }
+      .label { font: 700 17px Arial, sans-serif; fill: #111827; }
+      .small { font: 15px Arial, sans-serif; fill: #374151; }
+      .tiny { font: 13px Arial, sans-serif; fill: #6b7280; }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; rx: 8; }
+      .file { fill: #ecfeff; stroke: #06b6d4; }
+      .fn { fill: #f0fdf4; stroke: #22c55e; }
+      .data { fill: #fff7ed; stroke: #f97316; }
+      .arrow { stroke: #475569; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .code { font: 14px Menlo, Consolas, monospace; fill: #1f2937; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#475569" />
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1120" height="520"/>
+  <text class="title" x="44" y="54">本项目 tokenizer 代码关系</text>
+  <text class="small" x="44" y="84">QwenTokenizer 负责加载 tokenizer 文件、套 chat 模板、BPE encode 和 decode。</text>
+
+  <rect class="box file" x="48" y="132" width="250" height="132"/>
+  <text class="label" x="70" y="168">tokenizer.hpp</text>
+  <text class="code" x="70" y="200">class QwenTokenizer</text>
+  <text class="tiny" x="70" y="228">load / encode_chat_messages</text>
+  <text class="tiny" x="70" y="248">decode / private helpers</text>
+
+  <rect class="box file" x="48" y="314" width="250" height="132"/>
+  <text class="label" x="70" y="350">tokenizer.cpp</text>
+  <text class="small" x="70" y="382">具体实现</text>
+  <text class="tiny" x="70" y="410">load_vocab, load_merges, bpe</text>
+
+  <rect class="box fn" x="372" y="118" width="238" height="96"/>
+  <text class="label" x="394" y="154">QwenTokenizer::load</text>
+  <text class="small" x="394" y="184">读取 vocab / added tokens / merges</text>
+
+  <rect class="box fn" x="372" y="242" width="238" height="96"/>
+  <text class="label" x="394" y="278">encode_chat_messages</text>
+  <text class="small" x="394" y="308">插入 special tokens 和 assistant 前缀</text>
+
+  <rect class="box fn" x="372" y="366" width="238" height="96"/>
+  <text class="label" x="394" y="402">encode_text + bpe</text>
+  <text class="small" x="394" y="432">byte map 后按 merge rank 合并</text>
+
+  <rect class="box data" x="698" y="118" width="292" height="96"/>
+  <text class="label" x="720" y="154">token_to_id_ / id_to_token_</text>
+  <text class="small" x="720" y="184">双向 token 字典</text>
+
+  <rect class="box data" x="698" y="242" width="292" height="96"/>
+  <text class="label" x="720" y="278">merge_ranks_</text>
+  <text class="small" x="720" y="308">pair_key(first, second) -&gt; rank</text>
+
+  <rect class="box data" x="698" y="366" width="292" height="96"/>
+  <text class="label" x="720" y="402">byte_encoder_ / byte_decoder_</text>
+  <text class="small" x="720" y="432">byte-level BPE 可逆映射</text>
+
+  <path class="arrow" d="M298 198 C330 198, 342 166, 372 166"/>
+  <path class="arrow" d="M298 380 C334 380, 340 414, 372 414"/>
+  <path class="arrow" d="M610 166 L698 166"/>
+  <path class="arrow" d="M610 290 L698 290"/>
+  <path class="arrow" d="M610 414 L698 414"/>
+</svg>

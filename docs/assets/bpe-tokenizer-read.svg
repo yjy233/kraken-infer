@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="430" viewBox="0 0 1120 430" role="img" aria-label="BPE tokenizer file loading flow">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 700 28px Arial, sans-serif; fill: #111827; }
+      .label { font: 700 18px Arial, sans-serif; fill: #111827; }
+      .small { font: 15px Arial, sans-serif; fill: #374151; }
+      .tiny { font: 13px Arial, sans-serif; fill: #6b7280; }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; rx: 8; }
+      .blue { fill: #eff6ff; stroke: #60a5fa; }
+      .green { fill: #ecfdf5; stroke: #34d399; }
+      .amber { fill: #fffbeb; stroke: #f59e0b; }
+      .purple { fill: #f5f3ff; stroke: #8b5cf6; }
+      .arrow { stroke: #475569; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#475569" />
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1120" height="430"/>
+  <text class="title" x="44" y="54">Tokenizer 读取阶段</text>
+  <text class="small" x="44" y="84">QwenTokenizer::load(model_dir) 从模型目录读取三类 tokenizer 文件，并构造 encode/decode 所需的内存结构。</text>
+
+  <rect class="box blue" x="48" y="132" width="220" height="138"/>
+  <text class="label" x="72" y="168">vocab.json</text>
+  <text class="small" x="72" y="202">token string -&gt; token id</text>
+  <text class="tiny" x="72" y="230">load_vocab()</text>
+  <text class="tiny" x="72" y="250">add_token(id, token)</text>
+
+  <rect class="box green" x="48" y="292" width="220" height="88"/>
+  <text class="label" x="72" y="326">tokenizer_config.json</text>
+  <text class="small" x="72" y="356">added_tokens_decoder</text>
+
+  <rect class="box amber" x="344" y="132" width="220" height="138"/>
+  <text class="label" x="368" y="168">merges.txt</text>
+  <text class="small" x="368" y="202">pair -&gt; rank</text>
+  <text class="tiny" x="368" y="230">load_merges()</text>
+  <text class="tiny" x="368" y="250">rank 越小优先级越高</text>
+
+  <rect class="box purple" x="344" y="292" width="220" height="88"/>
+  <text class="label" x="368" y="326">byte maps</text>
+  <text class="small" x="368" y="356">byte &lt;-&gt; unicode token</text>
+
+  <rect class="box" x="664" y="174" width="360" height="164"/>
+  <text class="label" x="696" y="212">QwenTokenizer 内存结构</text>
+  <text class="small" x="696" y="246">token_to_id_</text>
+  <text class="small" x="696" y="274">id_to_token_</text>
+  <text class="small" x="696" y="302">merge_ranks_</text>
+  <text class="small" x="696" y="330">byte_encoder_ / byte_decoder_</text>
+
+  <path class="arrow" d="M268 202 C300 202, 310 202, 344 202"/>
+  <path class="arrow" d="M268 336 C300 336, 306 288, 344 246"/>
+  <path class="arrow" d="M564 202 C604 202, 618 216, 664 236"/>
+  <path class="arrow" d="M564 336 C604 336, 620 326, 664 316"/>
+</svg>
