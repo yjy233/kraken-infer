@@ -7,6 +7,7 @@
 - [1. BPE Tokenizer](1-BPE-tokenizer.md)
 - [2. Qwen3 Forward 推理整体架构](2-Qwen3-forward.md)
 - [3. Qwen3 Transformer 模块](3-Transformer-block.md)
+- [4. Qwen3 Attention 详细计算](4-Qwen3-attention.md)
 
 ## 总流程
 
