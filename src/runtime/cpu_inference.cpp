@@ -45,6 +45,7 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
   }
 
   try {
+    RequestProfiler profiler(request.observability);
     auto messages = request.messages;
     if (messages.empty()) {
       messages.push_back(ChatMessage{"user", request.prompt});
@@ -53,15 +54,32 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
       return Status::invalid_argument("messages must not be empty");
     }
 
+    profiler.set_metadata("model_dir", request.model_dir.string());
+    profiler.set_metadata("device", request.compute_device.to_string());
+    if (!request.observability.client_request_id.empty()) {
+      profiler.set_metadata("client_request_id", request.observability.client_request_id);
+    }
+
     CpuGenerationResult result{};
     result.implemented = true;
     const auto output =
       cpu::generate_text(request.model_dir, messages, request.max_new_tokens,
                          request.enable_thinking, request.debug_dump_dir, request.verify_kv_cache,
-                         request.compute_device, request.sampling, request.stream_token);
+                         request.compute_device, request.sampling, request.stream_token,
+                         &profiler);
     result.text = output.text;
+    result.request_id = profiler.request_id();
     result.kv_cache = to_public_report(output.kv_cache);
     result.kv_cache_verified = output.kv_cache_verified;
+    profiler.set_metadata("prompt_tokens", output.prompt_tokens);
+    profiler.set_metadata("generated_tokens", output.generated_tokens);
+    if (request.compute_device.kind == DeviceKind::mps) {
+      profiler.set_metadata("device", request.compute_device.to_string());
+    }
+    const auto artifacts = profiler.write_artifacts();
+    if (!artifacts.output_dir.empty()) {
+      result.profile_dir = artifacts.output_dir;
+    }
     return result;
   } catch (const std::exception& error) {
     return Status::internal_error(error.what());

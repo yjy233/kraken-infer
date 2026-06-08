@@ -24,6 +24,7 @@ CORE_SRCS := \
 	src/runtime/cpu/tokenizer.cpp \
 	src/runtime/cpu_inference.cpp \
 	src/runtime/openai_gateway.cpp \
+	src/runtime/profiling.cpp \
 	src/runtime/runtime.cpp \
 	src/backends/mps/mps_backend.mm
 

@@ -211,6 +211,40 @@ void test_mps_full_forward_operators() {
   assert_close(output[1], 6.0F);
 }
 
+void test_profile_artifacts() {
+  const auto request_id = toyllm::make_gateway_request_id();
+  assert(request_id.rfind("req-", 0) == 0);
+  assert(toyllm::parse_profile_mode("summary").has_value());
+
+  const auto temp_dir = std::filesystem::temp_directory_path() / "kraken-infer-profile-smoke";
+  std::error_code ec;
+  std::filesystem::remove_all(temp_dir, ec);
+
+  toyllm::ObservabilityConfig observability;
+  observability.profile_mode = toyllm::ProfileMode::summary;
+  observability.profile_output_dir = temp_dir;
+  observability.request_id = request_id;
+  toyllm::RequestProfiler profiler(observability);
+  profiler.set_metadata("device", "cpu");
+  profiler.set_metadata("model_dir", "models/qwen3-0.6b");
+  profiler.set_metadata("prompt_tokens", static_cast<std::size_t>(1));
+  profiler.set_metadata("generated_tokens", static_cast<std::size_t>(1));
+  {
+    auto request_span = profiler.scoped("request.total");
+    {
+      auto prefill_span = profiler.scoped("request.prefill");
+      (void)prefill_span;
+    }
+    (void)request_span;
+  }
+  const auto artifacts = profiler.write_artifacts();
+  assert(!artifacts.output_dir.empty());
+  assert(std::filesystem::exists(artifacts.output_dir / "summary.txt"));
+  assert(std::filesystem::exists(artifacts.output_dir / "summary.json"));
+  assert(std::filesystem::exists(artifacts.output_dir / "manifest.json"));
+  std::filesystem::remove_all(temp_dir, ec);
+}
+
 void test_qwen3_model_config() {
   const std::filesystem::path model_dir{"models/qwen3-0.6b"};
   if (!std::filesystem::exists(model_dir)) {
@@ -366,6 +400,7 @@ int main() {
   test_mps_operator_smoke();
   test_mps_matvec_workspace_reuse();
   test_mps_full_forward_operators();
+  test_profile_artifacts();
   test_qwen3_model_config();
   test_cpu_generation_entrypoint();
   test_weight_summary();

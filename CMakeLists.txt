@@ -44,6 +44,7 @@ target_sources(
     src/runtime/cpu/tokenizer.cpp
     src/runtime/cpu_inference.cpp
     src/runtime/openai_gateway.cpp
+    src/runtime/profiling.cpp
     src/runtime/runtime.cpp
 )
 

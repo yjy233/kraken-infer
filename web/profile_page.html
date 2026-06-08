@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kraken-infer Profile</title>
+  <link rel="stylesheet" href="/profile_page.css">
+  <script defer src="/profile_page.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <header class="topbar">
+        <div>
+          <h1>Profile</h1>
+          <div class="sub" id="rootPath">build/profiles</div>
+        </div>
+        <div class="status" id="status">Loading</div>
+      </header>
+      <div class="list" id="requestList"></div>
+    </aside>
+    <main class="content">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 id="requestId">No profile selected</h2>
+            <div class="sub" id="requestMeta"></div>
+          </div>
+          <div class="links" id="links"></div>
+        </div>
+        <pre class="summary" id="summary">No data</pre>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Flamegraph</h2>
+        </div>
+        <div class="svg-wrap" id="svgWrap">
+          <div class="empty">No flamegraph</div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

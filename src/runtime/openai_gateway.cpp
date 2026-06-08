@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cctype>
@@ -18,6 +19,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -640,10 +642,15 @@ std::string http_status_text(int status) {
   }
 }
 
-void send_json_response(int fd, int status, std::string_view body) {
+void send_json_response(
+  int fd, int status, std::string_view body,
+  const std::vector<std::pair<std::string, std::string>>& extra_headers = {}) {
   std::ostringstream response;
   response << "HTTP/1.1 " << status << ' ' << http_status_text(status) << "\r\n";
   response << "Content-Type: application/json\r\n";
+  for (const auto& header : extra_headers) {
+    response << header.first << ": " << header.second << "\r\n";
+  }
   response << "Content-Length: " << body.size() << "\r\n";
   response << "Connection: close\r\n\r\n";
   response << body;
@@ -651,22 +658,34 @@ void send_json_response(int fd, int status, std::string_view body) {
 }
 
 void send_text_response(int fd, int status, std::string_view content_type,
-                        std::string_view body) {
+                        std::string_view body,
+                        const std::vector<std::pair<std::string, std::string>>& extra_headers = {}) {
   std::ostringstream response;
   response << "HTTP/1.1 " << status << ' ' << http_status_text(status) << "\r\n";
   response << "Content-Type: " << content_type << "\r\n";
+  for (const auto& header : extra_headers) {
+    response << header.first << ": " << header.second << "\r\n";
+  }
   response << "Content-Length: " << body.size() << "\r\n";
   response << "Connection: close\r\n\r\n";
   response << body;
   (void)write_all(fd, response.str());
 }
 
-void send_sse_headers(int fd) {
+void send_sse_headers(int fd,
+                     const std::vector<std::pair<std::string, std::string>>& extra_headers = {}) {
   const std::string headers =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/event-stream\r\n"
-    "Cache-Control: no-cache\r\n"
-    "Connection: close\r\n\r\n";
+    [&]() {
+      std::ostringstream output;
+      output << "HTTP/1.1 200 OK\r\n"
+             << "Content-Type: text/event-stream\r\n"
+             << "Cache-Control: no-cache\r\n";
+      for (const auto& header : extra_headers) {
+        output << header.first << ": " << header.second << "\r\n";
+      }
+      output << "Connection: close\r\n\r\n";
+      return output.str();
+    }();
   (void)write_all(fd, headers);
 }
 
@@ -695,6 +714,16 @@ std::string chat_page_config_body(const OpenAIGatewayConfig& config) {
   output << "{\"model\":\"" << json_escape(config.model_id) << "\",\"device\":\""
          << json_escape(config.compute_device.to_string()) << "\",\"max_new_tokens\":"
          << config.default_max_tokens << '}';
+  return output.str();
+}
+
+std::filesystem::path profile_root_dir(const OpenAIGatewayConfig& config);
+
+std::string profile_page_config_body(const OpenAIGatewayConfig& config) {
+  std::ostringstream output;
+  output << "{\"profile_dir\":\"" << json_escape(profile_root_dir(config).string())
+         << "\",\"profile_mode\":\""
+         << json_escape(profile_mode_to_string(config.observability.profile_mode)) << "\"}";
   return output.str();
 }
 
@@ -739,34 +768,157 @@ void send_web_asset(int fd, std::string_view filename, std::string_view content_
   send_text_response(fd, 200, content_type, *body);
 }
 
+std::filesystem::path profile_root_dir(const OpenAIGatewayConfig& config) {
+  if (!config.observability.profile_output_dir.empty()) {
+    return config.observability.profile_output_dir;
+  }
+  return std::filesystem::path{"build"} / "profiles";
+}
+
+std::optional<std::string> read_text_file(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return std::nullopt;
+  }
+  std::ostringstream output;
+  output << input.rdbuf();
+  return output.str();
+}
+
+std::optional<JsonValue> read_json_object_file(const std::filesystem::path& path) {
+  const auto body = read_text_file(path);
+  if (!body.has_value()) {
+    return std::nullopt;
+  }
+  try {
+    return JsonParser(*body).parse();
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+std::string profile_index_body(const OpenAIGatewayConfig& config) {
+  const auto root = profile_root_dir(config);
+  std::vector<std::filesystem::path> request_dirs;
+  if (std::filesystem::exists(root)) {
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+      if (entry.is_directory()) {
+        request_dirs.push_back(entry.path());
+      }
+    }
+  }
+  std::sort(request_dirs.begin(), request_dirs.end(),
+            [](const auto& lhs, const auto& rhs) {
+              return lhs.filename().string() > rhs.filename().string();
+            });
+
+  std::ostringstream output;
+  output << "{\"profiles\":[";
+  bool first = true;
+  for (const auto& dir : request_dirs) {
+    const auto manifest = read_json_object_file(dir / "manifest.json");
+    if (!manifest.has_value() || manifest->type != JsonValue::Type::object) {
+      continue;
+    }
+    const auto* request_id = object_get(*manifest, "request_id");
+    if (request_id == nullptr || request_id->type != JsonValue::Type::string) {
+      continue;
+    }
+    if (!first) {
+      output << ',';
+    }
+    first = false;
+    const auto* created_at = object_get(*manifest, "created_at");
+    const auto* device = object_get(*manifest, "device");
+    const auto* model_dir = object_get(*manifest, "model_dir");
+    const auto* profile_mode = object_get(*manifest, "profile_mode");
+    const auto* status = object_get(*manifest, "status");
+    const auto* has_trace = object_get(*manifest, "has_trace");
+    const auto* has_flamegraph = object_get(*manifest, "has_flamegraph");
+    output << '{';
+    output << "\"request_id\":\"" << json_escape(request_id->string) << "\",";
+    output << "\"created_at\":\""
+           << json_escape(created_at != nullptr && created_at->type == JsonValue::Type::string
+                           ? created_at->string
+                           : std::string{}) << "\",";
+    output << "\"device\":\""
+           << json_escape(device != nullptr && device->type == JsonValue::Type::string
+                           ? device->string
+                           : std::string{}) << "\",";
+    output << "\"model_dir\":\""
+           << json_escape(model_dir != nullptr && model_dir->type == JsonValue::Type::string
+                           ? model_dir->string
+                           : std::string{}) << "\",";
+    output << "\"profile_mode\":\""
+           << json_escape(profile_mode != nullptr && profile_mode->type == JsonValue::Type::string
+                           ? profile_mode->string
+                           : std::string{}) << "\",";
+    output << "\"status\":\""
+           << json_escape(status != nullptr && status->type == JsonValue::Type::string
+                           ? status->string
+                           : std::string{}) << "\",";
+    output << "\"has_trace\":" << (has_trace != nullptr && has_trace->type == JsonValue::Type::boolean &&
+                                     has_trace->boolean ? "true" : "false") << ',';
+    output << "\"has_flamegraph\":"
+           << (has_flamegraph != nullptr && has_flamegraph->type == JsonValue::Type::boolean &&
+               has_flamegraph->boolean ? "true" : "false");
+    output << '}';
+  }
+  output << "]}";
+  return output.str();
+}
+
+std::optional<std::string> profile_artifact_body(const OpenAIGatewayConfig& config,
+                                                 std::string_view request_id,
+                                                 std::string_view filename) {
+  const auto path = profile_root_dir(config) / std::filesystem::path{std::string{request_id}} /
+                    std::filesystem::path{std::string{filename}};
+  return read_text_file(path);
+}
+
 std::string openapi_body(const OpenAIGatewayConfig& config) {
   std::ostringstream output;
-  output << "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"kraken-infer "
-            "OpenAI-compatible Gateway\",\"version\":\"0.1.0\"},\"servers\":[{\"url\":\"http://"
-         << json_escape(config.host) << ':' << config.port
-         << "\"}],\"paths\":{\"/health\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Gateway "
-            "health\"}}}},\"/chat_page\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Browser "
-            "chat page\",\"content\":{\"text/html\":{}}}}}},\"/chat_page/config\":{\"get\":{\"responses\":{"
-            "\"200\":{\"description\":\"Browser chat page config\"}}}},\"/v1/models\":{\"get\":{\"responses\":{\"200\":{\"description\":\"List "
-            "models\"}}}},\"/v1/completions\":{\"post\":{\"requestBody\":{\"required\":true,"
-            "\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{"
-            "\"model\":{\"type\":\"string\"},\"prompt\":{\"oneOf\":[{\"type\":\"string\"},"
-            "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}]},\"max_tokens\":{\"type\":"
-            "\"integer\"},\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":\"number\"},"
-            "\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
-            "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
-            "\"mps\",\"mps:0\"]}},\"required\":[\"prompt\"]}}}},"
-            "\"responses\":{\"200\":{\"description\":\"Text completion or SSE stream\"}}}},"
-            "\"/v1/chat/completions\":{\"post\":{\"requestBody\":{\"required\":true,\"content\":{"
-            "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":{\"type\":"
-            "\"string\"},\"messages\":{\"type\":\"array\"},\"tools\":{\"type\":\"array\"},"
-            "\"tool_choice\":{},\"max_tokens\":{\"type\":\"integer\"},\"max_completion_tokens\":{"
-            "\"type\":\"integer\"},\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":"
-            "\"number\"},\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
-            "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
-            "\"mps\",\"mps:0\"]}},\"required\":"
-            "[\"messages\"]}}}},\"responses\":{\"200\":{\"description\":\"Chat completion, tool "
-            "call, or SSE stream\"}}}}}}";
+  output
+    << "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"kraken-infer OpenAI-compatible "
+       "Gateway\",\"version\":\"0.1.0\"},\"servers\":[{\"url\":\"http://"
+    << json_escape(config.host) << ':' << config.port
+    << "\"}],\"paths\":{"
+       "\"/health\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Gateway health\"}}}},"
+       "\"/chat_page\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Browser chat "
+       "page\",\"content\":{\"text/html\":{}}}}}},"
+       "\"/chat_page/config\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Browser chat "
+       "page config\"}}}},"
+       "\"/profile_page\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Profile viewer "
+       "page\",\"content\":{\"text/html\":{}}}}}},"
+       "\"/profile_page/config\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Profile "
+       "viewer config\"}}}},"
+       "\"/profiles/index.json\":{\"get\":{\"responses\":{\"200\":{\"description\":\"Recent "
+       "profile request index\"}}}},"
+       "\"/profiles/{request_id}/{artifact}\":{\"get\":{\"parameters\":[{\"name\":\"request_id\","
+       "\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"string\"}},{\"name\":\"artifact\","
+       "\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"string\",\"enum\":[\"manifest.json\","
+       "\"summary.json\",\"summary.txt\",\"trace.json\",\"profile.folded\",\"profile.svg\"]}}],"
+       "\"responses\":{\"200\":{\"description\":\"Profile artifact\"},\"404\":{\"description\":"
+       "\"Profile artifact not found\"}}}},"
+       "\"/v1/models\":{\"get\":{\"responses\":{\"200\":{\"description\":\"List models\"}}}},"
+       "\"/v1/completions\":{\"post\":{\"requestBody\":{\"required\":true,\"content\":{"
+       "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
+       "{\"type\":\"string\"},\"prompt\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"array\","
+       "\"items\":{\"type\":\"string\"}}]},\"max_tokens\":{\"type\":\"integer\"},"
+       "\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":\"number\"},"
+       "\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
+       "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
+       "\"mps\",\"mps:0\"]}},\"required\":[\"prompt\"]}}}},\"responses\":{\"200\":"
+       "{\"description\":\"Text completion or SSE stream\"}}}},"
+       "\"/v1/chat/completions\":{\"post\":{\"requestBody\":{\"required\":true,\"content\":{"
+       "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
+       "{\"type\":\"string\"},\"messages\":{\"type\":\"array\"},\"tools\":{\"type\":\"array\"},"
+       "\"tool_choice\":{},\"max_tokens\":{\"type\":\"integer\"},\"max_completion_tokens\":"
+       "{\"type\":\"integer\"},\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":"
+       "\"number\"},\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
+       "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
+       "\"mps\",\"mps:0\"]}},\"required\":[\"messages\"]}}}},\"responses\":{\"200\":"
+       "{\"description\":\"Chat completion, tool call, or SSE stream\"}}}}}";
   return output.str();
 }
 
@@ -872,7 +1024,21 @@ std::string tool_stream_chunk(std::string_view id, std::int64_t created, std::st
 struct HttpRequest {
   std::string method;
   std::string path;
+  std::string query;
   std::string body;
+  std::unordered_map<std::string, std::string> headers;
+
+  [[nodiscard]] std::string header(std::string_view key) const {
+    auto normalized = std::string{key};
+    for (auto& ch : normalized) {
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    const auto it = headers.find(normalized);
+    if (it == headers.end()) {
+      return {};
+    }
+    return it->second;
+  }
 };
 
 std::string lower_ascii(std::string value) {
@@ -929,6 +1095,7 @@ HttpRequest read_http_request(int fd) {
     if (name == "content-length") {
       content_length = static_cast<std::size_t>(std::stoull(value));
     }
+    request.headers.emplace(std::move(name), std::move(value));
   }
 
   const auto body_start = header_end + 4U;
@@ -945,27 +1112,31 @@ HttpRequest read_http_request(int fd) {
   request.body = buffer.substr(body_start, content_length);
   const auto query = request.path.find('?');
   if (query != std::string::npos) {
+    request.query = request.path.substr(query + 1U);
     request.path.resize(query);
   }
   return request;
 }
 
-void send_forced_tool_response(int fd, const ChatRequest& request) {
+void send_forced_tool_response(int fd, const ChatRequest& request, std::string_view request_id) {
   const auto id = completion_id();
   const auto created = unix_time();
   const auto tool_name = *request.forced_tool;
   if (!request.stream) {
-    send_json_response(fd, 200, tool_call_body(id, created, request.model, tool_name));
+    send_json_response(fd, 200, tool_call_body(id, created, request.model, tool_name),
+                       {{"X-Request-Id", std::string{request_id}}});
     return;
   }
-  send_sse_headers(fd);
+  send_sse_headers(fd, {{"X-Request-Id", std::string{request_id}}});
   send_sse(fd, tool_stream_chunk(id, created, request.model, tool_name, false));
   send_sse(fd, tool_stream_chunk(id, created, request.model, tool_name, true));
   send_sse(fd, "[DONE]");
 }
 
 void send_completion_response(int fd, const OpenAIGatewayConfig& config,
-                              const CompletionRequest& request) {
+                              const CompletionRequest& request, std::string_view request_id,
+                              std::string_view client_request_id,
+                              const ObservabilityConfig& observability) {
   CpuGenerationRequest generation;
   generation.model_dir = config.model_dir;
   generation.prompt = request.prompt;
@@ -973,20 +1144,25 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
   generation.enable_thinking = request.enable_thinking;
   generation.compute_device = request.compute_device;
   generation.sampling = request.sampling;
+  generation.observability = observability;
+  generation.observability.request_id = std::string{request_id};
+  generation.observability.client_request_id = std::string{client_request_id};
 
   const auto id = text_completion_id();
   const auto created = unix_time();
   if (!request.stream) {
     const auto result = generate_cpu(generation);
     if (!result.is_ok()) {
-      send_json_response(fd, 500, error_body(result.status().message(), "server_error"));
+      send_json_response(fd, 500, error_body(result.status().message(), "server_error"),
+                         {{"X-Request-Id", std::string{request_id}}});
       return;
     }
-    send_json_response(fd, 200, completion_body(id, created, request.model, result.value().text));
+    send_json_response(fd, 200, completion_body(id, created, request.model, result.value().text),
+                       {{"X-Request-Id", std::string{request_id}}});
     return;
   }
 
-  send_sse_headers(fd);
+  send_sse_headers(fd, {{"X-Request-Id", std::string{request_id}}});
   generation.stream_token = [&](std::string_view token) {
     send_sse(fd, completion_stream_chunk(id, created, request.model, token, {}));
   };
@@ -1000,9 +1176,11 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
   send_sse(fd, "[DONE]");
 }
 
-void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatRequest& request) {
+void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatRequest& request,
+                        std::string_view request_id, std::string_view client_request_id,
+                        const ObservabilityConfig& observability) {
   if (request.forced_tool.has_value()) {
-    send_forced_tool_response(fd, request);
+    send_forced_tool_response(fd, request, request_id);
     return;
   }
 
@@ -1013,21 +1191,26 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
   generation.enable_thinking = request.enable_thinking;
   generation.compute_device = request.compute_device;
   generation.sampling = request.sampling;
+  generation.observability = observability;
+  generation.observability.request_id = std::string{request_id};
+  generation.observability.client_request_id = std::string{client_request_id};
 
   const auto id = completion_id();
   const auto created = unix_time();
   if (!request.stream) {
     const auto result = generate_cpu(generation);
     if (!result.is_ok()) {
-      send_json_response(fd, 500, error_body(result.status().message(), "server_error"));
+      send_json_response(fd, 500, error_body(result.status().message(), "server_error"),
+                         {{"X-Request-Id", std::string{request_id}}});
       return;
     }
     send_json_response(fd, 200,
-                       chat_completion_body(id, created, request.model, result.value().text));
+                       chat_completion_body(id, created, request.model, result.value().text),
+                       {{"X-Request-Id", std::string{request_id}}});
     return;
   }
 
-  send_sse_headers(fd);
+  send_sse_headers(fd, {{"X-Request-Id", std::string{request_id}}});
   send_sse(fd, stream_chunk(id, created, request.model, {}, true, {}));
   generation.stream_token = [&](std::string_view token) {
     send_sse(fd, stream_chunk(id, created, request.model, token, false, {}));
@@ -1059,6 +1242,82 @@ void handle_client(int fd, const OpenAIGatewayConfig& config) {
         return;
       }
       send_json_response(fd, 200, models_body(config));
+      return;
+    }
+    if (request.path == "/profile_page" || request.path == "/profile_page.html") {
+      if (request.method != "GET") {
+        send_json_response(fd, 405, error_body("method not allowed"));
+        return;
+      }
+      send_web_asset(fd, "profile_page.html", "text/html; charset=utf-8");
+      return;
+    }
+    if (request.path == "/profile_page.css") {
+      if (request.method != "GET") {
+        send_json_response(fd, 405, error_body("method not allowed"));
+        return;
+      }
+      send_web_asset(fd, "profile_page.css", "text/css; charset=utf-8");
+      return;
+    }
+    if (request.path == "/profile_page.js") {
+      if (request.method != "GET") {
+        send_json_response(fd, 405, error_body("method not allowed"));
+        return;
+      }
+      send_web_asset(fd, "profile_page.js", "application/javascript; charset=utf-8");
+      return;
+    }
+    if (request.path == "/profile_page/config") {
+      if (request.method != "GET") {
+        send_json_response(fd, 405, error_body("method not allowed"));
+        return;
+      }
+      send_json_response(fd, 200, profile_page_config_body(config));
+      return;
+    }
+    if (request.path == "/profiles/index.json") {
+      if (request.method != "GET") {
+        send_json_response(fd, 405, error_body("method not allowed"));
+        return;
+      }
+      send_json_response(fd, 200, profile_index_body(config));
+      return;
+    }
+    if (request.path.rfind("/profiles/", 0) == 0) {
+      if (request.method != "GET") {
+        send_json_response(fd, 405, error_body("method not allowed"));
+        return;
+      }
+      const auto suffix = request.path.substr(std::string{"/profiles/"}.size());
+      const auto slash = suffix.find('/');
+      if (slash == std::string::npos) {
+        send_json_response(fd, 404, error_body("route not found"));
+        return;
+      }
+      const auto request_id = suffix.substr(0, slash);
+      const auto file = suffix.substr(slash + 1U);
+      if (file.empty()) {
+        send_json_response(fd, 404, error_body("route not found"));
+        return;
+      }
+      std::optional<std::string> body;
+      std::string content_type = "text/plain; charset=utf-8";
+      if (file == "summary.json" || file == "trace.json" || file == "manifest.json") {
+        body = profile_artifact_body(config, request_id, file);
+        content_type = "application/json";
+      } else if (file == "summary.txt" || file == "profile.folded") {
+        body = profile_artifact_body(config, request_id, file);
+        content_type = "text/plain; charset=utf-8";
+      } else if (file == "profile.svg") {
+        body = profile_artifact_body(config, request_id, file);
+        content_type = "image/svg+xml";
+      }
+      if (!body.has_value()) {
+        send_json_response(fd, 404, error_body("profile artifact not found"));
+        return;
+      }
+      send_text_response(fd, 200, content_type, *body);
       return;
     }
     if (request.path == "/chat_page/config") {
@@ -1107,7 +1366,14 @@ void handle_client(int fd, const OpenAIGatewayConfig& config) {
         return;
       }
       const auto completion_request = parse_completion_request(request.body, config);
-      send_completion_response(fd, config, completion_request);
+      const auto request_id = make_gateway_request_id();
+      auto observability = config.observability;
+      if (const auto profile_mode = parse_profile_mode(request.header("x-kraken-profile"));
+          profile_mode.has_value()) {
+        observability.profile_mode = *profile_mode;
+      }
+      send_completion_response(fd, config, completion_request, request_id, request.header("x-request-id"),
+                               observability);
       return;
     }
     if (request.path == "/v1/chat/completions") {
@@ -1116,7 +1382,14 @@ void handle_client(int fd, const OpenAIGatewayConfig& config) {
         return;
       }
       const auto chat_request = parse_chat_request(request.body, config);
-      send_chat_response(fd, config, chat_request);
+      const auto request_id = make_gateway_request_id();
+      auto observability = config.observability;
+      if (const auto profile_mode = parse_profile_mode(request.header("x-kraken-profile"));
+          profile_mode.has_value()) {
+        observability.profile_mode = *profile_mode;
+      }
+      send_chat_response(fd, config, chat_request, request_id, request.header("x-request-id"),
+                         observability);
       return;
     }
     send_json_response(fd, 404, error_body("route not found"));

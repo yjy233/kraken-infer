@@ -32,20 +32,28 @@ void print_usage(std::string_view program) {
             << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
                " [--device cpu|mps]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
-               " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]\n";
+               " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
+               " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
+               " [--profile-min-us N]\n";
   std::cout << "  " << program
             << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
                " [--device cpu|mps]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
-               " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]\n";
+               " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
+               " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
+               " [--profile-min-us N]\n";
   std::cout << "  " << program
             << " chat [model_dir] [--max-new-tokens N] [--enable-thinking] [--dump-dir DIR]"
                " [--device cpu|mps]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
-               " [--stream] [--kv-cache-stats] [--verify-kv-cache]\n\n";
+               " [--stream] [--kv-cache-stats] [--verify-kv-cache]"
+               " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
+               " [--profile-min-us N]\n\n";
   std::cout << "  " << program
             << " serve [--host 127.0.0.1] [--port 8080] [--model <model_dir>]"
                " [--model-id ID] [--device cpu|mps] [--max-new-tokens N]\n\n";
+  std::cout << "       [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
+               " [--profile-min-us N]\n\n";
   std::cout << "Compatibility flags:\n";
   std::cout << "  " << program << " --mps-info\n";
   std::cout << "  " << program << " --inspect-model <model_dir>\n";
@@ -189,7 +197,8 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
                        std::size_t max_new_tokens, bool enable_thinking,
                        const std::filesystem::path& debug_dump_dir, bool print_kv_cache_stats,
                        bool verify_kv_cache, toyllm::Device compute_device,
-                       const toyllm::CpuSamplingConfig& sampling, bool stream) {
+                       const toyllm::CpuSamplingConfig& sampling, bool stream,
+                       const toyllm::ObservabilityConfig& observability) {
   if (model_path.empty() || prompt.empty()) {
     std::cerr << "generation requires --prompt and a model path.\n";
     return EXIT_FAILURE;
@@ -204,6 +213,7 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
   request.verify_kv_cache = verify_kv_cache;
   request.compute_device = compute_device;
   request.sampling = sampling;
+  request.observability = observability;
   if (stream) {
     request.stream_token = [](std::string_view chunk) {
       std::cout << chunk;
@@ -228,13 +238,20 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
     std::cout << "KV cache verification: "
               << (result.value().kv_cache_verified ? "ok" : "not run") << '\n';
   }
+  if (!result.value().request_id.empty()) {
+    std::cout << "request_id: " << result.value().request_id << '\n';
+  }
+  if (!result.value().profile_dir.empty()) {
+    std::cout << "profile_dir: " << result.value().profile_dir.string() << '\n';
+  }
   return EXIT_SUCCESS;
 }
 
 int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens,
              bool enable_thinking, const std::filesystem::path& debug_dump_dir,
              bool print_kv_cache_stats, bool verify_kv_cache, toyllm::Device compute_device,
-             const toyllm::CpuSamplingConfig& sampling, bool stream) {
+             const toyllm::CpuSamplingConfig& sampling, bool stream,
+             const toyllm::ObservabilityConfig& observability) {
   std::cout << "kraken-infer chat\n";
   std::cout << "model: " << model_path.string() << '\n';
   std::cout << "device: " << compute_device.to_string() << '\n';
@@ -267,6 +284,7 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
     request.verify_kv_cache = verify_kv_cache;
     request.compute_device = compute_device;
     request.sampling = sampling;
+    request.observability = observability;
     if (stream) {
       std::cout << "assistant>\n";
       request.stream_token = [](std::string_view chunk) {
@@ -295,6 +313,12 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
     if (verify_kv_cache) {
       std::cout << "KV cache verification: "
                 << (result.value().kv_cache_verified ? "ok" : "not run") << "\n\n";
+    }
+    if (!result.value().request_id.empty()) {
+      std::cout << "request_id: " << result.value().request_id << '\n';
+    }
+    if (!result.value().profile_dir.empty()) {
+      std::cout << "profile_dir: " << result.value().profile_dir.string() << '\n';
     }
   }
 }
@@ -363,6 +387,8 @@ int main(int argc, char** argv) {
   if (arg_equals(argv[1], "serve")) {
     toyllm::OpenAIGatewayConfig config;
     config.model_dir = default_model_path();
+    config.observability.profile_mode = toyllm::ProfileMode::summary;
+    config.observability.profile_output_dir = std::filesystem::path{"build"} / "profiles";
     for (int index = 2; index < argc; ++index) {
       if (arg_equals(argv[index], "--host") && index + 1 < argc) {
         config.host = argv[++index];
@@ -403,6 +429,28 @@ int main(int argc, char** argv) {
         config.default_max_tokens = *parsed;
         continue;
       }
+      if (arg_equals(argv[index], "--profile") && index + 1 < argc) {
+        const auto parsed = toyllm::parse_profile_mode(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--profile must be off, summary, trace, flamegraph, or all.\n";
+          return EXIT_FAILURE;
+        }
+        config.observability.profile_mode = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--profile-dir") && index + 1 < argc) {
+        config.observability.profile_output_dir = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--profile-min-us") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--profile-min-us must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.observability.min_duration_us = static_cast<std::uint64_t>(*parsed);
+        continue;
+      }
       std::cerr << "Unknown serve option: " << argv[index] << '\n';
       print_usage(argv[0]);
       return EXIT_FAILURE;
@@ -419,6 +467,7 @@ int main(int argc, char** argv) {
     bool stream = false;
     toyllm::Device compute_device = toyllm::Device::cpu();
     toyllm::CpuSamplingConfig sampling;
+    toyllm::ObservabilityConfig observability;
     std::filesystem::path debug_dump_dir;
     bool model_path_set = false;
     for (int index = 2; index < argc; ++index) {
@@ -501,6 +550,28 @@ int main(int argc, char** argv) {
         stream = true;
         continue;
       }
+      if (arg_equals(argv[index], "--profile") && index + 1 < argc) {
+        const auto parsed = toyllm::parse_profile_mode(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--profile must be off, summary, trace, flamegraph, or all.\n";
+          return EXIT_FAILURE;
+        }
+        observability.profile_mode = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--profile-dir") && index + 1 < argc) {
+        observability.profile_output_dir = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--profile-min-us") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--profile-min-us must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        observability.min_duration_us = static_cast<std::uint64_t>(*parsed);
+        continue;
+      }
       if (arg_equals(argv[index], "--dump-dir") && index + 1 < argc) {
         debug_dump_dir = std::filesystem::path{argv[++index]};
         continue;
@@ -527,7 +598,8 @@ int main(int argc, char** argv) {
       model_path_set = true;
     }
     return run_chat(model_path, max_new_tokens, enable_thinking, debug_dump_dir,
-                    print_kv_cache_stats, verify_kv_cache, compute_device, sampling, stream);
+                    print_kv_cache_stats, verify_kv_cache, compute_device, sampling, stream,
+                    observability);
   }
 
   const bool explicit_generation = arg_equals(argv[1], "run") || arg_equals(argv[1], "infer");
@@ -540,6 +612,7 @@ int main(int argc, char** argv) {
   bool stream = false;
   toyllm::Device compute_device = toyllm::Device::cpu();
   toyllm::CpuSamplingConfig sampling;
+  toyllm::ObservabilityConfig observability;
   std::filesystem::path debug_dump_dir;
   std::string model_path = std::string(kDefaultModelPath);
   std::string prompt;
@@ -627,6 +700,28 @@ int main(int argc, char** argv) {
       stream = true;
       continue;
     }
+    if (arg_equals(argv[index], "--profile") && index + 1 < argc) {
+      const auto parsed = toyllm::parse_profile_mode(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--profile must be off, summary, trace, flamegraph, or all.\n";
+        return EXIT_FAILURE;
+      }
+      observability.profile_mode = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--profile-dir") && index + 1 < argc) {
+      observability.profile_output_dir = std::filesystem::path{argv[++index]};
+      continue;
+    }
+    if (arg_equals(argv[index], "--profile-min-us") && index + 1 < argc) {
+      const auto parsed = parse_size_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--profile-min-us must be a non-negative integer.\n";
+        return EXIT_FAILURE;
+      }
+      observability.min_duration_us = static_cast<std::uint64_t>(*parsed);
+      continue;
+    }
     if (arg_equals(argv[index], "--dump-dir") && index + 1 < argc) {
       debug_dump_dir = std::filesystem::path{argv[++index]};
       continue;
@@ -653,5 +748,5 @@ int main(int argc, char** argv) {
 
   return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking, debug_dump_dir,
                             print_kv_cache_stats, verify_kv_cache, compute_device, sampling,
-                            stream);
+                            stream, observability);
 }

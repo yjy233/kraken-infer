@@ -112,6 +112,22 @@ class DumperScope {
   DebugDumper* previous_{nullptr};
 };
 
+class ProfilerScope {
+ public:
+  ProfilerScope(RequestProfiler*& target, RequestProfiler* profiler)
+      : target_(target), previous_(target) {
+    target_ = profiler;
+  }
+  ~ProfilerScope() { target_ = previous_; }
+
+  ProfilerScope(const ProfilerScope&) = delete;
+  ProfilerScope& operator=(const ProfilerScope&) = delete;
+
+ private:
+  RequestProfiler*& target_;
+  RequestProfiler* previous_{nullptr};
+};
+
 std::string position_tensor_name(std::size_t position, std::string_view suffix) {
   std::ostringstream output;
   output << "position." << position << "." << suffix;
@@ -144,9 +160,11 @@ class CpuQwenModel {
                           bool enable_thinking, const std::filesystem::path& debug_dump_dir,
                           bool verify_kv_cache, Device compute_device,
                           const CpuSamplingConfig& sampling,
-                          const std::function<void(std::string_view)>& stream_token) {
+                          const std::function<void(std::string_view)>& stream_token,
+                          RequestProfiler* profiler) {
     DebugDumper dumper(debug_dump_dir);
     DumperScope dumper_scope(dumper_, dumper.enabled() ? &dumper : nullptr);
+    ProfilerScope profiler_scope(profiler_, profiler);
     if (compute_device.kind == DeviceKind::mps) {
       return generate_mps(messages, max_new_tokens, enable_thinking, verify_kv_cache,
                           compute_device, sampling, stream_token);
@@ -155,40 +173,65 @@ class CpuQwenModel {
     const auto effective_sampling = make_effective_sampling(generation_, sampling);
     std::mt19937_64 rng(effective_sampling.seed);
 
-    const auto prompt_tokens = tokenizer_.encode_chat_messages(messages, enable_thinking);
-    if (prompt_tokens.empty()) {
-      throw std::runtime_error("tokenizer produced no prompt tokens");
+    std::vector<std::int64_t> prompt_tokens;
+    {
+      auto span = profile_span("request.tokenize");
+      prompt_tokens = tokenizer_.encode_chat_messages(messages, enable_thinking);
+      if (prompt_tokens.empty()) {
+        throw std::runtime_error("tokenizer produced no prompt tokens");
+      }
+    }
+    if (profiler_ != nullptr) {
+      profiler_->set_metadata("prompt_tokens", prompt_tokens.size());
     }
     dump_i64("prompt_tokens", {static_cast<std::uint64_t>(prompt_tokens.size())}, prompt_tokens);
 
     const auto total_tokens = prompt_tokens.size() + max_new_tokens + 1U;
-    reset_kv_cache(total_tokens);
+    {
+      auto span = profile_span("request.reset_kv_cache");
+      reset_kv_cache(total_tokens);
+    }
 
     std::vector<float> hidden;
     std::size_t position = 0;
-    for (const auto token : prompt_tokens) {
-      hidden = forward_token(token, position);
-      ++position;
+    {
+      auto prefill = profile_span("request.prefill");
+      for (const auto token : prompt_tokens) {
+        hidden = forward_token(token, position);
+        ++position;
+      }
     }
 
     std::vector<std::int64_t> generated;
     generated.reserve(max_new_tokens);
+    auto decode_span = profile_span("request.decode");
     for (std::size_t step = 0; step < max_new_tokens; ++step) {
-      const auto logits = compute_logits(hidden, false);
+      const auto logits = [&]() {
+        auto span = profile_span("decode_step.logits");
+        return compute_logits(hidden, false);
+      }();
       dump_f32(position_tensor_name(position - 1U, "logits"),
                {static_cast<std::uint64_t>(config_.vocab_size)}, logits);
-      const auto next_token = select_next_token(logits, rng, effective_sampling);
+      const auto next_token = [&]() {
+        auto span = profile_span("decode_step.sample");
+        return select_next_token(logits, rng, effective_sampling);
+      }();
       if (is_eos(next_token)) {
         break;
       }
       generated.push_back(next_token);
       if (stream_token) {
+        auto span = profile_span("decode_step.stream_emit");
         const auto token_text = tokenizer_.decode(std::vector<std::int64_t>{next_token});
         stream_token(token_text);
       }
-      hidden = forward_token(next_token, position);
-      ++position;
+      {
+        auto span = profile_span("decode_step.forward_next_token");
+        hidden = forward_token(next_token, position);
+        ++position;
+      }
     }
+    (void)decode_span;
     dump_i64("generated_tokens", {static_cast<std::uint64_t>(generated.size())}, generated);
     const auto cached_stats = kv_cache_.stats();
     bool verified = false;
@@ -202,7 +245,13 @@ class CpuQwenModel {
       }
       verified = true;
     }
-    return CpuModelOutput{tokenizer_.decode(generated), cached_stats, verified};
+    if (profiler_ != nullptr) {
+      profiler_->set_metadata("generated_tokens", generated.size());
+      profiler_->set_metadata("device", compute_device.to_string());
+      profiler_->set_status("ok");
+    }
+    return CpuModelOutput{tokenizer_.decode(generated), cached_stats, verified,
+                          prompt_tokens.size(), generated.size()};
   }
 
  private:
@@ -271,38 +320,55 @@ class CpuQwenModel {
     }
     const auto effective_sampling = make_effective_sampling(generation_, sampling);
     std::mt19937_64 rng(effective_sampling.seed);
-    const auto prompt_tokens = tokenizer_.encode_chat_messages(messages, enable_thinking);
+    std::vector<std::int64_t> prompt_tokens;
+    {
+      auto span = profile_span("request.tokenize");
+      prompt_tokens = tokenizer_.encode_chat_messages(messages, enable_thinking);
+    }
     if (prompt_tokens.empty()) {
       throw std::runtime_error("tokenizer produced no prompt tokens");
+    }
+    if (profiler_ != nullptr) {
+      profiler_->set_metadata("prompt_tokens", prompt_tokens.size());
+      profiler_->set_metadata("device", compute_device.to_string());
     }
     dump_i64("prompt_tokens", {static_cast<std::uint64_t>(prompt_tokens.size())}, prompt_tokens);
 
     const auto total_tokens = prompt_tokens.size() + max_new_tokens + 1U;
-    prepare_mps_full_forward(total_tokens);
+    {
+      auto span = profile_span("request.reset_kv_cache");
+      prepare_mps_full_forward(total_tokens);
+    }
 
     std::size_t position = 0;
-    for (const auto token : prompt_tokens) {
-      forward_token_mps(token, position);
-      ++position;
+    {
+      auto span = profile_span("request.prefill");
+      for (const auto token : prompt_tokens) {
+        forward_token_mps(token, position);
+        ++position;
+      }
     }
 
     std::vector<std::int64_t> generated;
     generated.reserve(max_new_tokens);
-    for (std::size_t step = 0; step < max_new_tokens; ++step) {
-      const auto logits = compute_logits_mps_device();
-      dump_f32(position_tensor_name(position - 1U, "logits"),
-               {static_cast<std::uint64_t>(config_.vocab_size)}, logits);
-      const auto next_token = select_next_token(logits, rng, effective_sampling);
-      if (is_eos(next_token)) {
-        break;
+    {
+      auto span = profile_span("request.decode");
+      for (std::size_t step = 0; step < max_new_tokens; ++step) {
+        const auto logits = compute_logits_mps_device();
+        dump_f32(position_tensor_name(position - 1U, "logits"),
+                 {static_cast<std::uint64_t>(config_.vocab_size)}, logits);
+        const auto next_token = select_next_token(logits, rng, effective_sampling);
+        if (is_eos(next_token)) {
+          break;
+        }
+        generated.push_back(next_token);
+        if (stream_token) {
+          const auto token_text = tokenizer_.decode(std::vector<std::int64_t>{next_token});
+          stream_token(token_text);
+        }
+        forward_token_mps(next_token, position);
+        ++position;
       }
-      generated.push_back(next_token);
-      if (stream_token) {
-        const auto token_text = tokenizer_.decode(std::vector<std::int64_t>{next_token});
-        stream_token(token_text);
-      }
-      forward_token_mps(next_token, position);
-      ++position;
     }
     dump_i64("generated_tokens", {static_cast<std::uint64_t>(generated.size())}, generated);
 
@@ -318,7 +384,12 @@ class CpuQwenModel {
       verified = true;
     }
 
-    return CpuModelOutput{tokenizer_.decode(generated), cached_stats, verified};
+    if (profiler_ != nullptr) {
+      profiler_->set_metadata("generated_tokens", generated.size());
+      profiler_->set_status("ok");
+    }
+    return CpuModelOutput{tokenizer_.decode(generated), cached_stats, verified,
+                          prompt_tokens.size(), generated.size()};
   }
 
   std::vector<std::int64_t> generate_mps_recomputed_tokens(
@@ -529,21 +600,31 @@ class CpuQwenModel {
     const auto kv_dim = kv_heads * head_dim;
     const auto eps = static_cast<float>(config_.rms_norm_eps);
 
-    expect_mps(mps_context_->rms_norm_f32_bf16(mps_workspace_.hidden, layer.input_norm,
-                                               hidden_size, eps, mps_workspace_.normed),
-               "input_norm");
+    {
+      auto span = profile_span("mps.input_rms_norm",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->rms_norm_f32_bf16(mps_workspace_.hidden, layer.input_norm,
+                                                 hidden_size, eps, mps_workspace_.normed),
+                 "input_norm");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "input_norm"),
                  {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.normed,
                  hidden_size);
-    expect_mps(mps_context_->matvec_bf16_f32_device(layer.q_proj, attn_dim, hidden_size,
-                                                    mps_workspace_.normed, mps_workspace_.q),
-               "q_proj");
-    expect_mps(mps_context_->matvec_bf16_f32_device(layer.k_proj, kv_dim, hidden_size,
-                                                    mps_workspace_.normed, mps_workspace_.k),
-               "k_proj");
-    expect_mps(mps_context_->matvec_bf16_f32_device(layer.v_proj, kv_dim, hidden_size,
-                                                    mps_workspace_.normed, mps_workspace_.v),
-               "v_proj");
+    {
+      auto span = profile_span("mps.qkv_proj",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->matvec_bf16_f32_device(layer.q_proj, attn_dim, hidden_size,
+                                                      mps_workspace_.normed, mps_workspace_.q),
+                 "q_proj");
+      expect_mps(mps_context_->matvec_bf16_f32_device(layer.k_proj, kv_dim, hidden_size,
+                                                      mps_workspace_.normed, mps_workspace_.k),
+                 "k_proj");
+      expect_mps(mps_context_->matvec_bf16_f32_device(layer.v_proj, kv_dim, hidden_size,
+                                                      mps_workspace_.normed, mps_workspace_.v),
+                 "v_proj");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "q_proj"),
                  {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)},
                  mps_workspace_.q, attn_dim);
@@ -553,18 +634,28 @@ class CpuQwenModel {
     dump_mps_f32(layer_tensor_name(position, layer_index, "v_proj"),
                  {static_cast<std::uint64_t>(kv_heads), static_cast<std::uint64_t>(head_dim)},
                  mps_workspace_.v, kv_dim);
-    expect_mps(mps_context_->qk_norm_f32_bf16(mps_workspace_.q, layer.q_norm, heads,
-                                              head_dim, eps),
-               "q_norm");
-    expect_mps(mps_context_->qk_norm_f32_bf16(mps_workspace_.k, layer.k_norm, kv_heads,
-                                              head_dim, eps),
-               "k_norm");
-    expect_mps(mps_context_->rope_f32(mps_workspace_.q, heads, head_dim, position,
-                                      static_cast<float>(config_.rope_theta)),
-               "q_rope");
-    expect_mps(mps_context_->rope_f32(mps_workspace_.k, kv_heads, head_dim, position,
-                                      static_cast<float>(config_.rope_theta)),
-               "k_rope");
+    {
+      auto span = profile_span("mps.qk_norm",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->qk_norm_f32_bf16(mps_workspace_.q, layer.q_norm, heads,
+                                                head_dim, eps),
+                 "q_norm");
+      expect_mps(mps_context_->qk_norm_f32_bf16(mps_workspace_.k, layer.k_norm, kv_heads,
+                                                head_dim, eps),
+                 "k_norm");
+    }
+    {
+      auto span = profile_span("mps.rope",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->rope_f32(mps_workspace_.q, heads, head_dim, position,
+                                        static_cast<float>(config_.rope_theta)),
+                 "q_rope");
+      expect_mps(mps_context_->rope_f32(mps_workspace_.k, kv_heads, head_dim, position,
+                                        static_cast<float>(config_.rope_theta)),
+                 "k_rope");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "q_norm_rope"),
                  {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)},
                  mps_workspace_.q, attn_dim);
@@ -574,71 +665,116 @@ class CpuQwenModel {
 
     const auto cache_offset =
       (layer_index * mps_workspace_.capacity_tokens + position) * kv_dim;
-    expect_mps(mps_context_->copy_f32_region(mps_workspace_.k, mps_workspace_.key_cache, 0,
-                                             cache_offset, kv_dim),
-               "store_k");
-    expect_mps(mps_context_->copy_f32_region(mps_workspace_.v, mps_workspace_.value_cache, 0,
-                                             cache_offset, kv_dim),
-               "store_v");
+    {
+      auto span = profile_span("mps.kv_store",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->copy_f32_region(mps_workspace_.k, mps_workspace_.key_cache, 0,
+                                               cache_offset, kv_dim),
+                 "store_k");
+      expect_mps(mps_context_->copy_f32_region(mps_workspace_.v, mps_workspace_.value_cache, 0,
+                                               cache_offset, kv_dim),
+                 "store_v");
+    }
 
-    expect_mps(mps_context_->attention_f32(mps_workspace_.q, mps_workspace_.key_cache,
-                                           mps_workspace_.value_cache, layer_index, position,
-                                           mps_workspace_.capacity_tokens, heads, kv_heads,
-                                           head_dim, mps_workspace_.attn_out),
-               "attention");
+    {
+      auto span = profile_span("mps.attention",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->attention_f32(mps_workspace_.q, mps_workspace_.key_cache,
+                                             mps_workspace_.value_cache, layer_index, position,
+                                             mps_workspace_.capacity_tokens, heads, kv_heads,
+                                             head_dim, mps_workspace_.attn_out),
+                 "attention");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "attention_out"),
                  {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)},
                  mps_workspace_.attn_out, attn_dim);
-    expect_mps(mps_context_->matvec_bf16_f32_device(layer.o_proj, hidden_size, attn_dim,
-                                                    mps_workspace_.attn_out,
-                                                    mps_workspace_.projected),
-               "o_proj");
+    {
+      auto span = profile_span("mps.o_proj",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->matvec_bf16_f32_device(layer.o_proj, hidden_size, attn_dim,
+                                                      mps_workspace_.attn_out,
+                                                      mps_workspace_.projected),
+                 "o_proj");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "attention_projected"),
                  {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.projected,
                  hidden_size);
-    expect_mps(mps_context_->add_f32_in_place(mps_workspace_.hidden,
-                                              mps_workspace_.projected, hidden_size),
-               "attention_residual");
+    {
+      auto span = profile_span("mps.attention_residual",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->add_f32_in_place(mps_workspace_.hidden,
+                                                mps_workspace_.projected, hidden_size),
+                 "attention_residual");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "attention_residual"),
                  {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.hidden,
                  hidden_size);
 
-    expect_mps(mps_context_->rms_norm_f32_bf16(mps_workspace_.hidden, layer.post_norm,
-                                               hidden_size, eps, mps_workspace_.normed),
-               "post_attention_norm");
+    {
+      auto span = profile_span("mps.post_attention_rms_norm",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->rms_norm_f32_bf16(mps_workspace_.hidden, layer.post_norm,
+                                                 hidden_size, eps, mps_workspace_.normed),
+                 "post_attention_norm");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "post_attention_norm"),
                  {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.normed,
                  hidden_size);
-    expect_mps(mps_context_->matvec_bf16_f32_device(layer.gate_proj, intermediate,
-                                                    hidden_size, mps_workspace_.normed,
-                                                    mps_workspace_.gate),
-               "gate_proj");
-    expect_mps(mps_context_->matvec_bf16_f32_device(layer.up_proj, intermediate,
-                                                    hidden_size, mps_workspace_.normed,
-                                                    mps_workspace_.up),
-               "up_proj");
+    {
+      auto span = profile_span("mps.mlp_gate_up",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->matvec_bf16_f32_device(layer.gate_proj, intermediate,
+                                                      hidden_size, mps_workspace_.normed,
+                                                      mps_workspace_.gate),
+                 "gate_proj");
+      expect_mps(mps_context_->matvec_bf16_f32_device(layer.up_proj, intermediate,
+                                                      hidden_size, mps_workspace_.normed,
+                                                      mps_workspace_.up),
+                 "up_proj");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_gate_proj"),
                  {static_cast<std::uint64_t>(intermediate)}, mps_workspace_.gate,
                  intermediate);
     dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_up_proj"),
                  {static_cast<std::uint64_t>(intermediate)}, mps_workspace_.up,
                  intermediate);
-    expect_mps(mps_context_->silu_mul_f32_in_place(mps_workspace_.gate, mps_workspace_.up,
-                                                   intermediate),
-               "silu_gate_mul");
+    {
+      auto span = profile_span("mps.mlp_silu_mul",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->silu_mul_f32_in_place(mps_workspace_.gate, mps_workspace_.up,
+                                                     intermediate),
+                 "silu_gate_mul");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_gate_silu_mul"),
                  {static_cast<std::uint64_t>(intermediate)}, mps_workspace_.gate,
                  intermediate);
-    expect_mps(mps_context_->matvec_bf16_f32_device(layer.down_proj, hidden_size,
-                                                    intermediate, mps_workspace_.gate,
-                                                    mps_workspace_.down),
-               "down_proj");
+    {
+      auto span = profile_span("mps.mlp_down_proj",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->matvec_bf16_f32_device(layer.down_proj, hidden_size,
+                                                      intermediate, mps_workspace_.gate,
+                                                      mps_workspace_.down),
+                 "down_proj");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "mlp_down_proj"),
                  {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.down,
                  hidden_size);
-    expect_mps(mps_context_->add_f32_in_place(mps_workspace_.hidden, mps_workspace_.down,
-                                              hidden_size),
-               "mlp_residual");
+    {
+      auto span = profile_span("mps.mlp_residual",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      expect_mps(mps_context_->add_f32_in_place(mps_workspace_.hidden, mps_workspace_.down,
+                                                hidden_size),
+                 "mlp_residual");
+    }
     dump_mps_f32(layer_tensor_name(position, layer_index, "layer_output"),
                  {static_cast<std::uint64_t>(hidden_size)}, mps_workspace_.hidden,
                  hidden_size);
@@ -647,14 +783,20 @@ class CpuQwenModel {
   std::vector<float> compute_logits_mps_device() {
     const auto vocab = static_cast<std::size_t>(config_.vocab_size);
     const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
-    expect_mps(mps_context_->matvec_bf16_f32_device(mps_lm_head_, vocab, hidden_size,
-                                                    mps_workspace_.normed,
-                                                    mps_workspace_.logits),
-               "lm_head");
+    {
+      auto span = profile_span("mps.lm_head");
+      expect_mps(mps_context_->matvec_bf16_f32_device(mps_lm_head_, vocab, hidden_size,
+                                                      mps_workspace_.normed,
+                                                      mps_workspace_.logits),
+                 "lm_head");
+    }
     std::vector<float> logits(vocab);
-    expect_mps(mps_context_->copy_from_buffer(mps_workspace_.logits, logits.data(),
-                                              f32_bytes(vocab)),
-               "logits readback");
+    {
+      auto span = profile_span("mps.logits_readback");
+      expect_mps(mps_context_->copy_from_buffer(mps_workspace_.logits, logits.data(),
+                                                f32_bytes(vocab)),
+                 "logits readback");
+    }
     return logits;
   }
 
@@ -695,19 +837,31 @@ class CpuQwenModel {
   std::vector<float> forward_token(std::int64_t token, std::size_t position) {
     const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
     std::vector<float> hidden(hidden_size);
-    for (std::size_t i = 0; i < hidden_size; ++i) {
-      hidden[i] = bf16_to_float(embedding_.data, static_cast<std::uint64_t>(token) *
-                                                   static_cast<std::uint64_t>(hidden_size) + i);
+    {
+      auto span = profile_span("forward_token.embedding",
+                               {{"position", std::to_string(position)}});
+      for (std::size_t i = 0; i < hidden_size; ++i) {
+        hidden[i] = bf16_to_float(embedding_.data, static_cast<std::uint64_t>(token) *
+                                                     static_cast<std::uint64_t>(hidden_size) + i);
+      }
     }
     dump_f32(position_tensor_name(position, "embedding"), {static_cast<std::uint64_t>(hidden_size)},
              hidden);
 
-    for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
-      apply_layer(layers_[layer_index], layer_index, position, hidden);
+    {
+      auto span = profile_span("forward_token.layers",
+                               {{"position", std::to_string(position)}});
+      for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
+        apply_layer(layers_[layer_index], layer_index, position, hidden);
+      }
     }
 
     std::vector<float> normed(hidden_size);
-    rms_norm(hidden, final_norm_, normed);
+    {
+      auto span = profile_span("forward_token.final_norm",
+                               {{"position", std::to_string(position)}});
+      rms_norm(hidden, final_norm_, normed);
+    }
     dump_f32(position_tensor_name(position, "final_norm"),
              {static_cast<std::uint64_t>(hidden_size)}, normed);
     return normed;
@@ -724,38 +878,73 @@ class CpuQwenModel {
     const auto intermediate = static_cast<std::size_t>(config_.intermediate_size);
 
     std::vector<float> normed(hidden_size);
-    rms_norm(hidden, layer.input_norm, normed);
+    {
+      auto span = profile_span("layer.input_rms_norm",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      rms_norm(hidden, layer.input_norm, normed);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "input_norm"),
              {static_cast<std::uint64_t>(hidden_size)}, normed);
 
     std::vector<float> q(attn_dim);
     std::vector<float> k(kv_dim);
     std::vector<float> v(kv_dim);
-    matvec(layer.q_proj, normed, q);
-    matvec(layer.k_proj, normed, k);
-    matvec(layer.v_proj, normed, v);
+    {
+      auto span = profile_span("layer.qkv_proj",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      matvec(layer.q_proj, normed, q);
+      matvec(layer.k_proj, normed, k);
+      matvec(layer.v_proj, normed, v);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "q_proj"),
              {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)}, q);
     dump_f32(layer_tensor_name(position, layer_index, "k_proj"),
              {static_cast<std::uint64_t>(kv_heads), static_cast<std::uint64_t>(head_dim)}, k);
     dump_f32(layer_tensor_name(position, layer_index, "v_proj"),
              {static_cast<std::uint64_t>(kv_heads), static_cast<std::uint64_t>(head_dim)}, v);
-    qk_norm(q, heads, layer.q_norm);
-    qk_norm(k, kv_heads, layer.k_norm);
-    apply_rope(q, heads, position);
-    apply_rope(k, kv_heads, position);
+    {
+      auto span = profile_span("layer.qk_norm",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      qk_norm(q, heads, layer.q_norm);
+      qk_norm(k, kv_heads, layer.k_norm);
+    }
+    {
+      auto span = profile_span("layer.rope",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      apply_rope(q, heads, position);
+      apply_rope(k, kv_heads, position);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "q_norm_rope"),
              {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)}, q);
     dump_f32(layer_tensor_name(position, layer_index, "k_norm_rope"),
              {static_cast<std::uint64_t>(kv_heads), static_cast<std::uint64_t>(head_dim)}, k);
-    store_kv(layer_index, position, k, v);
+    {
+      auto span = profile_span("layer.kv_store",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      store_kv(layer_index, position, k, v);
+    }
 
     std::vector<float> attn_out(attn_dim);
-    attention(layer_index, position, q, attn_out);
+    {
+      auto span = profile_span("layer.attention",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      attention(layer_index, position, q, attn_out);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "attention_out"),
              {static_cast<std::uint64_t>(heads), static_cast<std::uint64_t>(head_dim)}, attn_out);
     std::vector<float> projected(hidden_size);
-    matvec(layer.o_proj, attn_out, projected);
+    {
+      auto span = profile_span("layer.o_proj",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      matvec(layer.o_proj, attn_out, projected);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "attention_projected"),
              {static_cast<std::uint64_t>(hidden_size)}, projected);
     for (std::size_t i = 0; i < hidden_size; ++i) {
@@ -764,24 +953,44 @@ class CpuQwenModel {
     dump_f32(layer_tensor_name(position, layer_index, "attention_residual"),
              {static_cast<std::uint64_t>(hidden_size)}, hidden);
 
-    rms_norm(hidden, layer.post_norm, normed);
+    {
+      auto span = profile_span("layer.post_attention_rms_norm",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      rms_norm(hidden, layer.post_norm, normed);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "post_attention_norm"),
              {static_cast<std::uint64_t>(hidden_size)}, normed);
     std::vector<float> gate(intermediate);
     std::vector<float> up(intermediate);
-    matvec(layer.gate_proj, normed, gate);
-    matvec(layer.up_proj, normed, up);
+    {
+      auto span = profile_span("layer.mlp_gate_up",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      matvec(layer.gate_proj, normed, gate);
+      matvec(layer.up_proj, normed, up);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "mlp_gate_proj"),
              {static_cast<std::uint64_t>(intermediate)}, gate);
     dump_f32(layer_tensor_name(position, layer_index, "mlp_up_proj"),
              {static_cast<std::uint64_t>(intermediate)}, up);
-    for (std::size_t i = 0; i < intermediate; ++i) {
-      gate[i] = silu(gate[i]) * up[i];
+    {
+      auto span = profile_span("layer.mlp_silu_mul",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      for (std::size_t i = 0; i < intermediate; ++i) {
+        gate[i] = silu(gate[i]) * up[i];
+      }
     }
     dump_f32(layer_tensor_name(position, layer_index, "mlp_gate_silu_mul"),
              {static_cast<std::uint64_t>(intermediate)}, gate);
     std::vector<float> down(hidden_size);
-    matvec(layer.down_proj, gate, down);
+    {
+      auto span = profile_span("layer.mlp_down_proj",
+                               {{"layer", std::to_string(layer_index)},
+                                {"position", std::to_string(position)}});
+      matvec(layer.down_proj, gate, down);
+    }
     dump_f32(layer_tensor_name(position, layer_index, "mlp_down_proj"),
              {static_cast<std::uint64_t>(hidden_size)}, down);
     for (std::size_t i = 0; i < hidden_size; ++i) {
@@ -872,29 +1081,47 @@ class CpuQwenModel {
       const auto kv_head = head / group;
       const auto q_base = head * head_dim;
       float max_score = -std::numeric_limits<float>::infinity();
-      for (std::size_t t = 0; t <= position; ++t) {
-        const auto* key = kv_cache_.key_ptr(layer, t, kv_head);
-        float score = 0.0F;
-        for (std::size_t d = 0; d < head_dim; ++d) {
-          score += q[q_base + d] * key[d];
+      {
+        auto span = profile_span("attention.score",
+                                 {{"layer", std::to_string(layer)},
+                                  {"position", std::to_string(position)},
+                                  {"head", std::to_string(head)}});
+        for (std::size_t t = 0; t <= position; ++t) {
+          const auto* key = kv_cache_.key_ptr(layer, t, kv_head);
+          float score = 0.0F;
+          for (std::size_t d = 0; d < head_dim; ++d) {
+            score += q[q_base + d] * key[d];
+          }
+          score *= scale;
+          scores[t] = score;
+          max_score = std::max(max_score, score);
         }
-        score *= scale;
-        scores[t] = score;
-        max_score = std::max(max_score, score);
       }
 
       float denom = 0.0F;
-      for (std::size_t t = 0; t <= position; ++t) {
-        scores[t] = std::exp(scores[t] - max_score);
-        denom += scores[t];
-      }
-      for (std::size_t d = 0; d < head_dim; ++d) {
-        float value = 0.0F;
+      {
+        auto span = profile_span("attention.softmax",
+                                 {{"layer", std::to_string(layer)},
+                                  {"position", std::to_string(position)},
+                                  {"head", std::to_string(head)}});
         for (std::size_t t = 0; t <= position; ++t) {
-          const auto* cached_value = kv_cache_.value_ptr(layer, t, kv_head);
-          value += (scores[t] / denom) * cached_value[d];
+          scores[t] = std::exp(scores[t] - max_score);
+          denom += scores[t];
         }
-        output[q_base + d] = value;
+      }
+      {
+        auto span = profile_span("attention.reduce",
+                                 {{"layer", std::to_string(layer)},
+                                  {"position", std::to_string(position)},
+                                  {"head", std::to_string(head)}});
+        for (std::size_t d = 0; d < head_dim; ++d) {
+          float value = 0.0F;
+          for (std::size_t t = 0; t <= position; ++t) {
+            const auto* cached_value = kv_cache_.value_ptr(layer, t, kv_head);
+            value += (scores[t] / denom) * cached_value[d];
+          }
+          output[q_base + d] = value;
+        }
       }
     }
   }
@@ -907,13 +1134,16 @@ class CpuQwenModel {
     const auto vocab = static_cast<std::size_t>(config_.vocab_size);
     const auto hidden_size = static_cast<std::size_t>(config_.hidden_size);
     std::vector<float> logits(vocab);
-    for (std::size_t row = 0; row < vocab; ++row) {
-      float logit = 0.0F;
-      const auto row_offset = static_cast<std::uint64_t>(row * hidden_size);
-      for (std::size_t col = 0; col < hidden_size; ++col) {
-        logit += bf16_to_float(lm_head_.data, row_offset + col) * hidden[col];
+    {
+      auto span = profile_span("lm_head");
+      for (std::size_t row = 0; row < vocab; ++row) {
+        float logit = 0.0F;
+        const auto row_offset = static_cast<std::uint64_t>(row * hidden_size);
+        for (std::size_t col = 0; col < hidden_size; ++col) {
+          logit += bf16_to_float(lm_head_.data, row_offset + col) * hidden[col];
+        }
+        logits[row] = logit;
       }
-      logits[row] = logit;
     }
     return logits;
   }
@@ -922,6 +1152,7 @@ class CpuQwenModel {
     if (mps_context_ == nullptr || !mps_lm_head_.valid()) {
       throw std::runtime_error("MPS lm_head is not initialized");
     }
+    auto span = profile_span("lm_head");
     const auto logits_result =
       mps_context_->matvec_bf16_f32(mps_lm_head_, mps_lm_head_workspace_, hidden);
     if (!logits_result.is_ok()) {
@@ -1022,6 +1253,20 @@ class CpuQwenModel {
 
   static float silu(float value) { return value / (1.0F + std::exp(-value)); }
 
+  ScopedProfileSpan profile_span(std::string_view name) const {
+    if (profiler_ == nullptr) {
+      return {};
+    }
+    return profiler_->scoped(name);
+  }
+
+  ScopedProfileSpan profile_span(std::string_view name, std::vector<ProfileField> fields) const {
+    if (profiler_ == nullptr) {
+      return {};
+    }
+    return profiler_->scoped(name, std::move(fields));
+  }
+
   void dump_f32(std::string_view name, const std::vector<std::uint64_t>& shape,
                 const std::vector<float>& values) const {
     if (dumper_ != nullptr) {
@@ -1046,6 +1291,7 @@ class CpuQwenModel {
   std::vector<LayerWeights> layers_;
   KvCache kv_cache_;
   DebugDumper* dumper_{nullptr};
+  RequestProfiler* profiler_{nullptr};
   std::unique_ptr<mps::MpsContext> mps_context_;
   mps::MpsBuffer mps_embedding_;
   mps::MpsBuffer mps_final_norm_;
@@ -1134,10 +1380,11 @@ CpuModelOutput generate_text(const std::filesystem::path& model_dir,
                              const std::filesystem::path& debug_dump_dir,
                              bool verify_kv_cache, Device compute_device,
                              const CpuSamplingConfig& sampling,
-                             const std::function<void(std::string_view)>& stream_token) {
+                             const std::function<void(std::string_view)>& stream_token,
+                             RequestProfiler* profiler) {
   return cached_model(model_dir)
     .generate(messages, max_new_tokens, enable_thinking, debug_dump_dir, verify_kv_cache,
-              compute_device, sampling, stream_token);
+              compute_device, sampling, stream_token, profiler);
 }
 
 std::string build_weight_summary(const std::filesystem::path& model_dir) {

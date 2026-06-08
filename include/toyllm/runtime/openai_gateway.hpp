@@ -2,6 +2,7 @@
 
 #include "toyllm/core/device.hpp"
 #include "toyllm/core/status.hpp"
+#include "toyllm/runtime/profiling.hpp"
 
 #include <cstddef>
 #include <filesystem>
@@ -16,6 +17,7 @@ struct OpenAIGatewayConfig {
   std::string model_id{"kraken-infer-qwen3-0.6b"};
   Device compute_device{Device::cpu()};
   std::size_t default_max_tokens{16};
+  ObservabilityConfig observability;
 };
 
 [[nodiscard]] Status serve_openai_gateway(const OpenAIGatewayConfig& config);

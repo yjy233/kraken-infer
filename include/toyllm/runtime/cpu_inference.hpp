@@ -2,6 +2,7 @@
 
 #include "toyllm/core/device.hpp"
 #include "toyllm/core/status.hpp"
+#include "toyllm/runtime/profiling.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -41,6 +42,7 @@ struct CpuGenerationRequest {
   Device compute_device{Device::cpu()};
   CpuSamplingConfig sampling;
   std::function<void(std::string_view)> stream_token;
+  ObservabilityConfig observability;
 };
 
 struct CpuKvCacheReport {
@@ -59,6 +61,8 @@ struct CpuKvCacheReport {
 struct CpuGenerationResult {
   bool implemented{false};
   std::string text;
+  std::string request_id;
+  std::filesystem::path profile_dir;
   std::vector<std::string> missing_dependencies;
   CpuKvCacheReport kv_cache;
   bool kv_cache_verified{false};
