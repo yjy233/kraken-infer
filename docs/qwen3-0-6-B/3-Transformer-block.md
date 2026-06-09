@@ -47,6 +47,72 @@ MLP intermediate I     = 3072
 每一层结构完全相同，但权重不同。第 0 层和第 27 层没有特殊分支；差异只来自
 `model.layers.{i}.*` 绑定到不同权重。
 
+## 一个 token 的 hidden 是怎么计算出来的
+
+对位置 `p` 的 token，Transformer 真正要算的是这个 token 在每一层里的 hidden state。
+可以把它写成：
+
+```text
+token id
+  -> embedding
+  -> x^(0)
+  -> Block_0
+  -> x^(1)
+  -> Block_1
+  -> ...
+  -> Block_27
+  -> x^(28)
+  -> final RMSNorm
+  -> h_p
+```
+
+其中：
+
+- `x^(0)` 是 embedding lookup 得到的初始 hidden
+- `x^(l)` 是第 `l` 层输入
+- `x^(l+1)` 是第 `l` 层输出
+- `h_p` 是最终用于 `lm_head` 计算 logits 的 hidden
+
+本项目里，单 token hidden 的入口就是 `forward_token()`：
+
+```cpp
+std::vector<float> hidden(hidden_size);
+for (std::size_t i = 0; i < hidden_size; ++i) {
+  hidden[i] = bf16_to_float(embedding_.data,
+                            static_cast<std::uint64_t>(token) *
+                              static_cast<std::uint64_t>(hidden_size) + i);
+}
+
+for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
+  apply_layer(layers_[layer_index], layer_index, position, hidden);
+}
+
+rms_norm(hidden, final_norm_, normed);
+return normed;
+```
+
+也就是：
+
+```text
+hidden = embedding[token]
+hidden = layer_0(hidden, cache[0..p])
+hidden = layer_1(hidden, cache[0..p])
+...
+hidden = layer_27(hidden, cache[0..p])
+h_p = final_rms_norm(hidden)
+```
+
+这里最关键的一点是：`hidden` 不是一开始就带上下文信息。它先只是当前 token 的 embedding，
+然后在每一层的 attention 里去读取历史 KV cache，逐层把“前面 token 的信息”混进来。
+
+所以如果只看某个位置 `p` 的最终 hidden，本质上它是：
+
+```text
+h_p = F(token_p, token_0, token_1, ..., token_{p-1})
+```
+
+未来 token `token_{p+1} ...` 不会进入这个函数的依赖集合。
+
 ## 在代码中的调用顺序
 
 CPU reference path 里，单 token forward 的层循环是：
@@ -83,6 +149,104 @@ hidden = hidden + down
 
 这个顺序很重要：KV cache 存的是已经做过 Q/K norm 和 RoPE 的 K，以及没有 RoPE 的 V。
 attention 读取 cache 时不再重新计算历史 token 的 K/V。
+
+## Prefill 是怎么计算的
+
+生成时可以分成两个阶段：
+
+1. `prefill`：把整段 prompt 喂进去，建立 KV cache
+2. `decode`：基于最后一个 hidden 出 logits，采样新 token，再继续一步一步向前推
+
+本项目 CPU path 的主循环是：
+
+```cpp
+std::vector<float> hidden;
+std::size_t position = 0;
+{
+  for (const auto token : prompt_tokens) {
+    hidden = forward_token(token, position);
+    ++position;
+  }
+}
+
+for (std::size_t step = 0; step < max_new_tokens; ++step) {
+  const auto logits = compute_logits(hidden, false);
+  const auto next_token = select_next_token(logits, rng, effective_sampling);
+  hidden = forward_token(next_token, position);
+  ++position;
+}
+```
+
+### prefill 的输入和输出
+
+假设 prompt token 序列是：
+
+```text
+[t0, t1, t2, t3]
+```
+
+那么 prefill 做的是：
+
+```text
+position=0: h0 = forward_token(t0, 0)
+position=1: h1 = forward_token(t1, 1)
+position=2: h2 = forward_token(t2, 2)
+position=3: h3 = forward_token(t3, 3)
+```
+
+每做一次 `forward_token(tp, p)`，都会发生两件事：
+
+1. 算出当前位置 `p` 的最终 hidden `h_p`
+2. 把该位置在每一层的 `K/V` 写进对应 layer 的 KV cache
+
+所以当 prefill 结束时：
+
+- cache 里已经有 `t0..t3` 的全部历史 K/V
+- `hidden` 保存的是最后一个 prompt token，也就是 `t3` 的最终 hidden
+
+这个 `hidden` 会立刻送进 `lm_head`，得到“下一个 token”的 logits。也就是说，decode
+第一步并不是重新把 prompt 算一遍，而是直接使用 prefill 最后留下来的结果。
+
+### prefill 为什么必要
+
+如果没有 prefill，那么在生成第一个新 token 之前，模型根本没有：
+
+- 最后一个 prompt token 的 hidden
+- 各层历史 token 的 KV cache
+
+也就无法正确计算：
+
+```text
+P(next_token | prompt)
+```
+
+prefill 的本质就是把条件上下文一次性灌进模型内部状态里。
+
+### prefill 和 decode 的差别
+
+两者内部都调用同一个 `forward_token()`，Transformer block 本身没有“prefill 专用公式”。
+区别只在调度方式：
+
+- `prefill`：对 prompt 中每个已有 token 顺序执行 forward，不做采样
+- `decode`：先用上一步 hidden 出 logits，再采样一个新 token，然后只对这个新 token 做一次 forward
+
+可以写成：
+
+```text
+prefill:
+  t0 -> forward
+  t1 -> forward
+  ...
+  tN -> forward
+
+decode:
+  hN -> logits -> sample(tN+1)
+  tN+1 -> forward
+  hN+1 -> logits -> sample(tN+2)
+  ...
+```
+
+这也是 KV cache 能加速生成的原因：decode 阶段不需要把旧 token 全部重新过一遍 block。
 
 ## Attention 子模块
 
@@ -228,6 +392,121 @@ attention 输出 shape：
 ```text
 attn_out: [16, 128] = [2048]
 ```
+
+## 为什么它只能看前面的 token
+
+这是 decoder-only 自回归模型最核心的约束。对位置 `p`，模型只能依赖：
+
+```text
+token_0, token_1, ..., token_p
+```
+
+不能依赖：
+
+```text
+token_{p+1}, token_{p+2}, ...
+```
+
+否则训练和推理都会“偷看答案”。
+
+### 数学上对应的是 causal mask
+
+标准 Transformer 教科书里，attention score 矩阵通常写成：
+
+```text
+S = Q K^T / sqrt(D)
+```
+
+然后加一个上三角 mask：
+
+```text
+S_ij = -inf, when j > i
+```
+
+再做 softmax。这样第 `i` 行只会保留 `0..i` 的位置。
+
+### 本项目的增量解码实现没有显式 mask，但效果完全一样
+
+这里不是先构造完整 `[seq, seq]` score 矩阵再加 mask，而是直接在单 token 推理时，只遍历
+历史位置：
+
+```cpp
+std::vector<float> scores(position + 1U);
+for (std::size_t t = 0; t <= position; ++t) {
+  const auto* key = kv_cache_.key_ptr(layer, t, kv_head);
+  float score = 0.0F;
+  for (std::size_t d = 0; d < head_dim; ++d) {
+    score += q[q_base + d] * key[d];
+  }
+  scores[t] = score * scale;
+}
+```
+
+这里有两个决定性限制：
+
+1. `scores` 只分配了 `position + 1` 个槽位
+2. 循环只跑 `t = 0 .. position`
+
+所以当前位置 `p` 的 query 根本不会去访问 `p+1` 以后的 K/V。
+
+### future token 为什么根本不存在
+
+更进一步说，在增量推理里，未来 token 的 K/V 连 cache 都还没写进去。
+
+当前 token 的执行顺序是：
+
+```text
+1. 当前 token 做 q/k/v projection
+2. 当前 token 的 k/v 写入 cache[position]
+3. query 读取 cache[0..position]
+```
+
+此时：
+
+```text
+cache[position+1], cache[position+2], ...
+```
+
+还不存在。于是“只看前面”不仅是逻辑约束，也是当前数据结构的物理约束。
+
+### 对 prefill 逐位置展开后会更直观
+
+假设 prompt 是：
+
+```text
+[t0, t1, t2, t3]
+```
+
+prefill 时每个位置实际看到的是：
+
+```text
+position 0: t0                    只能看 [t0]
+position 1: t1 的 query          只能看 [t0, t1]
+position 2: t2 的 query          只能看 [t0, t1, t2]
+position 3: t3 的 query          只能看 [t0, t1, t2, t3]
+```
+
+绝不会出现：
+
+```text
+position 1 去看 t2 或 t3
+```
+
+因为那两个位置在 `position=1` 这一时刻还没写入 cache。
+
+### 所以“只看前面”真正发生在 attention
+
+embedding、RMSNorm、MLP 都是单 token 局部算子；它们不读取其它位置。真正把上下文混进
+当前 hidden 的地方，就是 attention 读取 KV cache 的这一步。
+
+因此可以非常精确地说：
+
+```text
+上下文依赖来自 attention
+因果约束也由 attention 里的历史读取范围保证
+```
+
+这也是为什么 KV cache 只会影响 attention，而不会影响 embedding 或 MLP。
 
 ### 7. O Projection 和残差
 
