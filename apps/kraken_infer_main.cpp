@@ -1,4 +1,5 @@
 #include "toyllm/backends/mps/mps_backend.hpp"
+#include "toyllm/backends/mpsgraph/mpsgraph_backend.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
 #include "toyllm/runtime/openai_gateway.hpp"
@@ -25,33 +26,35 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program << " version\n";
   std::cout << "  " << program << " mps\n";
   std::cout << "  " << program << " mps-smoke\n";
+  std::cout << "  " << program << " mpsgraph\n";
+  std::cout << "  " << program << " mpsgraph-smoke\n";
   std::cout << "  " << program << " inspect [model_dir]\n";
   std::cout << "  " << program << " weights [model_dir]\n";
   std::cout << "  " << program << " doctor [model_dir]\n";
   std::cout << "  " << program
             << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
-               " [--device cpu|mps]"
+               " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n";
   std::cout << "  " << program
             << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
-               " [--device cpu|mps]"
+               " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n";
   std::cout << "  " << program
             << " chat [model_dir] [--max-new-tokens N] [--enable-thinking] [--dump-dir DIR]"
-               " [--device cpu|mps]"
+               " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n\n";
   std::cout << "  " << program
             << " serve [--host 127.0.0.1] [--port 8080] [--model <model_dir>]"
-               " [--model-id ID] [--device cpu|mps] [--max-new-tokens N]\n\n";
+               " [--model-id ID] [--device cpu|mps|mpsgraph] [--max-new-tokens N]\n\n";
   std::cout << "       [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n\n";
   std::cout << "Compatibility flags:\n";
@@ -116,6 +119,9 @@ std::optional<toyllm::Device> parse_device_arg(std::string_view value) {
   if (value == "mps" || value == "mps:0") {
     return toyllm::Device::mps();
   }
+  if (value == "mpsgraph") {
+    return toyllm::Device::mpsgraph();
+  }
   return std::nullopt;
 }
 
@@ -146,6 +152,22 @@ int run_mps_smoke() {
   return EXIT_SUCCESS;
 }
 
+int print_mpsgraph_info() {
+  const auto info = toyllm::mpsgraph::query_backend();
+  std::cout << toyllm::mpsgraph::format_backend_info(info);
+  return EXIT_SUCCESS;
+}
+
+int run_mpsgraph_smoke() {
+  const auto status = toyllm::mpsgraph::run_operator_smoke_test();
+  if (!status.is_ok()) {
+    std::cerr << "MPSGraph operator smoke failed: " << status.message() << '\n';
+    return EXIT_FAILURE;
+  }
+  std::cout << "MPSGraph operator smoke: ok\n";
+  return EXIT_SUCCESS;
+}
+
 int inspect_weights(const std::filesystem::path& model_path) {
   const auto summary = toyllm::format_weight_summary(model_path);
   if (!summary.is_ok()) {
@@ -166,6 +188,14 @@ int run_doctor(const std::filesystem::path& model_path) {
     std::cout << "MPS operator smoke: ok\n";
   } else {
     std::cout << "MPS operator smoke: not ready: " << mps_smoke.message() << '\n';
+  }
+  std::cout << "\n== MPSGraph ==\n";
+  (void)print_mpsgraph_info();
+  const auto mpsgraph_smoke = toyllm::mpsgraph::run_operator_smoke_test();
+  if (mpsgraph_smoke.is_ok()) {
+    std::cout << "MPSGraph operator smoke: ok\n";
+  } else {
+    std::cout << "MPSGraph operator smoke: not ready: " << mpsgraph_smoke.message() << '\n';
   }
   std::cout << "\n== Model ==\n";
   const auto model_status = inspect_model(model_path);
@@ -354,6 +384,14 @@ int main(int argc, char** argv) {
     return run_mps_smoke();
   }
 
+  if (arg_equals(argv[1], "mpsgraph")) {
+    return print_mpsgraph_info();
+  }
+
+  if (arg_equals(argv[1], "mpsgraph-smoke")) {
+    return run_mpsgraph_smoke();
+  }
+
   if (arg_equals(argv[1], "inspect") || arg_equals(argv[1], "--inspect-model")) {
     if (argc > 3) {
       std::cerr << "inspect accepts at most one model directory.\n";
@@ -414,7 +452,7 @@ int main(int argc, char** argv) {
       if (arg_equals(argv[index], "--device") && index + 1 < argc) {
         const auto parsed = parse_device_arg(argv[++index]);
         if (!parsed.has_value()) {
-          std::cerr << "--device must be cpu or mps.\n";
+          std::cerr << "--device must be cpu, mps, or mpsgraph.\n";
           return EXIT_FAILURE;
         }
         config.compute_device = *parsed;
@@ -492,7 +530,7 @@ int main(int argc, char** argv) {
       if (arg_equals(argv[index], "--device") && index + 1 < argc) {
         const auto parsed = parse_device_arg(argv[++index]);
         if (!parsed.has_value()) {
-          std::cerr << "--device must be cpu or mps.\n";
+          std::cerr << "--device must be cpu, mps, or mpsgraph.\n";
           return EXIT_FAILURE;
         }
         compute_device = *parsed;
@@ -642,7 +680,7 @@ int main(int argc, char** argv) {
     if (arg_equals(argv[index], "--device") && index + 1 < argc) {
       const auto parsed = parse_device_arg(argv[++index]);
       if (!parsed.has_value()) {
-        std::cerr << "--device must be cpu or mps.\n";
+        std::cerr << "--device must be cpu, mps, or mpsgraph.\n";
         return EXIT_FAILURE;
       }
       compute_device = *parsed;

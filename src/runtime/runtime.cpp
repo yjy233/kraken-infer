@@ -1,5 +1,6 @@
 #include "toyllm/runtime/runtime.hpp"
 
+#include "toyllm/backends/mpsgraph/mpsgraph_backend.hpp"
 #include "toyllm/backends/mps/mps_backend.hpp"
 
 namespace toyllm {
@@ -16,6 +17,13 @@ RuntimeInfo Runtime::info() const {
 
   if (config_.preferred_device.kind == DeviceKind::mps) {
     const auto backend = mps::query_backend();
+    info.accelerator_available = backend.available;
+    info.accelerator_name = backend.device_name;
+    if (backend.available) {
+      info.selected_device = config_.preferred_device;
+    }
+  } else if (config_.preferred_device.kind == DeviceKind::mpsgraph) {
+    const auto backend = mpsgraph::query_backend();
     info.accelerator_available = backend.available;
     info.accelerator_name = backend.device_name;
     if (backend.available) {

@@ -122,12 +122,12 @@ executing tools and sending `role: "tool"` messages back.
 
 Recommended next architecture slices:
 
-- **M10 MPS performance**
-  - command buffer batching
-  - kernel fusion
-  - optimized attention
-  - GPU-side top-k/top-p or argmax
-  - BF16/FP16 KV cache
+- **M10 MPSGraph backend**
+  - independent `mpsgraph` backend, not coupled to current `mps`
+  - graph-side prefill/decode
+  - device-resident weights and KV cache
+  - graph-side greedy sampling
+  - no prefill/decode CPU/GPU tensor round trips
 - **M11 prompt cache / cache-control**
   - stable prefix token hashing
   - cross-request KV snapshots

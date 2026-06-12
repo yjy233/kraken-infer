@@ -10,7 +10,8 @@ COMMON_FLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Iincl
 DEBUG_FLAGS := -O0 -g
 RELEASE_FLAGS := -O3 -DNDEBUG
 MPS_FLAGS := -DKRAKEN_INFER_ENABLE_MPS=1
-MPS_LIBS := -framework Foundation -framework Metal -framework MetalPerformanceShaders
+MPSGRAPH_FLAGS := -DKRAKEN_INFER_ENABLE_MPSGRAPH=1
+APPLE_FRAMEWORKS := -framework Foundation -framework Metal -framework MetalPerformanceShaders -framework MetalPerformanceShadersGraph
 
 CORE_SRCS := \
 	src/core/status.cpp \
@@ -23,10 +24,12 @@ CORE_SRCS := \
 	src/runtime/cpu/safetensors.cpp \
 	src/runtime/cpu/tokenizer.cpp \
 	src/runtime/cpu_inference.cpp \
+	src/runtime/mpsgraph_inference.cpp \
 	src/runtime/openai_gateway.cpp \
 	src/runtime/profiling.cpp \
 	src/runtime/runtime.cpp \
-	src/backends/mps/mps_backend.mm
+	src/backends/mps/mps_backend.mm \
+	src/backends/mpsgraph/mpsgraph_backend.mm
 
 .PHONY: all debug release test cli inspect weights doctor infer run chat serve compare-transformers mps-info clean
 
@@ -41,10 +44,10 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(BUILD_DIR)/$(BINARY): $(CORE_SRCS) apps/kraken_infer_main.cpp | $(BUILD_DIR)
-	$(CXX) $(COMMON_FLAGS) $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MPS_FLAGS) $^ $(MPS_LIBS) -o $@
+	$(CXX) $(COMMON_FLAGS) $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MPS_FLAGS) $(MPSGRAPH_FLAGS) $^ $(APPLE_FRAMEWORKS) -o $@
 
 $(BUILD_DIR)/$(SMOKE_TEST): $(CORE_SRCS) tests/smoke_test.cpp | $(BUILD_DIR)
-	$(CXX) $(COMMON_FLAGS) $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MPS_FLAGS) $^ $(MPS_LIBS) -o $@
+	$(CXX) $(COMMON_FLAGS) $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MPS_FLAGS) $(MPSGRAPH_FLAGS) $^ $(APPLE_FRAMEWORKS) -o $@
 
 test: $(BUILD_DIR)/$(SMOKE_TEST)
 	./$(BUILD_DIR)/$(SMOKE_TEST)

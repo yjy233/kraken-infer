@@ -11,11 +11,16 @@ if(DEFINED TOYLLM_ENABLE_MPS AND NOT DEFINED KRAKEN_INFER_ENABLE_MPS)
   set(KRAKEN_INFER_ENABLE_MPS "${TOYLLM_ENABLE_MPS}" CACHE BOOL
       "Enable Metal Performance Shaders backend on macOS" FORCE)
 endif()
+if(DEFINED TOYLLM_ENABLE_MPSGRAPH AND NOT DEFINED KRAKEN_INFER_ENABLE_MPSGRAPH)
+  set(KRAKEN_INFER_ENABLE_MPSGRAPH "${TOYLLM_ENABLE_MPSGRAPH}" CACHE BOOL
+      "Enable Metal Performance Shaders Graph backend on macOS" FORCE)
+endif()
 if(DEFINED TOYLLM_BUILD_TESTS AND NOT DEFINED KRAKEN_INFER_BUILD_TESTS)
   set(KRAKEN_INFER_BUILD_TESTS "${TOYLLM_BUILD_TESTS}" CACHE BOOL "Build smoke tests" FORCE)
 endif()
 
 option(KRAKEN_INFER_ENABLE_MPS "Enable Metal Performance Shaders backend on macOS" ON)
+option(KRAKEN_INFER_ENABLE_MPSGRAPH "Enable Metal Performance Shaders Graph backend on macOS" ON)
 option(KRAKEN_INFER_BUILD_TESTS "Build smoke tests" ON)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -43,6 +48,7 @@ target_sources(
     src/runtime/cpu/safetensors.cpp
     src/runtime/cpu/tokenizer.cpp
     src/runtime/cpu_inference.cpp
+    src/runtime/mpsgraph_inference.cpp
     src/runtime/openai_gateway.cpp
     src/runtime/profiling.cpp
     src/runtime/runtime.cpp
@@ -58,8 +64,11 @@ target_include_directories(
 target_compile_features(kraken_infer_core PUBLIC cxx_std_20)
 kraken_infer_set_project_warnings(kraken_infer_core)
 
-if(APPLE AND KRAKEN_INFER_ENABLE_MPS)
+if(APPLE AND (KRAKEN_INFER_ENABLE_MPS OR KRAKEN_INFER_ENABLE_MPSGRAPH))
   enable_language(OBJCXX)
+endif()
+
+if(APPLE AND KRAKEN_INFER_ENABLE_MPS)
   target_sources(kraken_infer_core PRIVATE src/backends/mps/mps_backend.mm)
   target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_MPS=1)
   target_link_libraries(
@@ -72,6 +81,22 @@ if(APPLE AND KRAKEN_INFER_ENABLE_MPS)
 else()
   target_sources(kraken_infer_core PRIVATE src/backends/mps/mps_backend_stub.cpp)
   target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_MPS=0)
+endif()
+
+if(APPLE AND KRAKEN_INFER_ENABLE_MPSGRAPH)
+  target_sources(kraken_infer_core PRIVATE src/backends/mpsgraph/mpsgraph_backend.mm)
+  target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_MPSGRAPH=1)
+  target_link_libraries(
+    kraken_infer_core
+    PUBLIC
+      "-framework Foundation"
+      "-framework Metal"
+      "-framework MetalPerformanceShaders"
+      "-framework MetalPerformanceShadersGraph"
+  )
+else()
+  target_sources(kraken_infer_core PRIVATE src/backends/mpsgraph/mpsgraph_backend_stub.cpp)
+  target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_MPSGRAPH=0)
 endif()
 
 add_executable(kraken-infer apps/kraken_infer_main.cpp)

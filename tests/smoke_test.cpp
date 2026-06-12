@@ -1,4 +1,5 @@
 #include "toyllm/backends/mps/mps_backend.hpp"
+#include "toyllm/backends/mpsgraph/mpsgraph_backend.hpp"
 #include "toyllm/core/tensor.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
@@ -43,7 +44,8 @@ void test_runtime_info() {
   const toyllm::Runtime runtime{toyllm::RuntimeConfig{}};
   const auto info = runtime.info();
   assert(info.selected_device.kind == toyllm::DeviceKind::cpu ||
-         info.selected_device.kind == toyllm::DeviceKind::mps);
+         info.selected_device.kind == toyllm::DeviceKind::mps ||
+         info.selected_device.kind == toyllm::DeviceKind::mpsgraph);
 }
 
 void test_mps_backend_query() {
@@ -57,6 +59,23 @@ void test_mps_operator_smoke() {
   const auto info = toyllm::mps::query_backend();
   const auto status = toyllm::mps::run_operator_smoke_test();
   if (info.available && info.compute_ready) {
+    assert(status.is_ok());
+  } else {
+    assert(!status.is_ok());
+  }
+}
+
+void test_mpsgraph_backend_query() {
+  const auto info = toyllm::mpsgraph::query_backend();
+  if (info.available) {
+    assert(!info.device_name.empty());
+  }
+}
+
+void test_mpsgraph_operator_smoke() {
+  const auto info = toyllm::mpsgraph::query_backend();
+  const auto status = toyllm::mpsgraph::run_operator_smoke_test();
+  if (info.available && info.graph_ready) {
     assert(status.is_ok());
   } else {
     assert(!status.is_ok());
@@ -398,6 +417,8 @@ int main() {
   test_runtime_info();
   test_mps_backend_query();
   test_mps_operator_smoke();
+  test_mpsgraph_backend_query();
+  test_mpsgraph_operator_smoke();
   test_mps_matvec_workspace_reuse();
   test_mps_full_forward_operators();
   test_profile_artifacts();

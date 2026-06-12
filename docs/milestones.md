@@ -29,6 +29,7 @@
 - [x] M7: MPS backend bring-up and MPS-assisted `lm_head` logits
 - [x] M8: MPS full forward path, KV cache, and performance optimization
 - [x] M9: OpenAI-compatible HTTP gateway and OpenAPI schema
+- [ ] M10: independent MPSGraph backend with device-resident decode
 
 当前 `chat` 已能通过本地 Qwen3 0.6B 真实生成回复；CPU path 已支持 KV cache、采样和流式输出。MPS path 已完成 full forward：embedding、RMSNorm、RoPE、linear projections、attention、MLP、device-resident KV cache 和 `lm_head` logits 都能在 MPS 上执行；CPU 仍保留为 reference backend。HTTP gateway 已支持 OpenAI-compatible `/v1/models`、`/v1/completions`、`/v1/chat/completions`、SSE streaming、基础 tools/tool_choice 协议和 OpenAPI schema。
 

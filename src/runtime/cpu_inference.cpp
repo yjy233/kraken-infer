@@ -1,5 +1,6 @@
 #include "toyllm/runtime/cpu_inference.hpp"
 
+#include "toyllm/runtime/mpsgraph_inference.hpp"
 #include "toyllm/backends/mps/mps_backend.hpp"
 #include "cpu/qwen_cpu_model.hpp"
 
@@ -42,6 +43,9 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
                                                     : backend.failure_reason;
       return Status::unavailable(message);
     }
+  }
+  if (request.compute_device.kind == DeviceKind::mpsgraph) {
+    return generate_mpsgraph(request);
   }
 
   try {

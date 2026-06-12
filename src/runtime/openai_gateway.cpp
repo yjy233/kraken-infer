@@ -532,6 +532,8 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
     compute_device = Device::cpu();
   } else if (device == "mps" || device == "mps:0") {
     compute_device = Device::mps();
+  } else if (device == "mpsgraph") {
+    compute_device = Device::mpsgraph();
   }
   if (const auto temperature = double_value(object_get(root, "temperature"));
       temperature.has_value()) {
@@ -908,7 +910,7 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":\"number\"},"
        "\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
-       "\"mps\",\"mps:0\"]}},\"required\":[\"prompt\"]}}}},\"responses\":{\"200\":"
+       "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"prompt\"]}}}},\"responses\":{\"200\":"
        "{\"description\":\"Text completion or SSE stream\"}}}},"
        "\"/v1/chat/completions\":{\"post\":{\"requestBody\":{\"required\":true,\"content\":{"
        "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
@@ -917,7 +919,7 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "{\"type\":\"integer\"},\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":"
        "\"number\"},\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
-       "\"mps\",\"mps:0\"]}},\"required\":[\"messages\"]}}}},\"responses\":{\"200\":"
+       "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"messages\"]}}}},\"responses\":{\"200\":"
        "{\"description\":\"Chat completion, tool call, or SSE stream\"}}}}}";
   return output.str();
 }

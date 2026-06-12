@@ -1,0 +1,262 @@
+# M10 Task: Independent MPSGraph Backend
+
+目标：新增一条完全独立的 `mpsgraph` backend。它不复用现有 `mps` backend，不使用手写
+Metal kernel，不在 prefill/decode 热路径做 CPU/GPU 往返，主要 Qwen3 推理计算全部用
+MPSGraph API 表达和执行。
+
+技术方案见 [`../mpsgraph-backend.md`](../mpsgraph-backend.md)。
+
+## Current Status
+
+- [x] 已明确 `mpsgraph` 是新 backend，不是现有 `mps` backend 的分支
+- [x] 已明确不复用 `MpsContext` / `MpsBuffer` / 现有 Metal kernels
+- [x] 已明确 strict mode 下不支持 token streaming
+- [x] 已明确第一版 sampling 先做 graph-side greedy argmax
+- [ ] 尚未创建 `include/toyllm/backends/mpsgraph/`
+- [ ] 尚未创建 `src/backends/mpsgraph/`
+- [ ] 尚未接入 `--device mpsgraph`
+- [ ] 尚未实现 MPSGraph availability probe
+- [ ] 尚未实现任何 MPSGraph executable
+
+## Scope
+
+本阶段范围：
+
+1. 新增独立 MPSGraph backend 目录和公共 C++ facade
+2. 新增 `DeviceKind::mpsgraph`
+3. 建立 MPSGraph availability probe
+4. 建立 Qwen3 0.6B MPSGraph graph builder
+5. 实现 device-resident weights
+6. 实现 device-resident KV cache
+7. 实现 prefill graph
+8. 实现 decode graph 或 decode loop graph
+9. 实现 graph-side greedy sampling
+10. 只在请求结束 read back generated token ids
+11. 用 CPU reference 做 correctness 对齐
+
+本阶段不包括：
+
+- streaming token 输出
+- top-k / top-p / temperature sampling
+- prompt cache 跨请求复用
+- 多 batch
+- MoE / hybrid attention
+- 旧 MPS backend 性能重构
+
+## Hard Constraints
+
+- [ ] `mpsgraph` 代码不得 include `toyllm/backends/mps/mps_backend.hpp`
+- [ ] `mpsgraph` 代码不得调用 `toyllm::mps::*`
+- [ ] 不复用 `MpsContext`
+- [ ] 不复用 `MpsBuffer`
+- [ ] 不复用现有 `.metal` / Metal kernel
+- [ ] 不使用 `MPSMatrixMultiplication` 等直接 MPS primitive 路径
+- [ ] 不做 `mpsgraph -> mps` fallback
+- [ ] 不做 `mpsgraph -> cpu` fallback
+- [ ] prefill 不读回 hidden / logits / KV cache
+- [ ] decode 每步不读回 logits
+- [ ] decode 每步不读回 next token
+- [ ] decode 每步不从 CPU feed next token
+- [ ] sampling 必须在 graph 内完成
+- [ ] KV cache 必须 device-resident
+- [ ] weights 必须 device-resident
+
+## Tasks
+
+### Documentation And Architecture
+
+- [x] 新增 MPSGraph backend 技术设计文档
+- [x] 新增 M10 task checklist
+- [x] 更新 `docs/architecture.md`，加入 MPSGraph backend 层
+- [x] 更新 `docs/milestones.md`，加入 M10 状态和目标
+- [ ] 在 README 中说明 `mpsgraph` 是实验 backend
+
+### Build And Platform Gating
+
+- [ ] CMake 新增 `KRAKEN_INFER_ENABLE_MPSGRAPH`
+- [ ] Makefile 新增 MPSGraph source 列表
+- [ ] Apple + MPSGraph 可用时编译 `.mm`
+- [ ] 非 Apple 或禁用时编译 stub
+- [ ] stub 返回明确 unavailable
+- [ ] 不影响现有 `cpu` / `mps` build
+
+### Public API And Device Selection
+
+- [ ] `DeviceKind` 新增 `mpsgraph`
+- [ ] `Device::mpsgraph()` helper
+- [ ] `Device::to_string()` 支持 `mpsgraph`
+- [ ] CLI `--device` 解析支持 `mpsgraph`
+- [ ] gateway request `device` 支持 `mpsgraph`
+- [ ] OpenAPI schema 增加 `mpsgraph`
+- [ ] `doctor` 输出 MPSGraph availability
+
+### Backend Skeleton
+
+- [ ] 新增 `include/toyllm/backends/mpsgraph/mpsgraph_backend.hpp`
+- [ ] 新增 `src/backends/mpsgraph/mpsgraph_backend.mm`
+- [ ] 新增 `src/backends/mpsgraph/mpsgraph_backend_stub.cpp`
+- [ ] 新增 `toyllm::mpsgraph::BackendInfo`
+- [ ] 新增 `query_backend()`
+- [ ] 新增 tiny graph smoke test
+- [ ] 所有 Apple framework 类型限制在 `.mm` 内
+
+### Runtime Separation
+
+- [ ] 新增 `src/runtime/mpsgraph/` 或等价独立 runtime 目录
+- [ ] 新增 `QwenMpsGraphModel`
+- [ ] 新增 `generate_mpsgraph()`
+- [ ] runtime dispatch 支持 `DeviceKind::mpsgraph`
+- [ ] 不把 MPSGraph path 塞进 `src/runtime/cpu/qwen_cpu_model.cpp`
+- [ ] 不通过现有 MPS runtime 间接调用
+
+### Weight Store
+
+- [ ] 读取 safetensors metadata
+- [ ] 校验 Qwen3 0.6B 权重 shape
+- [ ] 建立 MPSGraph weight tensor store
+- [ ] embedding weight device-resident
+- [ ] lm_head weight device-resident
+- [ ] 28 层 attention weights device-resident
+- [ ] 28 层 MLP weights device-resident
+- [ ] norm weights device-resident
+- [ ] 权重跨请求复用
+- [ ] 模型卸载时释放 weight store
+
+### Graph Builder Foundation
+
+- [ ] 封装 MPSGraph graph construction helpers
+- [ ] 封装 executable cache key
+- [ ] 封装 graph compile / specialize
+- [ ] 支持 fixed max sequence length
+- [ ] 支持 prompt length bucket
+- [ ] 支持 max new tokens bucket
+- [ ] 编译失败时返回明确错误
+- [ ] executable cache 跨请求复用
+
+### Core Ops
+
+- [ ] embedding gather
+- [ ] RMSNorm
+- [ ] Q/K per-head RMSNorm
+- [ ] BF16/FP16/FP32 matmul policy spike
+- [ ] q_proj
+- [ ] k_proj
+- [ ] v_proj
+- [ ] o_proj
+- [ ] gate_proj
+- [ ] up_proj
+- [ ] down_proj
+- [ ] lm_head
+- [ ] RoPE
+- [ ] SiLU
+- [ ] residual add
+- [ ] argmax
+
+### KV Cache
+
+- [ ] 设计 MPSGraph KV cache layout
+- [ ] 分配 device-resident K cache
+- [ ] 分配 device-resident V cache
+- [ ] prefill 写入 cache
+- [ ] decode 追加 cache
+- [ ] attention 读取 `0..position`
+- [ ] fixed-shape causal mask
+- [ ] cache capacity 越界返回明确错误
+- [ ] 不维护 CPU mirror
+
+### Prefill Graph
+
+- [ ] 输入 prompt token ids
+- [ ] 输入 prompt length
+- [ ] 对 prompt positions 执行 forward
+- [ ] 写入所有 layer K/V cache
+- [ ] 输出 last hidden
+- [ ] 输出 current position
+- [ ] 不输出 logits 到 CPU
+- [ ] 不读回中间 tensor
+
+### Decode Graph
+
+- [ ] 输入 last hidden
+- [ ] 输入 current position
+- [ ] 输入 KV cache
+- [ ] graph-side lm_head
+- [ ] graph-side greedy argmax
+- [ ] graph-side eos check
+- [ ] graph-side generated ids 写入
+- [ ] graph-side next token forward
+- [ ] graph-side position 更新
+- [ ] 输出 generated ids
+- [ ] 输出 generated count
+- [ ] 输出 finish reason
+- [ ] decode loop 内无 CPU/GPU tensor 往返
+
+### Sampling
+
+- [ ] 第一版 greedy argmax
+- [ ] eos token ids 支持多值
+- [ ] generated count 正确
+- [ ] finish reason 区分 stop / length
+- [ ] top-k 设计文档补充
+- [ ] top-p 设计文档补充
+- [ ] temperature 设计文档补充
+
+### CLI And Gateway
+
+- [ ] `infer --device mpsgraph` 可运行
+- [ ] `run --device mpsgraph` 可运行
+- [ ] `chat --device mpsgraph` 可运行
+- [ ] `serve --device mpsgraph` 可运行
+- [ ] strict mode 下 `stream=true` 返回明确 unsupported
+- [ ] 非 streaming chat completion 可返回文本
+- [ ] completion usage token 统计不依赖中间 readback
+
+### Debug And Profiling
+
+- [ ] strict mode 下禁用 `--dump-dir`
+- [ ] 新增显式 `--mpsgraph-debug-readback`
+- [ ] debug readback 不进入性能验收
+- [ ] profiler 标记 backend=`mpsgraph`
+- [ ] profiler 区分 graph compile / graph execute
+- [ ] profiler 不强制 readback 中间 tensor
+
+### Tests
+
+- [ ] MPSGraph availability smoke
+- [ ] tiny add/mul/reduce graph smoke
+- [ ] RMSNorm vs CPU
+- [ ] matmul vs CPU
+- [ ] RoPE vs CPU
+- [ ] SiLU vs CPU
+- [ ] argmax vs CPU
+- [ ] layer 0 position 0 vs CPU
+- [ ] attention output vs CPU
+- [ ] MLP output vs CPU
+- [ ] full model `hello`, 1 token greedy vs CPU
+- [ ] full model `hello`, 2 tokens greedy vs CPU
+- [ ] no fallback test
+- [ ] no per-token readback instrumentation test
+
+## Acceptance
+
+- [ ] `cmake --build --preset debug` 通过
+- [ ] `ctest --preset debug` 通过
+- [ ] `make test` 通过
+- [ ] `kraken-infer doctor` 能显示 MPSGraph backend 状态
+- [ ] `infer --device mpsgraph --prompt hello --max-new-tokens 1` 可运行
+- [ ] greedy 首 token 与 CPU reference 一致
+- [ ] decode 内部不读回 logits
+- [ ] decode 内部不读回 next token
+- [ ] decode 内部不从 CPU feed next token
+- [ ] KV cache 不存在 CPU mirror
+- [ ] 不使用旧 MPS backend 类型或函数
+- [ ] MPSGraph 不可用时返回明确 unavailable
+
+## Known Risks
+
+- MPSGraph control flow 是否适合完整 decode loop 需要 spike 验证。
+- 如果必须走 fixed bucket graph，compile cache 和内存占用会变复杂。
+- BF16 支持和性能需要实测，不同 macOS/Xcode 组合可能有差异。
+- KV cache update 在 MPSGraph 中的表达方式可能影响性能和可实现性。
+- 严格无 readback 与 streaming API 目标冲突，第一版应明确拒绝 streaming。
+- 现有 runtime 名称 `generate_cpu()` 会拖累 backend 抽象，需要后续清理。
