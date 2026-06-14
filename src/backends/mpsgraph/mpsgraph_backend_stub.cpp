@@ -46,6 +46,10 @@ MpsGraphTransferStats MpsGraphContext::transfer_stats() const {
   return {};
 }
 
+MpsGraphGraphStats MpsGraphContext::graph_stats() const {
+  return {};
+}
+
 Result<MpsGraphBuffer> MpsGraphContext::make_buffer(std::size_t byte_size) const {
   (void)byte_size;
   return Status::unavailable(kUnavailable);
@@ -225,6 +229,29 @@ Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
                                            std::size_t head_dim) const {
   (void)source;
   (void)cache;
+  (void)layer;
+  (void)position;
+  (void)layers;
+  (void)capacity_tokens;
+  (void)kv_heads;
+  (void)head_dim;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::write_kv_cache_pair_f32(const MpsGraphBuffer& key_source,
+                                                const MpsGraphBuffer& value_source,
+                                                MpsGraphBuffer& key_cache,
+                                                MpsGraphBuffer& value_cache,
+                                                std::size_t layer,
+                                                std::size_t position,
+                                                std::size_t layers,
+                                                std::size_t capacity_tokens,
+                                                std::size_t kv_heads,
+                                                std::size_t head_dim) const {
+  (void)key_source;
+  (void)value_source;
+  (void)key_cache;
+  (void)value_cache;
   (void)layer;
   (void)position;
   (void)layers;

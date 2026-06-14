@@ -97,13 +97,9 @@ Status MpsGraphKvCache::store(const MpsGraphContext& context,
     return Status::invalid_argument("MPSGraph KV cache position exceeds capacity");
   }
 
-  auto status = context.write_kv_cache_f32(key, key_cache_, layer, position, layers_,
-                                           capacity_tokens_, kv_heads_, head_dim_);
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = context.write_kv_cache_f32(value, value_cache_, layer, position, layers_,
-                                      capacity_tokens_, kv_heads_, head_dim_);
+  auto status = context.write_kv_cache_pair_f32(key, value, key_cache_, value_cache_, layer,
+                                                position, layers_, capacity_tokens_,
+                                                kv_heads_, head_dim_);
   if (!status.is_ok()) {
     return status;
   }

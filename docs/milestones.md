@@ -30,6 +30,7 @@
 - [x] M8: MPS full forward path, KV cache, and performance optimization
 - [x] M9: OpenAI-compatible HTTP gateway and OpenAPI schema
 - [ ] M10: independent MPSGraph backend with device-resident decode
+- [ ] M11: MPSGraph performance optimization, caching, and graph reuse
 
 当前 `chat` 已能通过本地 Qwen3 0.6B 真实生成回复；CPU path 已支持 KV cache、采样和流式输出。MPS path 已完成 full forward：embedding、RMSNorm、RoPE、linear projections、attention、MLP、device-resident KV cache 和 `lm_head` logits 都能在 MPS 上执行；CPU 仍保留为 reference backend。HTTP gateway 已支持 OpenAI-compatible `/v1/models`、`/v1/completions`、`/v1/chat/completions`、SSE streaming、基础 tools/tool_choice 协议和 OpenAPI schema。
 
@@ -318,6 +319,62 @@
 - forced tool call 能返回 OpenAI-compatible `tool_calls`
 - 网关异常不会导致推理进程崩溃
 - CLI 推理和 HTTP 推理共享同一套 runtime
+
+## M10: Independent MPSGraph Backend
+
+目标：新增一条完全独立的 `mpsgraph` backend，不复用旧 `mps` backend、不使用手写
+Metal kernel，并在 strict no-readback 模式下完成 Qwen3 greedy 推理。
+
+功能范围：
+
+- 新增 `DeviceKind::mpsgraph`
+- 新增 MPSGraph availability probe
+- 新增独立 `include/toyllm/backends/mpsgraph/` 和 `src/backends/mpsgraph/`
+- 读取 safetensors metadata 并上传 Qwen3 权重到 device-resident buffer
+- 实现 device-resident KV cache
+- 实现 embedding、RMSNorm、Q/K norm、RoPE、matvec、attention、MLP、lm head
+- 实现 graph/device-side greedy argmax
+- 实现 generated ids 写入和 finish status 更新
+- 请求结束只 read back generation status 和 generated token ids
+- strict mode 下明确拒绝 streaming
+- 不做 `mpsgraph -> mps` 或 `mpsgraph -> cpu` fallback
+
+验收标准：
+
+- `infer --device mpsgraph --prompt hello --max-new-tokens 1` 可运行
+- tiny model greedy 输出与 CPU reference 对齐
+- decode 内部不读回 logits
+- decode 内部不读回 next token
+- KV cache 不维护 CPU mirror
+- gateway 非 streaming 请求可进入 MPSGraph runtime
+- MPSGraph 不可用时返回明确 unavailable
+
+## M11: MPSGraph Performance Optimization
+
+目标：在 M10 正确性路径上优化常驻服务性能，优先解决权重重复上传、graph 重复构建、
+decode 每 token host 调度过多、profile 粒度不够的问题。
+
+功能范围：
+
+- 建立 cold/warm request baseline
+- MPSGraph context 跨请求复用
+- Qwen3 uploaded weights 跨请求复用
+- graph/executable cache key 和 hit/miss 统计
+- graph build / compile / execute 分离 profile
+- cached small ops、matvec、attention
+- 单层 attention / MLP / transformer block 粗粒度 graph
+- fixed bucket prefill 和 decode loop 方案
+- run-state buffer pool
+- fp16/bf16 dtype policy spike
+
+验收标准：
+
+- gateway 连续两个 `mpsgraph` 非 streaming 请求都可成功
+- warm request 不再完整重新上传权重
+- profile summary 能展示 runtime cache hit/miss
+- profile summary 能展示 graph build / compile / execute 或明确 fallback 标记
+- decode 内部仍不读回 logits 或 next token
+- `make test`、`cmake --build --preset debug`、`ctest --preset debug` 通过
 
 ## Final Acceptance
 

@@ -1141,10 +1141,25 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(summary_json.find("mpsgraph.load_weights") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.argmax") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.update_generation_status") != std::string::npos);
-  assert(summary_json.find("mpsgraph.final_readback.generation_status") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.attention") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.gate_proj") != std::string::npos);
+  assert(summary_json.find("mpsgraph.logits.lm_head") != std::string::npos);
+  assert(summary_json.find("mpsgraph.decode.read_generation_status") != std::string::npos);
   assert(summary_json.find("mpsgraph.final_readback.generated_ids") != std::string::npos);
-  assert(summary_json.find("\"mpsgraph_d2h_calls\":\"2\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_d2h_calls\":\"") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_finish_reason\":\"length\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_decode_steps\":\"2\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_status_readbacks\":\"2\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_early_break\":\"true\"") == std::string::npos);
+  assert(summary_json.find("\"mpsgraph_early_break_mode\":\"host_status_poll\"") !=
+         std::string::npos);
+  assert(summary_json.find("\"mpsgraph_graph_build_calls\":\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_graph_execute_calls\":\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_graph_compile_calls\":\"0\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_executable_cache_hit_count\":\"0\"") !=
+         std::string::npos);
+  assert(summary_json.find("\"mpsgraph_executable_cache_miss_count\":\"") !=
+         std::string::npos);
 
   auto cpu_request = request;
   cpu_request.compute_device = toyllm::Device::cpu();
@@ -1160,6 +1175,52 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(!sampled.is_ok());
   assert(sampled.status().code() == toyllm::StatusCode::unavailable);
   assert(sampled.status().message().find("greedy") != std::string::npos);
+
+  std::filesystem::remove_all(profile_root, ec);
+  std::filesystem::remove_all(model_dir, ec);
+}
+
+void test_mpsgraph_generation_reuses_runtime_cache() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+
+  auto model_dir = create_tiny_runtime_model_dir("kraken-infer-mpsgraph-cache-smoke");
+  write_tiny_qwen_mpsgraph_runtime_safetensors(model_dir / "model.safetensors");
+
+  const auto profile_root =
+    std::filesystem::temp_directory_path() / "kraken-infer-mpsgraph-cache-profile-smoke";
+  std::error_code ec;
+  std::filesystem::remove_all(profile_root, ec);
+
+  toyllm::CpuGenerationRequest request;
+  request.compute_device = toyllm::Device::mpsgraph();
+  request.model_dir = model_dir;
+  request.prompt = "hello";
+  request.max_new_tokens = 1;
+  request.observability.profile_mode = toyllm::ProfileMode::summary;
+  request.observability.profile_output_dir = profile_root;
+
+  request.observability.request_id = "mpsgraph-cache-cold-smoke";
+  const auto cold = toyllm::generate_cpu(request);
+  assert(cold.is_ok());
+  assert(cold.value().text == "a");
+  const auto cold_summary = read_text_file(cold.value().profile_dir / "summary.json");
+  assert(cold_summary.find("\"mpsgraph_model_cache\":\"miss\"") != std::string::npos);
+  assert(cold_summary.find("mpsgraph.load_weights") != std::string::npos);
+
+  request.observability.request_id = "mpsgraph-cache-warm-smoke";
+  const auto warm = toyllm::generate_cpu(request);
+  assert(warm.is_ok());
+  assert(warm.value().text == "a");
+  const auto warm_summary = read_text_file(warm.value().profile_dir / "summary.json");
+  assert(warm_summary.find("\"mpsgraph_model_cache\":\"hit\"") != std::string::npos);
+  assert(warm_summary.find("mpsgraph.load_weights") == std::string::npos);
+  assert(warm_summary.find("mpsgraph.create_context") == std::string::npos);
+  assert(warm_summary.find("\"mpsgraph_graph_execute_calls\":\"") != std::string::npos);
+  assert(warm_summary.find("\"mpsgraph_executable_cache_miss_count\":\"") !=
+         std::string::npos);
 
   std::filesystem::remove_all(profile_root, ec);
   std::filesystem::remove_all(model_dir, ec);
@@ -1200,6 +1261,9 @@ void test_mpsgraph_generation_device_side_eos_status() {
   assert(summary_json.find("\"generated_tokens\":0") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_finish_reason\":\"stop\"") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_d2h_calls\":\"1\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_decode_steps\":\"1\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_status_readbacks\":\"1\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_early_break\":\"true\"") != std::string::npos);
   assert(summary_json.find("mpsgraph.final_readback.generated_ids") == std::string::npos);
 
   std::filesystem::remove_all(profile_root, ec);
@@ -1259,6 +1323,7 @@ int main() {
   test_qwen_mpsgraph_model_forward_token();
   test_qwen_mpsgraph_model_prefill_token_ids();
   test_mpsgraph_generation_initializes_without_fallback();
+  test_mpsgraph_generation_reuses_runtime_cache();
   test_mpsgraph_generation_device_side_eos_status();
 
   std::cout << "smoke tests passed\n";

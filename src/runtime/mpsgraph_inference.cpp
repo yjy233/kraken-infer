@@ -4,7 +4,10 @@
 #include "toyllm/backends/mpsgraph/qwen_mpsgraph_model.hpp"
 #include "toyllm/runtime/qwen_tokenizer.hpp"
 
+#include <filesystem>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,12 +38,41 @@ std::uint64_t device_to_host_delta(const mpsgraph::MpsGraphTransferStats& before
            : 0U;
 }
 
-std::uint64_t transfer_call_delta(const mpsgraph::MpsGraphTransferStats& before,
-                                  const mpsgraph::MpsGraphTransferStats& after) {
-  const auto host_to_device = after.host_to_device_calls >= before.host_to_device_calls
-                                ? after.host_to_device_calls - before.host_to_device_calls
-                                : 0U;
-  return host_to_device + device_to_host_delta(before, after);
+std::uint64_t host_to_device_delta(const mpsgraph::MpsGraphTransferStats& before,
+                                   const mpsgraph::MpsGraphTransferStats& after) {
+  return after.host_to_device_calls >= before.host_to_device_calls
+           ? after.host_to_device_calls - before.host_to_device_calls
+           : 0U;
+}
+
+std::uint64_t graph_stat_delta(std::uint64_t before, std::uint64_t after) {
+  return after >= before ? after - before : 0U;
+}
+
+std::filesystem::path canonical_model_key(const std::filesystem::path& model_dir) {
+  std::error_code ec;
+  auto canonical = std::filesystem::weakly_canonical(model_dir, ec);
+  if (!ec) {
+    return canonical;
+  }
+  auto absolute = std::filesystem::absolute(model_dir, ec);
+  return ec ? model_dir : absolute.lexically_normal();
+}
+
+struct MpsGraphRuntimeCache {
+  std::filesystem::path model_key;
+  mpsgraph::MpsGraphContext context;
+  mpsgraph::QwenMpsGraphModel model;
+};
+
+std::mutex& runtime_cache_mutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::unique_ptr<MpsGraphRuntimeCache>& runtime_cache_slot() {
+  static std::unique_ptr<MpsGraphRuntimeCache> cache;
+  return cache;
 }
 
 }  // namespace
@@ -101,28 +133,48 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     }
     profiler.set_metadata("prompt_tokens", prompt_tokens.size());
 
-    mpsgraph::MpsGraphContext context;
-    {
-      auto span = profiler.scoped("mpsgraph.create_context");
-      auto context_result = mpsgraph::MpsGraphContext::create();
-      if (!context_result.is_ok()) {
-        return context_result.status();
+    std::unique_lock<std::mutex> cache_lock(runtime_cache_mutex());
+    auto& cache = runtime_cache_slot();
+    const auto model_key = canonical_model_key(request.model_dir);
+    const auto cache_hit = cache != nullptr && cache->model_key == model_key;
+    profiler.set_metadata("mpsgraph_model_cache", cache_hit ? "hit" : "miss");
+    mpsgraph::MpsGraphTransferStats request_transfer_before{};
+    mpsgraph::MpsGraphGraphStats request_graph_before{};
+    if (!cache_hit) {
+      auto new_cache = std::make_unique<MpsGraphRuntimeCache>();
+      new_cache->model_key = model_key;
+      {
+        auto span = profiler.scoped("mpsgraph.create_context");
+        auto context_result = mpsgraph::MpsGraphContext::create();
+        if (!context_result.is_ok()) {
+          return context_result.status();
+        }
+        new_cache->context = std::move(context_result.value());
+        (void)span;
       }
-      context = std::move(context_result.value());
-      (void)span;
-    }
-
-    mpsgraph::QwenMpsGraphModel model;
-    {
-      auto span = profiler.scoped("mpsgraph.load_weights");
-      auto model_result = mpsgraph::QwenMpsGraphModel::load_all_weights(request.model_dir,
-                                                                       context);
-      if (!model_result.is_ok()) {
-        return model_result.status();
+      request_transfer_before = new_cache->context.transfer_stats();
+      request_graph_before = new_cache->context.graph_stats();
+      {
+        auto span = profiler.scoped("mpsgraph.load_weights");
+        auto model_result = mpsgraph::QwenMpsGraphModel::load_all_weights(
+          request.model_dir, new_cache->context);
+        if (!model_result.is_ok()) {
+          return model_result.status();
+        }
+        new_cache->model = std::move(model_result.value());
+        (void)span;
       }
-      model = std::move(model_result.value());
-      (void)span;
+      cache = std::move(new_cache);
     }
+    auto& context = cache->context;
+    if (cache_hit) {
+      request_transfer_before = context.transfer_stats();
+      request_graph_before = context.graph_stats();
+    }
+    const auto weight_info = cache->model.info();
+    profiler.set_metadata("mpsgraph_device_weight_bytes",
+                          static_cast<std::size_t>(weight_info.device_weight_bytes));
+    profiler.set_metadata("mpsgraph_device_tensor_count", weight_info.device_tensor_count);
 
     if (request.max_new_tokens == std::numeric_limits<std::size_t>::max() ||
         prompt_tokens.size() > std::numeric_limits<std::size_t>::max() -
@@ -133,7 +185,7 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     mpsgraph::QwenMpsGraphRunState state;
     {
       auto span = profiler.scoped("mpsgraph.create_run_state");
-      auto state_result = model.create_run_state(context, total_capacity);
+      auto state_result = cache->model.create_run_state(context, total_capacity);
       if (!state_result.is_ok()) {
         return state_result.status();
       }
@@ -145,7 +197,8 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     {
       auto span = profiler.scoped("request.prefill");
       const auto transfer_before = context.transfer_stats();
-      auto status = model.prefill_token_ids(context, prompt_tokens, state);
+      auto status = cache->model.prefill_token_ids(context, prompt_tokens, state,
+                                                   &profiler);
       if (!status.is_ok()) {
         return status;
       }
@@ -157,6 +210,11 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
       (void)span;
     }
 
+    std::vector<std::int32_t> generation_status(3);
+    bool generation_status_available = false;
+    bool decode_stopped_early = false;
+    std::size_t decode_steps = 0;
+    std::size_t status_readbacks = 0;
     {
       auto decode_span = profiler.scoped("request.decode");
       const auto transfer_before = context.transfer_stats();
@@ -165,7 +223,7 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
           profiler.scoped("decode_step", {ProfileField{"step", std::to_string(step)}});
         {
           auto span = profiler.scoped("mpsgraph.decode.argmax");
-          auto status = model.greedy_next_token(context, state);
+          auto status = cache->model.greedy_next_token(context, state, &profiler);
           if (!status.is_ok()) {
             return status;
           }
@@ -173,7 +231,7 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
         }
         {
           auto span = profiler.scoped("mpsgraph.decode.record_token");
-          auto status = model.record_next_token(context, step, state);
+          auto status = cache->model.record_next_token(context, step, state);
           if (!status.is_ok()) {
             return status;
           }
@@ -181,19 +239,36 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
         }
         {
           auto span = profiler.scoped("mpsgraph.decode.update_generation_status");
-          auto status = model.update_generation_status(
+          auto status = cache->model.update_generation_status(
             context, step, step + 1U == request.max_new_tokens, state);
           if (!status.is_ok()) {
             return status;
           }
           (void)span;
         }
+        {
+          auto span = profiler.scoped("mpsgraph.decode.read_generation_status");
+          const auto read_status =
+            context.copy_from_buffer(state.generation_status, generation_status.data(),
+                                     generation_status.size() * sizeof(std::int32_t));
+          if (!read_status.is_ok()) {
+            return read_status;
+          }
+          ++status_readbacks;
+          generation_status_available = true;
+          (void)span;
+        }
+        decode_steps = step + 1U;
+        if (generation_status[2] != 0) {
+          decode_stopped_early = step + 1U < request.max_new_tokens;
+          break;
+        }
         if (step + 1U == request.max_new_tokens) {
           break;
         }
         {
           auto span = profiler.scoped("mpsgraph.decode.forward_next_token");
-          auto status = model.forward_next_token(context, position, state);
+          auto status = cache->model.forward_next_token(context, position, state, &profiler);
           if (!status.is_ok()) {
             return status;
           }
@@ -203,14 +278,13 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
         (void)step_span;
       }
       const auto transfer_after = context.transfer_stats();
-      if (transfer_call_delta(transfer_before, transfer_after) != 0U) {
-        return Status::internal_error("MPSGraph decode performed host/device transfer");
+      if (host_to_device_delta(transfer_before, transfer_after) != 0U) {
+        return Status::internal_error("MPSGraph decode performed host write");
       }
       (void)decode_span;
     }
 
-    std::vector<std::int32_t> generation_status(3);
-    {
+    if (!generation_status_available) {
       auto span = profiler.scoped("mpsgraph.final_readback.generation_status");
       const auto read_status =
         context.copy_from_buffer(state.generation_status, generation_status.data(),
@@ -257,11 +331,50 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     result.kv_cache_verified = false;
     profiler.set_metadata("generated_tokens", generated.size());
     profiler.set_metadata("mpsgraph_finish_reason", result.finish_reason);
+    profiler.set_metadata("mpsgraph_decode_steps", decode_steps);
+    profiler.set_metadata("mpsgraph_status_readbacks", status_readbacks);
+    profiler.set_metadata("mpsgraph_early_break", decode_stopped_early ? "true" : "false");
+    profiler.set_metadata("mpsgraph_early_break_mode", "host_status_poll");
     const auto transfers = context.transfer_stats();
     profiler.set_metadata("mpsgraph_h2d_calls",
-                          static_cast<std::size_t>(transfers.host_to_device_calls));
+                          static_cast<std::size_t>(
+                            host_to_device_delta(request_transfer_before, transfers)));
     profiler.set_metadata("mpsgraph_d2h_calls",
-                          static_cast<std::size_t>(transfers.device_to_host_calls));
+                          static_cast<std::size_t>(
+                            device_to_host_delta(request_transfer_before, transfers)));
+    const auto graph_stats = context.graph_stats();
+    profiler.set_metadata("mpsgraph_graph_build_calls",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.graph_build_calls,
+                            graph_stats.graph_build_calls)));
+    profiler.set_metadata("mpsgraph_graph_build_ns",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.graph_build_ns,
+                            graph_stats.graph_build_ns)));
+    profiler.set_metadata("mpsgraph_graph_compile_calls",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.graph_compile_calls,
+                            graph_stats.graph_compile_calls)));
+    profiler.set_metadata("mpsgraph_graph_compile_ns",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.graph_compile_ns,
+                            graph_stats.graph_compile_ns)));
+    profiler.set_metadata("mpsgraph_graph_execute_calls",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.graph_execute_calls,
+                            graph_stats.graph_execute_calls)));
+    profiler.set_metadata("mpsgraph_graph_execute_ns",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.graph_execute_ns,
+                            graph_stats.graph_execute_ns)));
+    profiler.set_metadata("mpsgraph_executable_cache_hit_count",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.executable_cache_hits,
+                            graph_stats.executable_cache_hits)));
+    profiler.set_metadata("mpsgraph_executable_cache_miss_count",
+                          static_cast<std::size_t>(graph_stat_delta(
+                            request_graph_before.executable_cache_misses,
+                            graph_stats.executable_cache_misses)));
     profiler.set_status("ok");
     const auto artifacts = profiler.write_artifacts();
     if (!artifacts.output_dir.empty()) {

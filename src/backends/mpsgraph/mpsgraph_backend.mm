@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -16,6 +17,8 @@
 namespace toyllm::mpsgraph {
 
 namespace {
+
+using SteadyClock = std::chrono::steady_clock;
 
 constexpr const char* kNotReady = "MPSGraph context is not initialized";
 
@@ -109,10 +112,23 @@ MPSShape* make_shape(std::initializer_list<std::size_t> dims) {
   return shape;
 }
 
+MPSGraph* make_graph(MpsGraphGraphStats* stats) {
+  const auto started = SteadyClock::now();
+  MPSGraph* graph = [MPSGraph new];
+  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    SteadyClock::now() - started);
+  if (stats != nullptr) {
+    ++stats->graph_build_calls;
+    stats->graph_build_ns += static_cast<std::uint64_t>(elapsed.count());
+  }
+  return graph;
+}
+
 Status run_graph_with_results(MPSGraph* graph, id<MTLCommandQueue> queue,
                               NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds,
                               MPSGraphTensor* output_tensor,
-                              MPSGraphTensorData* output_data) {
+                              MPSGraphTensorData* output_data,
+                              MpsGraphGraphStats* stats) {
   if (graph == nil || queue == nil || output_tensor == nil || output_data == nil) {
     return Status::unavailable("failed to bind MPSGraph execution");
   }
@@ -121,10 +137,18 @@ Status run_graph_with_results(MPSGraph* graph, id<MTLCommandQueue> queue,
     NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = [@{
       output_tensor : output_data,
     } mutableCopy];
+    const auto started = SteadyClock::now();
     [graph runWithMTLCommandQueue:queue
                             feeds:feeds
                  targetOperations:nil
                 resultsDictionary:results];
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      SteadyClock::now() - started);
+    if (stats != nullptr) {
+      ++stats->graph_execute_calls;
+      stats->graph_execute_ns += static_cast<std::uint64_t>(elapsed.count());
+      ++stats->executable_cache_misses;
+    }
     [results release];
   } @catch (NSException* exception) {
     return Status::internal_error(exception_to_string(exception));
@@ -228,6 +252,7 @@ struct MpsGraphContext::Impl {
   id<MTLCommandQueue> queue{nil};
   MPSGraphDevice* graph_device{nil};
   mutable MpsGraphTransferStats transfer_stats;
+  mutable MpsGraphGraphStats graph_stats;
 
   ~Impl() {
     if (graph_device != nil) {
@@ -296,6 +321,10 @@ bool MpsGraphContext::valid() const {
 
 MpsGraphTransferStats MpsGraphContext::transfer_stats() const {
   return impl_ == nullptr ? MpsGraphTransferStats{} : impl_->transfer_stats;
+}
+
+MpsGraphGraphStats MpsGraphContext::graph_stats() const {
+  return impl_ == nullptr ? MpsGraphGraphStats{} : impl_->graph_stats;
 }
 
 Result<MpsGraphBuffer> MpsGraphContext::make_buffer(std::size_t byte_size) const {
@@ -407,7 +436,7 @@ Status MpsGraphContext::embedding_f32(const MpsGraphBuffer& weight,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -440,7 +469,7 @@ Status MpsGraphContext::embedding_f32(const MpsGraphBuffer& weight,
       weight_tensor : weight_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [weight_data release];
     [output_data release];
     [graph release];
@@ -484,7 +513,7 @@ Status MpsGraphContext::embedding_from_token_f32(const MpsGraphBuffer& weight,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -520,7 +549,7 @@ Status MpsGraphContext::embedding_from_token_f32(const MpsGraphBuffer& weight,
       token_tensor : token_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [weight_data release];
     [token_data release];
     [output_data release];
@@ -554,7 +583,7 @@ Status MpsGraphContext::rms_norm_f32(const MpsGraphBuffer& input,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -601,7 +630,7 @@ Status MpsGraphContext::rms_norm_f32(const MpsGraphBuffer& input,
       weight_tensor : weight_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [input_data release];
     [weight_data release];
     [output_data release];
@@ -647,7 +676,7 @@ Status MpsGraphContext::qk_norm_f32(const MpsGraphBuffer& input,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -705,7 +734,7 @@ Status MpsGraphContext::qk_norm_f32(const MpsGraphBuffer& input,
       weight_tensor : weight_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [input_data release];
     [weight_data release];
     [output_data release];
@@ -765,7 +794,7 @@ Status MpsGraphContext::rope_f32(const MpsGraphBuffer& input,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -823,7 +852,7 @@ Status MpsGraphContext::rope_f32(const MpsGraphBuffer& input,
       input_tensor : input_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [input_data release];
     [output_data release];
     [graph release];
@@ -864,7 +893,7 @@ Status MpsGraphContext::matvec_f32(const MpsGraphBuffer& weight,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -899,7 +928,7 @@ Status MpsGraphContext::matvec_f32(const MpsGraphBuffer& weight,
       input_tensor : input_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [weight_data release];
     [input_data release];
     [output_data release];
@@ -933,7 +962,7 @@ Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -966,7 +995,7 @@ Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
       up_tensor : up_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [gate_data release];
     [up_data release];
     [output_data release];
@@ -1000,7 +1029,7 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -1030,7 +1059,7 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
       rhs_tensor : rhs_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [lhs_data release];
     [rhs_data release];
     [output_data release];
@@ -1061,7 +1090,7 @@ Status MpsGraphContext::argmax_i32(const MpsGraphBuffer& input,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -1086,7 +1115,7 @@ Status MpsGraphContext::argmax_i32(const MpsGraphBuffer& input,
       input_tensor : input_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [input_data release];
     [output_data release];
     [graph release];
@@ -1126,7 +1155,7 @@ Status MpsGraphContext::write_i32_token(const MpsGraphBuffer& token,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -1165,7 +1194,7 @@ Status MpsGraphContext::write_i32_token(const MpsGraphBuffer& token,
       token_tensor : token_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [output_input_data release];
     [token_data release];
     [output_data release];
@@ -1208,7 +1237,7 @@ Status MpsGraphContext::update_generation_status_i32(
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -1310,7 +1339,7 @@ Status MpsGraphContext::update_generation_status_i32(
       status_tensor : status_input_data,
     };
     const auto result_status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, status_output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, status_output_data, &impl_->graph_stats);
     [token_data release];
     [status_input_data release];
     [status_output_data release];
@@ -1376,7 +1405,7 @@ Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
   }
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -1428,10 +1457,197 @@ Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
       source_tensor : source_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, cache_output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, cache_output_data, &impl_->graph_stats);
     [cache_input_data release];
     [source_data release];
     [cache_output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::write_kv_cache_pair_f32(const MpsGraphBuffer& key_source,
+                                                const MpsGraphBuffer& value_source,
+                                                MpsGraphBuffer& key_cache,
+                                                MpsGraphBuffer& value_cache,
+                                                std::size_t layer,
+                                                std::size_t position,
+                                                std::size_t layers,
+                                                std::size_t capacity_tokens,
+                                                std::size_t kv_heads,
+                                                std::size_t head_dim) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto layers_status = validate_positive_dim(layers, "KV cache pair layers");
+  if (!layers_status.is_ok()) {
+    return layers_status;
+  }
+  auto capacity_status = validate_positive_dim(capacity_tokens, "KV cache pair capacity");
+  if (!capacity_status.is_ok()) {
+    return capacity_status;
+  }
+  auto kv_heads_status = validate_positive_dim(kv_heads, "KV cache pair kv_heads");
+  if (!kv_heads_status.is_ok()) {
+    return kv_heads_status;
+  }
+  auto head_dim_status = validate_positive_dim(head_dim, "KV cache pair head_dim");
+  if (!head_dim_status.is_ok()) {
+    return head_dim_status;
+  }
+  if (layer >= layers) {
+    return Status::invalid_argument("MPSGraph KV cache pair write layer exceeds capacity");
+  }
+  if (position >= capacity_tokens) {
+    return Status::invalid_argument("MPSGraph KV cache pair write position exceeds capacity");
+  }
+
+  std::size_t kv_values = 0;
+  if (!checked_mul(kv_heads, head_dim, kv_values)) {
+    return Status::invalid_argument("MPSGraph KV cache pair source size overflow");
+  }
+  std::size_t token_values = 0;
+  if (!checked_mul(capacity_tokens, kv_values, token_values)) {
+    return Status::invalid_argument("MPSGraph KV cache pair layer size overflow");
+  }
+  std::size_t cache_values = 0;
+  if (!checked_mul(layers, token_values, cache_values)) {
+    return Status::invalid_argument("MPSGraph KV cache pair total size overflow");
+  }
+
+  auto key_source_status = validate_f32_buffer(key_source, kv_values,
+                                               "KV cache pair key source");
+  if (!key_source_status.is_ok()) {
+    return key_source_status;
+  }
+  auto value_source_status = validate_f32_buffer(value_source, kv_values,
+                                                 "KV cache pair value source");
+  if (!value_source_status.is_ok()) {
+    return value_source_status;
+  }
+  auto key_cache_status = validate_f32_buffer(key_cache, cache_values,
+                                              "KV cache pair key destination");
+  if (!key_cache_status.is_ok()) {
+    return key_cache_status;
+  }
+  auto value_cache_status = validate_f32_buffer(value_cache, cache_values,
+                                                "KV cache pair value destination");
+  if (!value_cache_status.is_ok()) {
+    return value_cache_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* source_shape = make_shape({kv_heads, head_dim});
+    MPSShape* update_shape = make_shape({1, 1, kv_heads, head_dim});
+    MPSShape* cache_shape = make_shape({layers, capacity_tokens, kv_heads, head_dim});
+    MPSGraphTensor* key_cache_tensor =
+      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* value_cache_tensor =
+      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* key_source_tensor =
+      [graph placeholderWithShape:source_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* value_source_tensor =
+      [graph placeholderWithShape:source_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* key_update_tensor =
+      [graph reshapeTensor:key_source_tensor withShape:update_shape name:nil];
+    MPSGraphTensor* value_update_tensor =
+      [graph reshapeTensor:value_source_tensor withShape:update_shape name:nil];
+    NSArray<NSNumber*>* starts = @[
+      @(static_cast<NSInteger>(layer)),
+      @(static_cast<NSInteger>(position)),
+      @0,
+      @0,
+    ];
+    NSArray<NSNumber*>* ends = @[
+      @(static_cast<NSInteger>(layer + 1U)),
+      @(static_cast<NSInteger>(position + 1U)),
+      @(static_cast<NSInteger>(kv_heads)),
+      @(static_cast<NSInteger>(head_dim)),
+    ];
+    NSArray<NSNumber*>* strides = @[ @1, @1, @1, @1 ];
+    MPSGraphTensor* key_result =
+      [graph sliceUpdateDataTensor:key_cache_tensor
+                       updateTensor:key_update_tensor
+                             starts:starts
+                               ends:ends
+                            strides:strides
+                          startMask:0
+                            endMask:0
+                        squeezeMask:0
+                               name:nil];
+    MPSGraphTensor* value_result =
+      [graph sliceUpdateDataTensor:value_cache_tensor
+                       updateTensor:value_update_tensor
+                             starts:starts
+                               ends:ends
+                            strides:strides
+                          startMask:0
+                            endMask:0
+                        squeezeMask:0
+                               name:nil];
+
+    MPSGraphTensorData* key_cache_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:key_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* value_cache_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:value_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* key_source_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:key_source.impl_->buffer
+                                             shape:source_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* value_source_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:value_source.impl_->buffer
+                                             shape:source_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* key_cache_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:key_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* value_cache_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:value_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      key_cache_tensor : key_cache_input_data,
+      value_cache_tensor : value_cache_input_data,
+      key_source_tensor : key_source_data,
+      value_source_tensor : value_source_data,
+    };
+    NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = [@{
+      key_result : key_cache_output_data,
+      value_result : value_cache_output_data,
+    } mutableCopy];
+    Status status = Status::ok();
+    @try {
+      const auto started = SteadyClock::now();
+      [graph runWithMTLCommandQueue:impl_->queue
+                              feeds:feeds
+                   targetOperations:nil
+                  resultsDictionary:results];
+      const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        SteadyClock::now() - started);
+      ++impl_->graph_stats.graph_execute_calls;
+      impl_->graph_stats.graph_execute_ns += static_cast<std::uint64_t>(elapsed.count());
+      ++impl_->graph_stats.executable_cache_misses;
+    } @catch (NSException* exception) {
+      status = Status::internal_error(exception_to_string(exception));
+    }
+
+    [results release];
+    [key_cache_input_data release];
+    [value_cache_input_data release];
+    [key_source_data release];
+    [value_source_data release];
+    [key_cache_output_data release];
+    [value_cache_output_data release];
     [graph release];
     return status;
   }
@@ -1517,7 +1733,7 @@ Status MpsGraphContext::attention_f32(const MpsGraphBuffer& query,
   const auto kv_group = heads / kv_heads;
 
   @autoreleasepool {
-    MPSGraph* graph = [MPSGraph new];
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
     if (graph == nil) {
       return Status::unavailable("failed to create MPSGraph");
     }
@@ -1618,7 +1834,7 @@ Status MpsGraphContext::attention_f32(const MpsGraphBuffer& query,
       value_tensor : value_data,
     };
     const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [query_data release];
     [key_data release];
     [value_data release];

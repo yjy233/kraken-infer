@@ -78,6 +78,16 @@ Status make_state_buffer(const MpsGraphContext& context, std::size_t elements,
   return Status::ok();
 }
 
+ScopedProfileSpan profile_span(RequestProfiler* profiler, std::string_view name) {
+  return profiler == nullptr ? ScopedProfileSpan{} : profiler->scoped(name);
+}
+
+ScopedProfileSpan profile_layer_span(RequestProfiler* profiler, std::size_t layer) {
+  return profiler == nullptr
+           ? ScopedProfileSpan{}
+           : profiler->scoped("mpsgraph.layer", {ProfileField{"layer", std::to_string(layer)}});
+}
+
 }  // namespace
 
 Result<QwenMpsGraphModel> QwenMpsGraphModel::load_metadata(
@@ -307,7 +317,8 @@ Result<std::vector<float>> QwenMpsGraphModel::debug_embed_token(
 
 Status QwenMpsGraphModel::forward_token(const MpsGraphContext& context, std::int64_t token,
                                         std::size_t position,
-                                        QwenMpsGraphRunState& state) const {
+                                        QwenMpsGraphRunState& state,
+                                        RequestProfiler* profiler) const {
   if (!forward_weights_uploaded()) {
     return Status::invalid_argument("MPSGraph Qwen weights are not fully uploaded");
   }
@@ -322,30 +333,41 @@ Status QwenMpsGraphModel::forward_token(const MpsGraphContext& context, std::int
   }
 
   const auto hidden_size = static_cast<std::size_t>(bundle_.model.hidden_size);
-  auto status = context.embedding_f32(
-    embedding_.buffer, static_cast<std::size_t>(bundle_.model.vocab_size), hidden_size, token,
-    state.hidden);
-  if (!status.is_ok()) {
-    return status;
+  Status status;
+  {
+    auto span = profile_span(profiler, "mpsgraph.forward.embedding");
+    status = context.embedding_f32(
+      embedding_.buffer, static_cast<std::size_t>(bundle_.model.vocab_size), hidden_size,
+      token, state.hidden);
+    if (!status.is_ok()) {
+      return status;
+    }
+    (void)span;
   }
   for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
-    status = apply_layer(context, layers_[layer_index], layer_index, position, state);
+    status = apply_layer(context, layers_[layer_index], layer_index, position, state,
+                         profiler);
     if (!status.is_ok()) {
       return status;
     }
   }
-  status = context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size,
-                                static_cast<float>(bundle_.model.rms_norm_eps),
-                                state.normed);
-  if (!status.is_ok()) {
-    return status;
+  {
+    auto span = profile_span(profiler, "mpsgraph.forward.final_norm");
+    status = context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size,
+                                  static_cast<float>(bundle_.model.rms_norm_eps),
+                                  state.normed);
+    if (!status.is_ok()) {
+      return status;
+    }
+    (void)span;
   }
   return Status::ok();
 }
 
 Status QwenMpsGraphModel::forward_next_token(const MpsGraphContext& context,
                                              std::size_t position,
-                                             QwenMpsGraphRunState& state) const {
+                                             QwenMpsGraphRunState& state,
+                                             RequestProfiler* profiler) const {
   if (!forward_weights_uploaded()) {
     return Status::invalid_argument("MPSGraph Qwen weights are not fully uploaded");
   }
@@ -357,34 +379,47 @@ Status QwenMpsGraphModel::forward_next_token(const MpsGraphContext& context,
   }
 
   const auto hidden_size = static_cast<std::size_t>(bundle_.model.hidden_size);
-  auto status = context.embedding_from_token_f32(
-    embedding_.buffer, static_cast<std::size_t>(bundle_.model.vocab_size), hidden_size,
-    state.next_token, state.hidden);
-  if (!status.is_ok()) {
-    return status;
+  Status status;
+  {
+    auto span = profile_span(profiler, "mpsgraph.forward.embedding_from_token");
+    status = context.embedding_from_token_f32(
+      embedding_.buffer, static_cast<std::size_t>(bundle_.model.vocab_size), hidden_size,
+      state.next_token, state.hidden);
+    if (!status.is_ok()) {
+      return status;
+    }
+    (void)span;
   }
   for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
-    status = apply_layer(context, layers_[layer_index], layer_index, position, state);
+    status = apply_layer(context, layers_[layer_index], layer_index, position, state,
+                         profiler);
     if (!status.is_ok()) {
       return status;
     }
   }
-  return context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size,
-                              static_cast<float>(bundle_.model.rms_norm_eps),
-                              state.normed);
+  auto span = profile_span(profiler, "mpsgraph.forward.final_norm");
+  status = context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size,
+                                static_cast<float>(bundle_.model.rms_norm_eps),
+                                state.normed);
+  (void)span;
+  return status;
 }
 
 Status QwenMpsGraphModel::greedy_next_token(const MpsGraphContext& context,
-                                            QwenMpsGraphRunState& state) const {
+                                            QwenMpsGraphRunState& state,
+                                            RequestProfiler* profiler) const {
   if (!all_weights_uploaded()) {
     return Status::invalid_argument("MPSGraph Qwen all weights are not uploaded");
   }
-  auto status = compute_logits(context, state);
+  auto status = compute_logits(context, state, profiler);
   if (!status.is_ok()) {
     return status;
   }
-  return context.argmax_i32(state.logits, static_cast<std::size_t>(bundle_.model.vocab_size),
-                            state.next_token);
+  auto span = profile_span(profiler, "mpsgraph.logits.argmax");
+  status = context.argmax_i32(state.logits, static_cast<std::size_t>(bundle_.model.vocab_size),
+                              state.next_token);
+  (void)span;
+  return status;
 }
 
 Status QwenMpsGraphModel::record_next_token(const MpsGraphContext& context,
@@ -415,7 +450,7 @@ Status QwenMpsGraphModel::update_generation_status(
 
 Status QwenMpsGraphModel::prefill_token_ids(
   const MpsGraphContext& context, const std::vector<std::int64_t>& tokens,
-  QwenMpsGraphRunState& state) const {
+  QwenMpsGraphRunState& state, RequestProfiler* profiler) const {
   if (tokens.empty()) {
     return Status::invalid_argument("MPSGraph Qwen prefill tokens must not be empty");
   }
@@ -423,10 +458,16 @@ Status QwenMpsGraphModel::prefill_token_ids(
     return Status::invalid_argument("MPSGraph Qwen prefill exceeds run state capacity");
   }
   for (std::size_t position = 0; position < tokens.size(); ++position) {
-    auto status = forward_token(context, tokens[position], position, state);
+    auto span =
+      profiler == nullptr
+        ? ScopedProfileSpan{}
+        : profiler->scoped("mpsgraph.prefill.forward_token",
+                           {ProfileField{"position", std::to_string(position)}});
+    auto status = forward_token(context, tokens[position], position, state, profiler);
     if (!status.is_ok()) {
       return status;
     }
+    (void)span;
   }
   return Status::ok();
 }
@@ -561,7 +602,9 @@ Status QwenMpsGraphModel::upload_layer_weights(const MpsGraphContext& context) {
 Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
                                       const QwenMpsGraphLayerWeights& layer,
                                       std::size_t layer_index, std::size_t position,
-                                      QwenMpsGraphRunState& state) const {
+                                      QwenMpsGraphRunState& state,
+                                      RequestProfiler* profiler) const {
+  auto layer_span = profile_layer_span(profiler, layer_index);
   const auto hidden_size = static_cast<std::size_t>(bundle_.model.hidden_size);
   const auto head_dim = static_cast<std::size_t>(bundle_.model.head_dim);
   const auto heads = static_cast<std::size_t>(bundle_.model.num_attention_heads);
@@ -578,99 +621,147 @@ Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
     return Status::invalid_argument("MPSGraph Qwen KV dimension overflow");
   }
 
-  auto status =
-    context.rms_norm_f32(state.hidden, layer.input_layernorm.buffer, hidden_size, eps,
-                         state.normed);
+  auto run = [&](std::string_view name, auto&& fn) -> Status {
+    auto span = profile_span(profiler, name);
+    auto status = fn();
+    (void)span;
+    return status;
+  };
+
+  auto status = run("mpsgraph.layer.input_rms_norm", [&] {
+    return context.rms_norm_f32(state.hidden, layer.input_layernorm.buffer, hidden_size, eps,
+                                state.normed);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.matvec_f32(layer.q_proj.buffer, attn_dim, hidden_size, state.normed,
+  status = run("mpsgraph.layer.q_proj", [&] {
+    return context.matvec_f32(layer.q_proj.buffer, attn_dim, hidden_size, state.normed,
                               state.q);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.matvec_f32(layer.k_proj.buffer, kv_dim, hidden_size, state.normed,
+  status = run("mpsgraph.layer.k_proj", [&] {
+    return context.matvec_f32(layer.k_proj.buffer, kv_dim, hidden_size, state.normed,
                               state.k);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.matvec_f32(layer.v_proj.buffer, kv_dim, hidden_size, state.normed,
+  status = run("mpsgraph.layer.v_proj", [&] {
+    return context.matvec_f32(layer.v_proj.buffer, kv_dim, hidden_size, state.normed,
                               state.v);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.qk_norm_f32(state.q, layer.q_norm.buffer, heads, head_dim, eps,
+  status = run("mpsgraph.layer.q_norm", [&] {
+    return context.qk_norm_f32(state.q, layer.q_norm.buffer, heads, head_dim, eps,
                                state.q_scratch);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.rope_f32(state.q_scratch, heads, head_dim, position, theta, state.q);
+  status = run("mpsgraph.layer.q_rope", [&] {
+    return context.rope_f32(state.q_scratch, heads, head_dim, position, theta, state.q);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.qk_norm_f32(state.k, layer.k_norm.buffer, kv_heads, head_dim, eps,
+  status = run("mpsgraph.layer.k_norm", [&] {
+    return context.qk_norm_f32(state.k, layer.k_norm.buffer, kv_heads, head_dim, eps,
                                state.k_scratch);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.rope_f32(state.k_scratch, kv_heads, head_dim, position, theta, state.k);
+  status = run("mpsgraph.layer.k_rope", [&] {
+    return context.rope_f32(state.k_scratch, kv_heads, head_dim, position, theta, state.k);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = state.kv_cache.store(context, layer_index, position, state.k, state.v);
+  status = run("mpsgraph.layer.kv_store", [&] {
+    return state.kv_cache.store(context, layer_index, position, state.k, state.v);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.attention_f32(
-    state.q, state.kv_cache.key_buffer(), state.kv_cache.value_buffer(), layer_index,
-    position, state.capacity_tokens, heads, kv_heads, head_dim, state.attn_out);
+  status = run("mpsgraph.layer.attention", [&] {
+    return context.attention_f32(
+      state.q, state.kv_cache.key_buffer(), state.kv_cache.value_buffer(), layer_index,
+      position, state.capacity_tokens, heads, kv_heads, head_dim, state.attn_out);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.matvec_f32(layer.o_proj.buffer, hidden_size, attn_dim,
+  status = run("mpsgraph.layer.o_proj", [&] {
+    return context.matvec_f32(layer.o_proj.buffer, hidden_size, attn_dim,
                               state.attn_out, state.projected);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.add_f32(state.hidden, state.projected, hidden_size, state.normed);
+  status = run("mpsgraph.layer.attn_residual", [&] {
+    return context.add_f32(state.hidden, state.projected, hidden_size, state.normed);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.rms_norm_f32(state.normed, layer.post_attention_layernorm.buffer,
+  status = run("mpsgraph.layer.post_attention_rms_norm", [&] {
+    return context.rms_norm_f32(state.normed, layer.post_attention_layernorm.buffer,
                                 hidden_size, eps, state.hidden);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.matvec_f32(layer.gate_proj.buffer, intermediate, hidden_size,
+  status = run("mpsgraph.layer.gate_proj", [&] {
+    return context.matvec_f32(layer.gate_proj.buffer, intermediate, hidden_size,
                               state.hidden, state.gate);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.matvec_f32(layer.up_proj.buffer, intermediate, hidden_size,
+  status = run("mpsgraph.layer.up_proj", [&] {
+    return context.matvec_f32(layer.up_proj.buffer, intermediate, hidden_size,
                               state.hidden, state.up);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.silu_mul_f32(state.gate, state.up, intermediate, state.mlp);
+  status = run("mpsgraph.layer.silu_mul", [&] {
+    return context.silu_mul_f32(state.gate, state.up, intermediate, state.mlp);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  status = context.matvec_f32(layer.down_proj.buffer, hidden_size, intermediate,
+  status = run("mpsgraph.layer.down_proj", [&] {
+    return context.matvec_f32(layer.down_proj.buffer, hidden_size, intermediate,
                               state.mlp, state.down);
+  });
   if (!status.is_ok()) {
     return status;
   }
-  return context.add_f32(state.normed, state.down, hidden_size, state.hidden);
+  status = run("mpsgraph.layer.mlp_residual", [&] {
+    return context.add_f32(state.normed, state.down, hidden_size, state.hidden);
+  });
+  (void)layer_span;
+  return status;
 }
 
 Status QwenMpsGraphModel::compute_logits(const MpsGraphContext& context,
-                                         QwenMpsGraphRunState& state) const {
+                                         QwenMpsGraphRunState& state,
+                                         RequestProfiler* profiler) const {
   if (!lm_head_.buffer.valid()) {
     return Status::invalid_argument("MPSGraph Qwen lm_head weight is not uploaded");
   }
-  return context.matvec_f32(lm_head_.buffer, static_cast<std::size_t>(bundle_.model.vocab_size),
-                            static_cast<std::size_t>(bundle_.model.hidden_size),
-                            state.normed, state.logits);
+  auto span = profile_span(profiler, "mpsgraph.logits.lm_head");
+  auto status = context.matvec_f32(
+    lm_head_.buffer, static_cast<std::size_t>(bundle_.model.vocab_size),
+    static_cast<std::size_t>(bundle_.model.hidden_size), state.normed, state.logits);
+  (void)span;
+  return status;
 }
 
 bool QwenMpsGraphModel::forward_weights_uploaded() const {

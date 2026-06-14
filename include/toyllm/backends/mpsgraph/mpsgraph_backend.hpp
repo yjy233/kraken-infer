@@ -28,6 +28,17 @@ struct MpsGraphTransferStats {
   std::uint64_t device_to_host_bytes{0};
 };
 
+struct MpsGraphGraphStats {
+  std::uint64_t graph_build_calls{0};
+  std::uint64_t graph_build_ns{0};
+  std::uint64_t graph_compile_calls{0};
+  std::uint64_t graph_compile_ns{0};
+  std::uint64_t graph_execute_calls{0};
+  std::uint64_t graph_execute_ns{0};
+  std::uint64_t executable_cache_hits{0};
+  std::uint64_t executable_cache_misses{0};
+};
+
 class MpsGraphBuffer {
  public:
   MpsGraphBuffer();
@@ -65,6 +76,7 @@ class MpsGraphContext {
   [[nodiscard]] static Result<MpsGraphContext> create();
   [[nodiscard]] bool valid() const;
   [[nodiscard]] MpsGraphTransferStats transfer_stats() const;
+  [[nodiscard]] MpsGraphGraphStats graph_stats() const;
 
   [[nodiscard]] Result<MpsGraphBuffer> make_buffer(std::size_t byte_size) const;
   [[nodiscard]] Status copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
@@ -131,6 +143,16 @@ class MpsGraphContext {
                                           std::size_t capacity_tokens,
                                           std::size_t kv_heads,
                                           std::size_t head_dim) const;
+  [[nodiscard]] Status write_kv_cache_pair_f32(const MpsGraphBuffer& key_source,
+                                               const MpsGraphBuffer& value_source,
+                                               MpsGraphBuffer& key_cache,
+                                               MpsGraphBuffer& value_cache,
+                                               std::size_t layer,
+                                               std::size_t position,
+                                               std::size_t layers,
+                                               std::size_t capacity_tokens,
+                                               std::size_t kv_heads,
+                                               std::size_t head_dim) const;
   [[nodiscard]] Status attention_f32(const MpsGraphBuffer& query,
                                      const MpsGraphBuffer& key_cache,
                                      const MpsGraphBuffer& value_cache,

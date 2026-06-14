@@ -4,6 +4,7 @@
 #include "toyllm/backends/mpsgraph/mpsgraph_kv_cache.hpp"
 #include "toyllm/backends/mpsgraph/mpsgraph_weight_store.hpp"
 #include "toyllm/model/model_config.hpp"
+#include "toyllm/runtime/profiling.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -95,15 +96,19 @@ class QwenMpsGraphModel {
     const MpsGraphContext& context, std::int64_t token) const;
   [[nodiscard]] Status forward_token(const MpsGraphContext& context, std::int64_t token,
                                      std::size_t position,
-                                     QwenMpsGraphRunState& state) const;
+                                     QwenMpsGraphRunState& state,
+                                     RequestProfiler* profiler = nullptr) const;
   [[nodiscard]] Status forward_next_token(const MpsGraphContext& context,
                                           std::size_t position,
-                                          QwenMpsGraphRunState& state) const;
+                                          QwenMpsGraphRunState& state,
+                                          RequestProfiler* profiler = nullptr) const;
   [[nodiscard]] Status prefill_token_ids(const MpsGraphContext& context,
                                          const std::vector<std::int64_t>& tokens,
-                                         QwenMpsGraphRunState& state) const;
+                                         QwenMpsGraphRunState& state,
+                                         RequestProfiler* profiler = nullptr) const;
   [[nodiscard]] Status greedy_next_token(const MpsGraphContext& context,
-                                         QwenMpsGraphRunState& state) const;
+                                         QwenMpsGraphRunState& state,
+                                         RequestProfiler* profiler = nullptr) const;
   [[nodiscard]] Status record_next_token(const MpsGraphContext& context,
                                          std::size_t step,
                                          QwenMpsGraphRunState& state) const;
@@ -124,9 +129,11 @@ class QwenMpsGraphModel {
   [[nodiscard]] Status apply_layer(const MpsGraphContext& context,
                                    const QwenMpsGraphLayerWeights& layer,
                                    std::size_t layer_index, std::size_t position,
-                                   QwenMpsGraphRunState& state) const;
+                                   QwenMpsGraphRunState& state,
+                                   RequestProfiler* profiler) const;
   [[nodiscard]] Status compute_logits(const MpsGraphContext& context,
-                                      QwenMpsGraphRunState& state) const;
+                                      QwenMpsGraphRunState& state,
+                                      RequestProfiler* profiler) const;
   [[nodiscard]] bool forward_weights_uploaded() const;
   void refresh_info();
 
