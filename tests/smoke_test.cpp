@@ -82,6 +82,17 @@ void test_mpsgraph_operator_smoke() {
   }
 }
 
+void test_mpsgraph_generation_does_not_fallback() {
+  toyllm::CpuGenerationRequest request;
+  request.compute_device = toyllm::Device::mpsgraph();
+  request.prompt = "hello";
+  request.max_new_tokens = 1;
+
+  const auto result = toyllm::generate_cpu(request);
+  assert(!result.is_ok());
+  assert(result.status().code() == toyllm::StatusCode::unavailable);
+}
+
 std::uint16_t float_to_bf16(float value) {
   std::uint32_t bits = 0;
   static_assert(sizeof(bits) == sizeof(value));
@@ -419,6 +430,7 @@ int main() {
   test_mps_operator_smoke();
   test_mpsgraph_backend_query();
   test_mpsgraph_operator_smoke();
+  test_mpsgraph_generation_does_not_fallback();
   test_mps_matvec_workspace_reuse();
   test_mps_full_forward_operators();
   test_profile_artifacts();

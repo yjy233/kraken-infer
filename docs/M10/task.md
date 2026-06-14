@@ -12,11 +12,12 @@ MPSGraph API 表达和执行。
 - [x] 已明确不复用 `MpsContext` / `MpsBuffer` / 现有 Metal kernels
 - [x] 已明确 strict mode 下不支持 token streaming
 - [x] 已明确第一版 sampling 先做 graph-side greedy argmax
-- [ ] 尚未创建 `include/toyllm/backends/mpsgraph/`
-- [ ] 尚未创建 `src/backends/mpsgraph/`
-- [ ] 尚未接入 `--device mpsgraph`
-- [ ] 尚未实现 MPSGraph availability probe
-- [ ] 尚未实现任何 MPSGraph executable
+- [x] 已创建 `include/toyllm/backends/mpsgraph/`
+- [x] 已创建 `src/backends/mpsgraph/`
+- [x] 已接入 `--device mpsgraph`
+- [x] 已实现 MPSGraph availability probe
+- [x] 已实现 tiny MPSGraph smoke executable
+- [ ] 尚未实现完整 Qwen3 MPSGraph prefill/decode
 
 ## Scope
 
@@ -69,45 +70,47 @@ MPSGraph API 表达和执行。
 - [x] 新增 M10 task checklist
 - [x] 更新 `docs/architecture.md`，加入 MPSGraph backend 层
 - [x] 更新 `docs/milestones.md`，加入 M10 状态和目标
-- [ ] 在 README 中说明 `mpsgraph` 是实验 backend
+- [x] 在 README 中说明 `mpsgraph` 是实验 backend
 
 ### Build And Platform Gating
 
-- [ ] CMake 新增 `KRAKEN_INFER_ENABLE_MPSGRAPH`
-- [ ] Makefile 新增 MPSGraph source 列表
-- [ ] Apple + MPSGraph 可用时编译 `.mm`
-- [ ] 非 Apple 或禁用时编译 stub
-- [ ] stub 返回明确 unavailable
-- [ ] 不影响现有 `cpu` / `mps` build
+- [x] CMake 新增 `KRAKEN_INFER_ENABLE_MPSGRAPH`
+- [x] Makefile 新增 MPSGraph source 列表
+- [x] Apple + MPSGraph 可用时编译 `.mm`
+- [x] 非 Apple 或禁用时编译 stub
+- [x] stub 返回明确 unavailable
+- [x] 不影响现有 `cpu` / `mps` build
 
 ### Public API And Device Selection
 
-- [ ] `DeviceKind` 新增 `mpsgraph`
-- [ ] `Device::mpsgraph()` helper
-- [ ] `Device::to_string()` 支持 `mpsgraph`
-- [ ] CLI `--device` 解析支持 `mpsgraph`
-- [ ] gateway request `device` 支持 `mpsgraph`
-- [ ] OpenAPI schema 增加 `mpsgraph`
-- [ ] `doctor` 输出 MPSGraph availability
+- [x] `DeviceKind` 新增 `mpsgraph`
+- [x] `Device::mpsgraph()` helper
+- [x] `Device::to_string()` 支持 `mpsgraph`
+- [x] CLI `--device` 解析支持 `mpsgraph`
+- [x] gateway request `device` 支持 `mpsgraph`
+- [x] OpenAPI schema 增加 `mpsgraph`
+- [x] `doctor` 输出 MPSGraph availability
 
 ### Backend Skeleton
 
-- [ ] 新增 `include/toyllm/backends/mpsgraph/mpsgraph_backend.hpp`
-- [ ] 新增 `src/backends/mpsgraph/mpsgraph_backend.mm`
-- [ ] 新增 `src/backends/mpsgraph/mpsgraph_backend_stub.cpp`
-- [ ] 新增 `toyllm::mpsgraph::BackendInfo`
-- [ ] 新增 `query_backend()`
-- [ ] 新增 tiny graph smoke test
-- [ ] 所有 Apple framework 类型限制在 `.mm` 内
+- [x] 新增 `include/toyllm/backends/mpsgraph/mpsgraph_backend.hpp`
+- [x] 新增 `src/backends/mpsgraph/mpsgraph_backend.mm`
+- [x] 新增 `src/backends/mpsgraph/mpsgraph_backend_stub.cpp`
+- [x] 新增 `toyllm::mpsgraph::BackendInfo`
+- [x] 新增 `query_backend()`
+- [x] 新增 tiny graph smoke test
+- [x] 新增 `MpsGraphContext` / `MpsGraphBuffer`
+- [x] 新增基础 f32 graph operator smoke
+- [x] 所有 Apple framework 类型限制在 `.mm` 内
 
 ### Runtime Separation
 
-- [ ] 新增 `src/runtime/mpsgraph/` 或等价独立 runtime 目录
+- [x] 新增 `src/runtime/mpsgraph/` 或等价独立 runtime 目录
 - [ ] 新增 `QwenMpsGraphModel`
-- [ ] 新增 `generate_mpsgraph()`
-- [ ] runtime dispatch 支持 `DeviceKind::mpsgraph`
-- [ ] 不把 MPSGraph path 塞进 `src/runtime/cpu/qwen_cpu_model.cpp`
-- [ ] 不通过现有 MPS runtime 间接调用
+- [x] 新增 `generate_mpsgraph()`
+- [x] runtime dispatch 支持 `DeviceKind::mpsgraph`
+- [x] 不把 MPSGraph path 塞进 `src/runtime/cpu/qwen_cpu_model.cpp`
+- [x] 不通过现有 MPS runtime 间接调用
 
 ### Weight Store
 
@@ -124,7 +127,7 @@ MPSGraph API 表达和执行。
 
 ### Graph Builder Foundation
 
-- [ ] 封装 MPSGraph graph construction helpers
+- [x] 封装 MPSGraph graph construction helpers
 - [ ] 封装 executable cache key
 - [ ] 封装 graph compile / specialize
 - [ ] 支持 fixed max sequence length
@@ -135,10 +138,11 @@ MPSGraph API 表达和执行。
 
 ### Core Ops
 
-- [ ] embedding gather
-- [ ] RMSNorm
+- [x] embedding gather f32 smoke
+- [x] RMSNorm f32 smoke
 - [ ] Q/K per-head RMSNorm
 - [ ] BF16/FP16/FP32 matmul policy spike
+- [x] matvec f32 smoke
 - [ ] q_proj
 - [ ] k_proj
 - [ ] v_proj
@@ -148,9 +152,9 @@ MPSGraph API 表达和执行。
 - [ ] down_proj
 - [ ] lm_head
 - [ ] RoPE
-- [ ] SiLU
-- [ ] residual add
-- [ ] argmax
+- [x] SiLU f32 smoke
+- [x] residual add f32 smoke
+- [x] argmax smoke
 
 ### KV Cache
 
@@ -222,34 +226,34 @@ MPSGraph API 表达和执行。
 
 ### Tests
 
-- [ ] MPSGraph availability smoke
-- [ ] tiny add/mul/reduce graph smoke
-- [ ] RMSNorm vs CPU
-- [ ] matmul vs CPU
+- [x] MPSGraph availability smoke
+- [x] tiny add/mul/reduce graph smoke
+- [x] RMSNorm f32 smoke vs CPU expected value
+- [x] matvec f32 smoke vs CPU expected value
 - [ ] RoPE vs CPU
-- [ ] SiLU vs CPU
-- [ ] argmax vs CPU
+- [x] SiLU f32 smoke vs CPU expected value
+- [x] argmax smoke
 - [ ] layer 0 position 0 vs CPU
 - [ ] attention output vs CPU
 - [ ] MLP output vs CPU
 - [ ] full model `hello`, 1 token greedy vs CPU
 - [ ] full model `hello`, 2 tokens greedy vs CPU
-- [ ] no fallback test
+- [x] no fallback test
 - [ ] no per-token readback instrumentation test
 
 ## Acceptance
 
 - [ ] `cmake --build --preset debug` 通过
 - [ ] `ctest --preset debug` 通过
-- [ ] `make test` 通过
-- [ ] `kraken-infer doctor` 能显示 MPSGraph backend 状态
+- [x] `make test` 通过
+- [x] `kraken-infer doctor` 能显示 MPSGraph backend 状态
 - [ ] `infer --device mpsgraph --prompt hello --max-new-tokens 1` 可运行
 - [ ] greedy 首 token 与 CPU reference 一致
 - [ ] decode 内部不读回 logits
 - [ ] decode 内部不读回 next token
 - [ ] decode 内部不从 CPU feed next token
 - [ ] KV cache 不存在 CPU mirror
-- [ ] 不使用旧 MPS backend 类型或函数
+- [x] 不使用旧 MPS backend 类型或函数
 - [ ] MPSGraph 不可用时返回明确 unavailable
 
 ## Known Risks

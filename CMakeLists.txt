@@ -91,7 +91,6 @@ if(APPLE AND KRAKEN_INFER_ENABLE_MPSGRAPH)
     PUBLIC
       "-framework Foundation"
       "-framework Metal"
-      "-framework MetalPerformanceShaders"
       "-framework MetalPerformanceShadersGraph"
   )
 else()

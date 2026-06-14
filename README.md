@@ -55,6 +55,28 @@ CPU 仍负责 tokenizer、host sampling 和 correctness reference。
 
 ![MPS forward path](docs/assets/mps-forward.svg)
 
+### MPSGraph Backend
+
+`--device mpsgraph` 是一条新的实验 backend 路线，目标是用 MPSGraph 表达整段
+prefill/decode，并保持 weights、KV cache、hidden、logits 和 sampling 都在 device 侧。
+它不复用当前 `mps` backend 的 `MpsContext`、`MpsBuffer` 或手写 Metal kernel。
+
+当前已接入：
+
+- 独立 `toyllm::mpsgraph` backend facade。
+- MPSGraph availability probe。
+- MPSGraph tiny graph smoke test。
+- CLI / gateway / OpenAPI 的 `mpsgraph` device 解析。
+- strict no-fallback 行为：Qwen3 图推理未完成前，`--device mpsgraph` 会明确返回
+  unavailable，不会偷偷走 CPU 或旧 MPS。
+
+当前尚未实现完整 Qwen3 MPSGraph prefill/decode。可用探测命令：
+
+```bash
+./build/debug/kraken-infer mpsgraph
+./build/debug/kraken-infer mpsgraph-smoke
+```
+
 ### CLI
 
 当前可用子命令：
@@ -68,6 +90,8 @@ CPU 仍负责 tokenizer、host sampling 和 correctness reference。
 - `serve`: 启动 OpenAI-compatible HTTP gateway。
 - `mps`: 输出本机 Metal/MPS 状态。
 - `mps-smoke`: 跑 MPS operator smoke test。
+- `mpsgraph`: 输出本机 MPSGraph 状态。
+- `mpsgraph-smoke`: 跑 MPSGraph tiny graph smoke test。
 
 ### HTTP Gateway
 
@@ -225,6 +249,8 @@ MPS status：
 ```bash
 ./build/debug/kraken-infer mps
 ./build/debug/kraken-infer mps-smoke
+./build/debug/kraken-infer mpsgraph
+./build/debug/kraken-infer mpsgraph-smoke
 ```
 
 Interactive terminal chat：

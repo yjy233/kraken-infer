@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace toyllm::mpsgraph {
@@ -18,6 +19,79 @@ struct BackendInfo {
   bool headless{false};
   bool removable{false};
   std::string failure_reason;
+};
+
+class MpsGraphBuffer {
+ public:
+  MpsGraphBuffer();
+  ~MpsGraphBuffer();
+
+  MpsGraphBuffer(const MpsGraphBuffer&) = delete;
+  MpsGraphBuffer& operator=(const MpsGraphBuffer&) = delete;
+
+  MpsGraphBuffer(MpsGraphBuffer&& other) noexcept;
+  MpsGraphBuffer& operator=(MpsGraphBuffer&& other) noexcept;
+
+  [[nodiscard]] bool valid() const;
+  [[nodiscard]] std::size_t byte_size() const;
+
+ private:
+  friend class MpsGraphContext;
+  struct Impl;
+
+  explicit MpsGraphBuffer(std::unique_ptr<Impl> impl);
+
+  std::unique_ptr<Impl> impl_;
+};
+
+class MpsGraphContext {
+ public:
+  MpsGraphContext();
+  ~MpsGraphContext();
+
+  MpsGraphContext(const MpsGraphContext&) = delete;
+  MpsGraphContext& operator=(const MpsGraphContext&) = delete;
+
+  MpsGraphContext(MpsGraphContext&& other) noexcept;
+  MpsGraphContext& operator=(MpsGraphContext&& other) noexcept;
+
+  [[nodiscard]] static Result<MpsGraphContext> create();
+  [[nodiscard]] bool valid() const;
+
+  [[nodiscard]] Result<MpsGraphBuffer> make_buffer(std::size_t byte_size) const;
+  [[nodiscard]] Status copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
+                                      std::size_t byte_size) const;
+  [[nodiscard]] Status copy_from_buffer(const MpsGraphBuffer& buffer, void* data,
+                                        std::size_t byte_size) const;
+
+  [[nodiscard]] Status embedding_f32(const MpsGraphBuffer& weight,
+                                     std::size_t vocab_size,
+                                     std::size_t hidden_size,
+                                     std::int64_t token,
+                                     MpsGraphBuffer& output) const;
+  [[nodiscard]] Status rms_norm_f32(const MpsGraphBuffer& input,
+                                    const MpsGraphBuffer& weight,
+                                    std::size_t size, float eps,
+                                    MpsGraphBuffer& output) const;
+  [[nodiscard]] Status matvec_f32(const MpsGraphBuffer& weight,
+                                  std::size_t rows, std::size_t cols,
+                                  const MpsGraphBuffer& input,
+                                  MpsGraphBuffer& output) const;
+  [[nodiscard]] Status silu_mul_f32(const MpsGraphBuffer& gate,
+                                    const MpsGraphBuffer& up,
+                                    std::size_t size,
+                                    MpsGraphBuffer& output) const;
+  [[nodiscard]] Status add_f32(const MpsGraphBuffer& lhs,
+                               const MpsGraphBuffer& rhs,
+                               std::size_t size,
+                               MpsGraphBuffer& output) const;
+
+ private:
+  struct Impl;
+
+  explicit MpsGraphContext(std::unique_ptr<Impl> impl);
+
+  std::unique_ptr<Impl> impl_;
 };
 
 [[nodiscard]] BackendInfo query_backend();

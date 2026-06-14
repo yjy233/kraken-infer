@@ -4,163 +4,703 @@
 #import <Metal/Metal.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
-#include <cstdint>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <memory>
 #include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace toyllm::mpsgraph {
 
 namespace {
 
-BackendInfo build_backend_info() {
-  BackendInfo info{};
-  info.compiled = true;
+constexpr const char* kNotReady = "MPSGraph context is not initialized";
 
-  id<MTLDevice> metal_device = MTLCreateSystemDefaultDevice();
-  if (metal_device == nil) {
-    info.failure_reason = "Metal device is not available";
-    return info;
-  }
-
-MPSGraphDevice* graph_device = [MPSGraphDevice deviceWithMTLDevice:metal_device];
-  if (graph_device == nil) {
-    info.failure_reason = "failed to create MPSGraphDevice from Metal device";
-    return info;
-  }
-
-  id<MTLCommandQueue> command_queue = [metal_device newCommandQueue];
-  if (command_queue == nil) {
-    info.failure_reason = "failed to create Metal command queue for MPSGraph";
-    return info;
-  }
-
-  info.available = true;
-  info.graph_ready = true;
-  info.device_name = metal_device.name != nil ? std::string{metal_device.name.UTF8String}
-                                              : std::string{};
-  info.recommended_max_working_set_size =
-    static_cast<std::uint64_t>(metal_device.recommendedMaxWorkingSetSize);
-  info.low_power = metal_device.lowPower;
-  info.headless = metal_device.headless;
-  info.removable = metal_device.removable;
-  return info;
+std::string nsstring_to_string(NSString* value) {
+  return value == nil ? std::string{} : std::string{[value UTF8String]};
 }
 
-Status run_smoke_graph() {
-  id<MTLDevice> metal_device = MTLCreateSystemDefaultDevice();
-  if (metal_device == nil) {
-    return Status::unavailable("Metal device is not available");
+std::string exception_to_string(NSException* exception) {
+  std::string message = "MPSGraph exception";
+  if (exception.name != nil) {
+    message += " ";
+    message += [exception.name UTF8String];
   }
-  id<MTLCommandQueue> command_queue = [metal_device newCommandQueue];
-  if (command_queue == nil) {
-    return Status::unavailable("failed to create Metal command queue for MPSGraph");
+  if (exception.reason != nil) {
+    message += ": ";
+    message += [exception.reason UTF8String];
   }
+  return message;
+}
 
-  MPSGraph* graph = [MPSGraph new];
-  if (graph == nil) {
-    return Status::unavailable("failed to create MPSGraph");
+bool checked_mul(std::size_t lhs, std::size_t rhs, std::size_t& output) {
+  if (lhs != 0 && rhs > std::numeric_limits<std::size_t>::max() / lhs) {
+    return false;
   }
+  output = lhs * rhs;
+  return true;
+}
 
-  const float lhs_values[] = {1.0F, 2.0F};
-  const float rhs_values[] = {3.0F, 4.0F};
-  NSData* lhs_data = [NSData dataWithBytes:lhs_values length:sizeof(lhs_values)];
-  NSData* rhs_data = [NSData dataWithBytes:rhs_values length:sizeof(rhs_values)];
-  MPSShape* shape = @[ @2 ];
-
-  MPSGraphTensor* lhs = [graph constantWithData:lhs_data shape:shape dataType:MPSDataTypeFloat32];
-  MPSGraphTensor* rhs = [graph constantWithData:rhs_data shape:shape dataType:MPSDataTypeFloat32];
-  MPSGraphTensor* sum = [graph additionWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-  MPSGraphTensor* product =
-    [graph multiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
-  MPSGraphTensor* argmax = [graph reductionArgMaximumWithTensor:product axis:0 name:nil];
-
-  id<MTLBuffer> sum_buffer =
-    [metal_device newBufferWithLength:sizeof(float) * 2U options:MTLResourceStorageModeShared];
-  if (sum_buffer == nil) {
-    return Status::unavailable("failed to allocate MPSGraph smoke sum buffer");
+Result<std::size_t> f32_bytes(std::size_t values, const char* name) {
+  std::size_t bytes = 0;
+  if (!checked_mul(values, sizeof(float), bytes)) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " byte count overflow");
   }
+  return bytes;
+}
 
-  const auto argmax_byte_size = [&]() -> std::size_t {
-    switch (argmax.dataType) {
-      case MPSDataTypeInt64:
-      case MPSDataTypeUInt64:
-        return sizeof(std::uint64_t);
-      case MPSDataTypeInt32:
-      case MPSDataTypeUInt32:
-        return sizeof(std::uint32_t);
-      default:
-        return 0U;
-    }
-  }();
-  if (argmax_byte_size == 0U) {
-    return Status::internal_error("MPSGraph smoke argmax returned unsupported dtype");
+Status validate_f32_buffer(const MpsGraphBuffer& buffer, std::size_t values,
+                           const char* name) {
+  auto byte_count = f32_bytes(values, name);
+  if (!byte_count.is_ok()) {
+    return byte_count.status();
   }
-  id<MTLBuffer> argmax_buffer =
-    [metal_device newBufferWithLength:argmax_byte_size options:MTLResourceStorageModeShared];
-  if (argmax_buffer == nil) {
-    return Status::unavailable("failed to allocate MPSGraph smoke argmax buffer");
+  if (!buffer.valid()) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " buffer is not initialized");
   }
-
-  MPSGraphTensorData* sum_output_data =
-    [[MPSGraphTensorData alloc] initWithMTLBuffer:sum_buffer
-                                           shape:shape
-                                        dataType:MPSDataTypeFloat32];
-  MPSGraphTensorData* argmax_output_data =
-    [[MPSGraphTensorData alloc] initWithMTLBuffer:argmax_buffer
-                                           shape:@[]
-                                        dataType:argmax.dataType];
-  if (sum_output_data == nil || argmax_output_data == nil) {
-    return Status::unavailable("failed to bind MPSGraph smoke output buffers");
-  }
-
-  NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = [@{
-    sum : sum_output_data,
-    argmax : argmax_output_data,
-  } mutableCopy];
-  [graph runWithMTLCommandQueue:command_queue
-                          feeds:@{}
-               targetOperations:nil
-              resultsDictionary:results];
-  if (results == nil) {
-    return Status::internal_error("MPSGraph smoke execution returned no results");
-  }
-
-  const auto* sum_output = static_cast<const float*>(sum_buffer.contents);
-  std::int64_t argmax_output = -1;
-  const void* argmax_contents = argmax_buffer.contents;
-  switch (argmax.dataType) {
-    case MPSDataTypeInt64: {
-      argmax_output = *static_cast<const std::int64_t*>(argmax_contents);
-      break;
-    }
-    case MPSDataTypeInt32: {
-      argmax_output = static_cast<std::int64_t>(*static_cast<const std::int32_t*>(
-        argmax_contents));
-      break;
-    }
-    case MPSDataTypeUInt64: {
-      argmax_output = static_cast<std::int64_t>(*static_cast<const std::uint64_t*>(
-        argmax_contents));
-      break;
-    }
-    case MPSDataTypeUInt32: {
-      argmax_output = static_cast<std::int64_t>(*static_cast<const std::uint32_t*>(
-        argmax_contents));
-      break;
-    }
-    default:
-      return Status::internal_error("MPSGraph smoke argmax returned unsupported dtype");
-  }
-
-  if (sum_output[0] != 4.0F || sum_output[1] != 6.0F) {
-    return Status::internal_error("MPSGraph smoke addition produced unexpected results");
-  }
-  if (argmax_output != 1) {
-    return Status::internal_error("MPSGraph smoke argmax produced unexpected result");
+  if (buffer.byte_size() < byte_count.value()) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " buffer is too small");
   }
   return Status::ok();
 }
 
+Status validate_positive_dim(std::size_t value, const char* name) {
+  if (value == 0) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " must be greater than zero");
+  }
+  if (value > static_cast<std::size_t>(std::numeric_limits<NSInteger>::max())) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " exceeds NSInteger range");
+  }
+  return Status::ok();
+}
+
+MPSShape* make_shape(std::initializer_list<std::size_t> dims) {
+  NSMutableArray<NSNumber*>* shape =
+    [NSMutableArray arrayWithCapacity:static_cast<NSUInteger>(dims.size())];
+  for (const auto dim : dims) {
+    [shape addObject:@(static_cast<NSInteger>(dim))];
+  }
+  return shape;
+}
+
+Status run_graph_with_results(MPSGraph* graph, id<MTLCommandQueue> queue,
+                              NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds,
+                              MPSGraphTensor* output_tensor,
+                              MPSGraphTensorData* output_data) {
+  if (graph == nil || queue == nil || output_tensor == nil || output_data == nil) {
+    return Status::unavailable("failed to bind MPSGraph execution");
+  }
+
+  @try {
+    NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = [@{
+      output_tensor : output_data,
+    } mutableCopy];
+    [graph runWithMTLCommandQueue:queue
+                            feeds:feeds
+                 targetOperations:nil
+                resultsDictionary:results];
+    [results release];
+  } @catch (NSException* exception) {
+    return Status::internal_error(exception_to_string(exception));
+  }
+
+  return Status::ok();
+}
+
+Status check_close(float actual, float expected, const char* name) {
+  if (std::abs(actual - expected) > 1e-4F) {
+    std::ostringstream output;
+    output << "MPSGraph " << name << " expected " << expected << " but got " << actual;
+    return Status::internal_error(output.str());
+  }
+  return Status::ok();
+}
+
+Result<MpsGraphBuffer> make_f32_buffer(const MpsGraphContext& context,
+                                       const std::vector<float>& values) {
+  auto buffer_result = context.make_buffer(values.size() * sizeof(float));
+  if (!buffer_result.is_ok()) {
+    return buffer_result.status();
+  }
+  auto buffer = std::move(buffer_result.value());
+  const auto copy_status =
+    context.copy_to_buffer(buffer, values.data(), values.size() * sizeof(float));
+  if (!copy_status.is_ok()) {
+    return copy_status;
+  }
+  return buffer;
+}
+
+Result<std::vector<float>> read_f32_buffer(const MpsGraphContext& context,
+                                           const MpsGraphBuffer& buffer,
+                                           std::size_t values) {
+  std::vector<float> output(values);
+  const auto status = context.copy_from_buffer(buffer, output.data(),
+                                              values * sizeof(float));
+  if (!status.is_ok()) {
+    return status;
+  }
+  return output;
+}
+
+BackendInfo build_backend_info() {
+  BackendInfo info{};
+  info.compiled = true;
+
+  @autoreleasepool {
+    id<MTLDevice> metal_device = MTLCreateSystemDefaultDevice();
+    if (metal_device == nil) {
+      info.failure_reason = "Metal device is not available";
+      return info;
+    }
+
+    MPSGraphDevice* graph_device = [MPSGraphDevice deviceWithMTLDevice:metal_device];
+    if (graph_device == nil) {
+      info.failure_reason = "failed to create MPSGraphDevice from Metal device";
+      [metal_device release];
+      return info;
+    }
+
+    id<MTLCommandQueue> command_queue = [metal_device newCommandQueue];
+    if (command_queue == nil) {
+      info.failure_reason = "failed to create Metal command queue for MPSGraph";
+      [metal_device release];
+      return info;
+    }
+
+    info.available = true;
+    info.graph_ready = true;
+    info.device_name = nsstring_to_string(metal_device.name);
+    info.recommended_max_working_set_size =
+      static_cast<std::uint64_t>(metal_device.recommendedMaxWorkingSetSize);
+    info.low_power = metal_device.lowPower;
+    info.headless = metal_device.headless;
+    info.removable = metal_device.removable;
+
+    [command_queue release];
+    [metal_device release];
+  }
+
+  return info;
+}
+
 }  // namespace
+
+struct MpsGraphBuffer::Impl {
+  id<MTLBuffer> buffer{nil};
+  std::size_t byte_size{0};
+
+  ~Impl() {
+    if (buffer != nil) {
+      [buffer release];
+    }
+  }
+};
+
+struct MpsGraphContext::Impl {
+  id<MTLDevice> device{nil};
+  id<MTLCommandQueue> queue{nil};
+  MPSGraphDevice* graph_device{nil};
+
+  ~Impl() {
+    if (graph_device != nil) {
+      [graph_device release];
+    }
+    if (queue != nil) {
+      [queue release];
+    }
+    if (device != nil) {
+      [device release];
+    }
+  }
+};
+
+MpsGraphBuffer::MpsGraphBuffer() = default;
+MpsGraphBuffer::~MpsGraphBuffer() = default;
+MpsGraphBuffer::MpsGraphBuffer(MpsGraphBuffer&& other) noexcept = default;
+MpsGraphBuffer& MpsGraphBuffer::operator=(MpsGraphBuffer&& other) noexcept = default;
+MpsGraphBuffer::MpsGraphBuffer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+bool MpsGraphBuffer::valid() const {
+  return impl_ != nullptr && impl_->buffer != nil;
+}
+
+std::size_t MpsGraphBuffer::byte_size() const {
+  return impl_ == nullptr ? 0 : impl_->byte_size;
+}
+
+MpsGraphContext::MpsGraphContext() = default;
+MpsGraphContext::~MpsGraphContext() = default;
+MpsGraphContext::MpsGraphContext(MpsGraphContext&& other) noexcept = default;
+MpsGraphContext& MpsGraphContext::operator=(MpsGraphContext&& other) noexcept = default;
+MpsGraphContext::MpsGraphContext(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+Result<MpsGraphContext> MpsGraphContext::create() {
+  @autoreleasepool {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil) {
+      return Status::unavailable("Metal returned no default device");
+    }
+
+    MPSGraphDevice* graph_device = [MPSGraphDevice deviceWithMTLDevice:device];
+    if (graph_device == nil) {
+      [device release];
+      return Status::unavailable("failed to create MPSGraphDevice from Metal device");
+    }
+
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    if (queue == nil) {
+      [device release];
+      return Status::unavailable("failed to create Metal command queue for MPSGraph");
+    }
+
+    auto impl = std::make_unique<Impl>();
+    impl->device = device;
+    impl->queue = queue;
+    impl->graph_device = [graph_device retain];
+    return MpsGraphContext(std::move(impl));
+  }
+}
+
+bool MpsGraphContext::valid() const {
+  return impl_ != nullptr && impl_->device != nil && impl_->queue != nil &&
+         impl_->graph_device != nil;
+}
+
+Result<MpsGraphBuffer> MpsGraphContext::make_buffer(std::size_t byte_size) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  if (byte_size == 0) {
+    return Status::invalid_argument("MPSGraph buffer size must be greater than zero");
+  }
+  if (byte_size > static_cast<std::size_t>(std::numeric_limits<NSUInteger>::max())) {
+    return Status::invalid_argument("MPSGraph buffer size exceeds NSUInteger range");
+  }
+
+  @autoreleasepool {
+    id<MTLBuffer> buffer =
+      [impl_->device newBufferWithLength:static_cast<NSUInteger>(byte_size)
+                                 options:MTLResourceStorageModeShared];
+    if (buffer == nil) {
+      return Status::unavailable("failed to allocate MPSGraph Metal buffer");
+    }
+
+    auto impl = std::make_unique<MpsGraphBuffer::Impl>();
+    impl->buffer = buffer;
+    impl->byte_size = byte_size;
+    return MpsGraphBuffer(std::move(impl));
+  }
+}
+
+Status MpsGraphContext::copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
+                                       std::size_t byte_size) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  if (!buffer.valid()) {
+    return Status::invalid_argument("MPSGraph buffer is not initialized");
+  }
+  if (data == nullptr) {
+    return Status::invalid_argument("MPSGraph copy source must not be null");
+  }
+  if (byte_size > buffer.byte_size()) {
+    return Status::invalid_argument("MPSGraph copy size exceeds destination buffer size");
+  }
+
+  std::memcpy([buffer.impl_->buffer contents], data, byte_size);
+  return Status::ok();
+}
+
+Status MpsGraphContext::copy_from_buffer(const MpsGraphBuffer& buffer, void* data,
+                                         std::size_t byte_size) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  if (!buffer.valid()) {
+    return Status::invalid_argument("MPSGraph buffer is not initialized");
+  }
+  if (data == nullptr) {
+    return Status::invalid_argument("MPSGraph copy destination must not be null");
+  }
+  if (byte_size > buffer.byte_size()) {
+    return Status::invalid_argument("MPSGraph copy size exceeds source buffer size");
+  }
+
+  std::memcpy(data, [buffer.impl_->buffer contents], byte_size);
+  return Status::ok();
+}
+
+Status MpsGraphContext::embedding_f32(const MpsGraphBuffer& weight,
+                                      std::size_t vocab_size,
+                                      std::size_t hidden_size,
+                                      std::int64_t token,
+                                      MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  if (token < 0 || static_cast<std::size_t>(token) >= vocab_size) {
+    return Status::invalid_argument("MPSGraph embedding token is out of range");
+  }
+  auto vocab_status = validate_positive_dim(vocab_size, "embedding vocab_size");
+  if (!vocab_status.is_ok()) {
+    return vocab_status;
+  }
+  auto hidden_status = validate_positive_dim(hidden_size, "embedding hidden_size");
+  if (!hidden_status.is_ok()) {
+    return hidden_status;
+  }
+  std::size_t weight_values = 0;
+  if (!checked_mul(vocab_size, hidden_size, weight_values)) {
+    return Status::invalid_argument("MPSGraph embedding weight element count overflow");
+  }
+  auto weight_status = validate_f32_buffer(weight, weight_values, "embedding weight");
+  if (!weight_status.is_ok()) {
+    return weight_status;
+  }
+  auto output_status = validate_f32_buffer(output, hidden_size, "embedding output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* weight_shape = make_shape({vocab_size, hidden_size});
+    MPSShape* token_shape = make_shape({1});
+    MPSShape* output_shape = make_shape({hidden_size});
+    MPSGraphTensor* weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    const std::int32_t token_index = static_cast<std::int32_t>(token);
+    NSData* token_data = [NSData dataWithBytes:&token_index length:sizeof(token_index)];
+    MPSGraphTensor* indices_tensor =
+      [graph constantWithData:token_data shape:token_shape dataType:MPSDataTypeInt32];
+    MPSGraphTensor* gathered = [graph gatherWithUpdatesTensor:weight_tensor
+                                                indicesTensor:indices_tensor
+                                                         axis:0
+                                              batchDimensions:0
+                                                         name:nil];
+    MPSGraphTensor* result = [graph reshapeTensor:gathered withShape:output_shape name:nil];
+
+    MPSGraphTensorData* weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      weight_tensor : weight_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [weight_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::rms_norm_f32(const MpsGraphBuffer& input,
+                                     const MpsGraphBuffer& weight,
+                                     std::size_t size, float eps,
+                                     MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto size_status = validate_positive_dim(size, "rms norm size");
+  if (!size_status.is_ok()) {
+    return size_status;
+  }
+  auto input_status = validate_f32_buffer(input, size, "rms norm input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto weight_status = validate_f32_buffer(weight, size, "rms norm weight");
+  if (!weight_status.is_ok()) {
+    return weight_status;
+  }
+  auto output_status = validate_f32_buffer(output, size, "rms norm output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* vector_shape = make_shape({size});
+    MPSGraphTensor* input_tensor =
+      [graph placeholderWithShape:vector_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* weight_tensor =
+      [graph placeholderWithShape:vector_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* squared = [graph squareWithTensor:input_tensor name:nil];
+    MPSGraphTensor* sum = [graph reductionSumWithTensor:squared axis:0 name:nil];
+    MPSGraphTensor* denom =
+      [graph constantWithScalar:static_cast<double>(size)
+                          shape:@[ @1 ]
+                       dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* mean =
+      [graph divisionWithPrimaryTensor:sum secondaryTensor:denom name:nil];
+    MPSGraphTensor* eps_tensor =
+      [graph constantWithScalar:static_cast<double>(eps)
+                          shape:@[ @1 ]
+                       dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* variance =
+      [graph additionWithPrimaryTensor:mean secondaryTensor:eps_tensor name:nil];
+    MPSGraphTensor* scale = [graph reciprocalSquareRootWithTensor:variance name:nil];
+    MPSGraphTensor* normalized =
+      [graph multiplicationWithPrimaryTensor:input_tensor secondaryTensor:scale name:nil];
+    MPSGraphTensor* result =
+      [graph multiplicationWithPrimaryTensor:normalized secondaryTensor:weight_tensor name:nil];
+
+    MPSGraphTensorData* input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
+                                             shape:vector_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:weight.impl_->buffer
+                                             shape:vector_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:vector_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      input_tensor : input_data,
+      weight_tensor : weight_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [input_data release];
+    [weight_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::matvec_f32(const MpsGraphBuffer& weight,
+                                   std::size_t rows, std::size_t cols,
+                                   const MpsGraphBuffer& input,
+                                   MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto rows_status = validate_positive_dim(rows, "matvec rows");
+  if (!rows_status.is_ok()) {
+    return rows_status;
+  }
+  auto cols_status = validate_positive_dim(cols, "matvec cols");
+  if (!cols_status.is_ok()) {
+    return cols_status;
+  }
+  std::size_t weight_values = 0;
+  if (!checked_mul(rows, cols, weight_values)) {
+    return Status::invalid_argument("MPSGraph matvec weight element count overflow");
+  }
+  auto weight_status = validate_f32_buffer(weight, weight_values, "matvec weight");
+  if (!weight_status.is_ok()) {
+    return weight_status;
+  }
+  auto input_status = validate_f32_buffer(input, cols, "matvec input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto output_status = validate_f32_buffer(output, rows, "matvec output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* weight_shape = make_shape({rows, cols});
+    MPSShape* input_shape = make_shape({cols, 1});
+    MPSShape* output_shape = make_shape({rows});
+    MPSGraphTensor* weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* input_tensor =
+      [graph placeholderWithShape:input_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* product =
+      [graph matrixMultiplicationWithPrimaryTensor:weight_tensor
+                                   secondaryTensor:input_tensor
+                                              name:nil];
+    MPSGraphTensor* result = [graph reshapeTensor:product withShape:output_shape name:nil];
+
+    MPSGraphTensorData* weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
+                                             shape:input_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      weight_tensor : weight_data,
+      input_tensor : input_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [weight_data release];
+    [input_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
+                                     const MpsGraphBuffer& up,
+                                     std::size_t size,
+                                     MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto size_status = validate_positive_dim(size, "silu size");
+  if (!size_status.is_ok()) {
+    return size_status;
+  }
+  auto gate_status = validate_f32_buffer(gate, size, "silu gate");
+  if (!gate_status.is_ok()) {
+    return gate_status;
+  }
+  auto up_status = validate_f32_buffer(up, size, "silu up");
+  if (!up_status.is_ok()) {
+    return up_status;
+  }
+  auto output_status = validate_f32_buffer(output, size, "silu output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* shape = make_shape({size});
+    MPSGraphTensor* gate_tensor =
+      [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* up_tensor =
+      [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* sigmoid = [graph sigmoidWithTensor:gate_tensor name:nil];
+    MPSGraphTensor* silu =
+      [graph multiplicationWithPrimaryTensor:gate_tensor secondaryTensor:sigmoid name:nil];
+    MPSGraphTensor* result =
+      [graph multiplicationWithPrimaryTensor:silu secondaryTensor:up_tensor name:nil];
+
+    MPSGraphTensorData* gate_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:gate.impl_->buffer
+                                             shape:shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* up_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:up.impl_->buffer
+                                             shape:shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      gate_tensor : gate_data,
+      up_tensor : up_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [gate_data release];
+    [up_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
+                                const MpsGraphBuffer& rhs,
+                                std::size_t size,
+                                MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto size_status = validate_positive_dim(size, "add size");
+  if (!size_status.is_ok()) {
+    return size_status;
+  }
+  auto lhs_status = validate_f32_buffer(lhs, size, "add lhs");
+  if (!lhs_status.is_ok()) {
+    return lhs_status;
+  }
+  auto rhs_status = validate_f32_buffer(rhs, size, "add rhs");
+  if (!rhs_status.is_ok()) {
+    return rhs_status;
+  }
+  auto output_status = validate_f32_buffer(output, size, "add output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* shape = make_shape({size});
+    MPSGraphTensor* lhs_tensor =
+      [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* rhs_tensor =
+      [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* result =
+      [graph additionWithPrimaryTensor:lhs_tensor secondaryTensor:rhs_tensor name:nil];
+
+    MPSGraphTensorData* lhs_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:lhs.impl_->buffer
+                                             shape:shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* rhs_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:rhs.impl_->buffer
+                                             shape:shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      lhs_tensor : lhs_data,
+      rhs_tensor : rhs_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [lhs_data release];
+    [rhs_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
 
 BackendInfo query_backend() { return build_backend_info(); }
 
@@ -193,7 +733,158 @@ Status run_operator_smoke_test() {
                            : info.failure_reason;
     return Status::unavailable(message);
   }
-  return run_smoke_graph();
+
+  auto context_result = MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return context_result.status();
+  }
+  auto context = std::move(context_result.value());
+
+  auto embedding_weight = make_f32_buffer(context, {1.0F, 2.0F, 3.0F, 4.0F});
+  if (!embedding_weight.is_ok()) {
+    return embedding_weight.status();
+  }
+  auto embedding_output = context.make_buffer(sizeof(float) * 2U);
+  if (!embedding_output.is_ok()) {
+    return embedding_output.status();
+  }
+  auto embedding_buffer = std::move(embedding_output.value());
+  auto status =
+    context.embedding_f32(embedding_weight.value(), 2, 2, 1, embedding_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  auto output = read_f32_buffer(context, embedding_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 3.0F, "embedding[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 4.0F, "embedding[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto norm_input = make_f32_buffer(context, {1.0F, 1.0F});
+  auto norm_weight = make_f32_buffer(context, {2.0F, 3.0F});
+  if (!norm_input.is_ok()) {
+    return norm_input.status();
+  }
+  if (!norm_weight.is_ok()) {
+    return norm_weight.status();
+  }
+  auto norm_output = context.make_buffer(sizeof(float) * 2U);
+  if (!norm_output.is_ok()) {
+    return norm_output.status();
+  }
+  auto norm_buffer = std::move(norm_output.value());
+  status = context.rms_norm_f32(norm_input.value(), norm_weight.value(), 2, 0.0F,
+                                norm_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, norm_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 2.0F, "rms_norm[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 3.0F, "rms_norm[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto matvec_weight = make_f32_buffer(context, {1.0F, 2.0F, 3.0F, 1.0F});
+  auto matvec_input = make_f32_buffer(context, {3.0F, 4.0F});
+  if (!matvec_weight.is_ok()) {
+    return matvec_weight.status();
+  }
+  if (!matvec_input.is_ok()) {
+    return matvec_input.status();
+  }
+  auto matvec_output = context.make_buffer(sizeof(float) * 2U);
+  if (!matvec_output.is_ok()) {
+    return matvec_output.status();
+  }
+  auto matvec_buffer = std::move(matvec_output.value());
+  status = context.matvec_f32(matvec_weight.value(), 2, 2, matvec_input.value(),
+                              matvec_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, matvec_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 11.0F, "matvec[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 13.0F, "matvec[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto gate = make_f32_buffer(context, {0.0F, 1.0F});
+  auto up = make_f32_buffer(context, {5.0F, 6.0F});
+  if (!gate.is_ok()) {
+    return gate.status();
+  }
+  if (!up.is_ok()) {
+    return up.status();
+  }
+  auto silu_output = context.make_buffer(sizeof(float) * 2U);
+  if (!silu_output.is_ok()) {
+    return silu_output.status();
+  }
+  auto silu_buffer = std::move(silu_output.value());
+  status = context.silu_mul_f32(gate.value(), up.value(), 2, silu_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, silu_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 0.0F, "silu[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 6.0F / (1.0F + std::exp(-1.0F)), "silu[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto lhs = make_f32_buffer(context, {1.0F, 2.0F});
+  auto rhs = make_f32_buffer(context, {3.0F, 4.0F});
+  if (!lhs.is_ok()) {
+    return lhs.status();
+  }
+  if (!rhs.is_ok()) {
+    return rhs.status();
+  }
+  auto add_output = context.make_buffer(sizeof(float) * 2U);
+  if (!add_output.is_ok()) {
+    return add_output.status();
+  }
+  auto add_buffer = std::move(add_output.value());
+  status = context.add_f32(lhs.value(), rhs.value(), 2, add_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, add_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 4.0F, "add[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  return check_close(output.value()[1], 6.0F, "add[1]");
 }
 
 }  // namespace toyllm::mpsgraph
