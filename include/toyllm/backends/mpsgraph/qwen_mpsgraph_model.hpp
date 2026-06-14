@@ -93,7 +93,7 @@ class QwenMpsGraphModel {
     const MpsGraphContext& context, std::int64_t token, std::size_t position,
     QwenMpsGraphRunState& state) const;
   [[nodiscard]] Result<std::int32_t> debug_greedy_next_token(
-    const MpsGraphContext& context, const QwenMpsGraphRunState& state) const;
+    const MpsGraphContext& context, QwenMpsGraphRunState& state) const;
 
  private:
   [[nodiscard]] Status upload_core_weights(const MpsGraphContext& context);
@@ -104,7 +104,7 @@ class QwenMpsGraphModel {
                                    std::size_t layer_index, std::size_t position,
                                    QwenMpsGraphRunState& state) const;
   [[nodiscard]] Status compute_logits(const MpsGraphContext& context,
-                                      const QwenMpsGraphRunState& state) const;
+                                      QwenMpsGraphRunState& state) const;
   [[nodiscard]] bool forward_weights_uploaded() const;
   void refresh_info();
 
