@@ -812,6 +812,8 @@ void test_qwen_mpsgraph_model_forward_token() {
   assert(model.is_ok());
   auto state = model.value().create_run_state(context, 1);
   assert(state.is_ok());
+  assert(model.value().forward_token(context, 1, 0, state.value()).is_ok());
+  assert(model.value().greedy_next_token(context, state.value()).is_ok());
 
   const auto hidden = model.value().debug_forward_token(context, 1, 0, state.value());
   assert(hidden.is_ok());
@@ -846,6 +848,32 @@ void test_qwen_mpsgraph_model_forward_token() {
   const auto next_token = model.value().debug_greedy_next_token(context, state.value());
   assert(next_token.is_ok());
   assert(next_token.value() == 0);
+
+  std::error_code ec;
+  std::filesystem::remove_all(model_dir, ec);
+}
+
+void test_qwen_mpsgraph_model_prefill_token_ids() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  auto model_dir = create_tiny_forward_model_dir("kraken-infer-qwen-mpsgraph-prefill-smoke");
+  write_tiny_qwen_mpsgraph_forward_safetensors(model_dir / "model.safetensors");
+
+  auto model = toyllm::mpsgraph::QwenMpsGraphModel::load_all_weights(model_dir, context);
+  assert(model.is_ok());
+  auto state = model.value().create_run_state(context, 2);
+  assert(state.is_ok());
+  assert(model.value().prefill_token_ids(context, {1, 2}, state.value()).is_ok());
+  assert(state.value().kv_cache.stats().used_tokens == 2);
+
+  const auto next_token = model.value().debug_greedy_next_token(context, state.value());
+  assert(next_token.is_ok());
+  assert(next_token.value() >= 0);
+  assert(next_token.value() < 4);
 
   std::error_code ec;
   std::filesystem::remove_all(model_dir, ec);
@@ -926,6 +954,7 @@ int main() {
   test_qwen_mpsgraph_model_core_weight_load();
   test_qwen_mpsgraph_model_all_weight_load();
   test_qwen_mpsgraph_model_forward_token();
+  test_qwen_mpsgraph_model_prefill_token_ids();
   test_mpsgraph_generation_initializes_without_fallback();
 
   std::cout << "smoke tests passed\n";

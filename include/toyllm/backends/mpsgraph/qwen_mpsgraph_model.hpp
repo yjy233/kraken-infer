@@ -89,6 +89,14 @@ class QwenMpsGraphModel {
 
   [[nodiscard]] Result<std::vector<float>> debug_embed_token(
     const MpsGraphContext& context, std::int64_t token) const;
+  [[nodiscard]] Status forward_token(const MpsGraphContext& context, std::int64_t token,
+                                     std::size_t position,
+                                     QwenMpsGraphRunState& state) const;
+  [[nodiscard]] Status prefill_token_ids(const MpsGraphContext& context,
+                                         const std::vector<std::int64_t>& tokens,
+                                         QwenMpsGraphRunState& state) const;
+  [[nodiscard]] Status greedy_next_token(const MpsGraphContext& context,
+                                         QwenMpsGraphRunState& state) const;
   [[nodiscard]] Result<std::vector<float>> debug_forward_token(
     const MpsGraphContext& context, std::int64_t token, std::size_t position,
     QwenMpsGraphRunState& state) const;

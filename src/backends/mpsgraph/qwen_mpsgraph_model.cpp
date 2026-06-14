@@ -277,9 +277,9 @@ Result<std::vector<float>> QwenMpsGraphModel::debug_embed_token(
   return values;
 }
 
-Result<std::vector<float>> QwenMpsGraphModel::debug_forward_token(
-  const MpsGraphContext& context, std::int64_t token, std::size_t position,
-  QwenMpsGraphRunState& state) const {
+Status QwenMpsGraphModel::forward_token(const MpsGraphContext& context, std::int64_t token,
+                                        std::size_t position,
+                                        QwenMpsGraphRunState& state) const {
   if (!forward_weights_uploaded()) {
     return Status::invalid_argument("MPSGraph Qwen weights are not fully uploaded");
   }
@@ -312,7 +312,49 @@ Result<std::vector<float>> QwenMpsGraphModel::debug_forward_token(
   if (!status.is_ok()) {
     return status;
   }
+  return Status::ok();
+}
 
+Status QwenMpsGraphModel::greedy_next_token(const MpsGraphContext& context,
+                                            QwenMpsGraphRunState& state) const {
+  if (!all_weights_uploaded()) {
+    return Status::invalid_argument("MPSGraph Qwen all weights are not uploaded");
+  }
+  auto status = compute_logits(context, state);
+  if (!status.is_ok()) {
+    return status;
+  }
+  return context.argmax_i32(state.logits, static_cast<std::size_t>(bundle_.model.vocab_size),
+                            state.next_token);
+}
+
+Status QwenMpsGraphModel::prefill_token_ids(
+  const MpsGraphContext& context, const std::vector<std::int64_t>& tokens,
+  QwenMpsGraphRunState& state) const {
+  if (tokens.empty()) {
+    return Status::invalid_argument("MPSGraph Qwen prefill tokens must not be empty");
+  }
+  if (tokens.size() > state.capacity_tokens) {
+    return Status::invalid_argument("MPSGraph Qwen prefill exceeds run state capacity");
+  }
+  for (std::size_t position = 0; position < tokens.size(); ++position) {
+    auto status = forward_token(context, tokens[position], position, state);
+    if (!status.is_ok()) {
+      return status;
+    }
+  }
+  return Status::ok();
+}
+
+Result<std::vector<float>> QwenMpsGraphModel::debug_forward_token(
+  const MpsGraphContext& context, std::int64_t token, std::size_t position,
+  QwenMpsGraphRunState& state) const {
+  const auto status = forward_token(context, token, position, state);
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  const auto hidden_size = static_cast<std::size_t>(bundle_.model.hidden_size);
   std::vector<float> values(hidden_size);
   const auto read_status =
     context.copy_from_buffer(state.normed, values.data(), values.size() * sizeof(float));
@@ -324,15 +366,7 @@ Result<std::vector<float>> QwenMpsGraphModel::debug_forward_token(
 
 Result<std::int32_t> QwenMpsGraphModel::debug_greedy_next_token(
   const MpsGraphContext& context, QwenMpsGraphRunState& state) const {
-  if (!all_weights_uploaded()) {
-    return Status::invalid_argument("MPSGraph Qwen all weights are not uploaded");
-  }
-  auto status = compute_logits(context, state);
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = context.argmax_i32(state.logits, static_cast<std::size_t>(bundle_.model.vocab_size),
-                              state.next_token);
+  const auto status = greedy_next_token(context, state);
   if (!status.is_ok()) {
     return status;
   }
