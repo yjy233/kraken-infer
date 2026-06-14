@@ -250,11 +250,13 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     result.implemented = true;
     result.text = tokenizer.decode(generated);
     result.request_id = profiler.request_id();
+    result.finish_reason = generation_status[1] == 1 ? "stop" : "length";
+    result.prompt_tokens = prompt_tokens.size();
+    result.generated_tokens = generated.size();
     result.kv_cache = to_public_report(state.kv_cache.stats());
     result.kv_cache_verified = false;
     profiler.set_metadata("generated_tokens", generated.size());
-    profiler.set_metadata("mpsgraph_finish_reason",
-                          generation_status[1] == 1 ? "stop" : "length");
+    profiler.set_metadata("mpsgraph_finish_reason", result.finish_reason);
     const auto transfers = context.transfer_stats();
     profiler.set_metadata("mpsgraph_h2d_calls",
                           static_cast<std::size_t>(transfers.host_to_device_calls));

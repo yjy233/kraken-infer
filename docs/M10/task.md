@@ -218,6 +218,7 @@ MPSGraph API 表达和执行。
 - [x] strict mode 下 `stream=true` 返回明确 unsupported
 - [x] 非 streaming chat completion 可返回文本
 - [x] completion usage token 统计不依赖中间 readback
+- [x] gateway `finish_reason` / `usage` 使用 runtime 结果
 
 ### Debug And Profiling
 
@@ -251,6 +252,7 @@ MPSGraph API 表达和执行。
 - [x] tiny model `hello`, 1 token greedy vs CPU
 - [x] tiny model `hello`, 2 tokens greedy vs CPU
 - [x] tiny EOS 首 token 走 device-side status
+- [x] MPSGraph runtime result 暴露 `finish_reason` / token counts
 - [x] no fallback test
 - [x] no per-token readback instrumentation test
 

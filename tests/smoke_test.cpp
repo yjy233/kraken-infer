@@ -1131,6 +1131,9 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(result.is_ok());
   assert(result.value().implemented);
   assert(result.value().text == "aa");
+  assert(result.value().finish_reason == "length");
+  assert(result.value().generated_tokens == 2);
+  assert(result.value().prompt_tokens > 0);
   assert(result.value().kv_cache.available);
   assert(result.value().kv_cache.used_tokens > 0);
   assert(std::filesystem::exists(result.value().profile_dir / "summary.json"));
@@ -1149,6 +1152,8 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   const auto cpu_result = toyllm::generate_cpu(cpu_request);
   assert(cpu_result.is_ok());
   assert(cpu_result.value().text == result.value().text);
+  assert(cpu_result.value().finish_reason == "length");
+  assert(cpu_result.value().generated_tokens == 2);
 
   request.sampling.do_sample = true;
   const auto sampled = toyllm::generate_cpu(request);
@@ -1187,6 +1192,9 @@ void test_mpsgraph_generation_device_side_eos_status() {
   assert(result.is_ok());
   assert(result.value().implemented);
   assert(result.value().text.empty());
+  assert(result.value().finish_reason == "stop");
+  assert(result.value().generated_tokens == 0);
+  assert(result.value().prompt_tokens > 0);
   assert(std::filesystem::exists(result.value().profile_dir / "summary.json"));
   const auto summary_json = read_text_file(result.value().profile_dir / "summary.json");
   assert(summary_json.find("\"generated_tokens\":0") != std::string::npos);

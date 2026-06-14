@@ -73,6 +73,9 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
                          &profiler);
     result.text = output.text;
     result.request_id = profiler.request_id();
+    result.finish_reason = output.generated_tokens >= request.max_new_tokens ? "length" : "stop";
+    result.prompt_tokens = output.prompt_tokens;
+    result.generated_tokens = output.generated_tokens;
     result.kv_cache = to_public_report(output.kv_cache);
     result.kv_cache_verified = output.kv_cache_verified;
     profiler.set_metadata("prompt_tokens", output.prompt_tokens);

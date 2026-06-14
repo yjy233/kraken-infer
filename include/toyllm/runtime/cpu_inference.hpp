@@ -58,6 +58,9 @@ struct CpuGenerationResult {
   bool implemented{false};
   std::string text;
   std::string request_id;
+  std::string finish_reason{"stop"};
+  std::size_t prompt_tokens{0};
+  std::size_t generated_tokens{0};
   std::filesystem::path profile_dir;
   std::vector<std::string> missing_dependencies;
   CpuKvCacheReport kv_cache;

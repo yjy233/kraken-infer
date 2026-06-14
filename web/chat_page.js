@@ -36,6 +36,9 @@ function applyConfig(config) {
   if (hasDeviceOption(device)) {
     deviceInput.value = device;
   }
+  const mpsgraphSelected = deviceInput.value === "mpsgraph";
+  streamInput.checked = !mpsgraphSelected;
+  streamInput.disabled = mpsgraphSelected;
 }
 
 async function loadConfig() {
@@ -82,7 +85,7 @@ function requestBody(history) {
     model: modelInput.value.trim() || defaults.model,
     messages: history,
     max_completion_tokens: maxTokens,
-    stream: streamInput.checked,
+    stream: streamInput.checked && !streamInput.disabled,
     enable_thinking: thinkingInput.checked,
     device: deviceInput.value
   };
@@ -91,6 +94,12 @@ function requestBody(history) {
   }
   return body;
 }
+
+deviceInput.addEventListener("change", () => {
+  const mpsgraphSelected = deviceInput.value === "mpsgraph";
+  streamInput.checked = !mpsgraphSelected;
+  streamInput.disabled = mpsgraphSelected;
+});
 
 function contentFromPayload(payload) {
   return payload && payload.choices && payload.choices[0] &&

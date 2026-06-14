@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -925,25 +926,33 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
 }
 
 std::string completion_body(std::string_view id, std::int64_t created, std::string_view model,
-                            std::string_view text) {
+                            std::string_view text, std::string_view finish_reason,
+                            std::size_t prompt_tokens, std::size_t completion_tokens) {
   std::ostringstream output;
   output << "{\"id\":\"" << json_escape(id) << "\",\"object\":\"text_completion\",";
   output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
          << "\",\"choices\":[{\"index\":0,\"text\":\"" << json_escape(text)
-         << "\",\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,"
-            "\"completion_tokens\":0,\"total_tokens\":0}}";
+         << "\",\"finish_reason\":\"" << json_escape(finish_reason)
+         << "\"}],\"usage\":{\"prompt_tokens\":" << prompt_tokens
+         << ",\"completion_tokens\":" << completion_tokens
+         << ",\"total_tokens\":" << (prompt_tokens + completion_tokens) << "}}";
   return output.str();
 }
 
 std::string chat_completion_body(std::string_view id, std::int64_t created,
-                                 std::string_view model, std::string_view content) {
+                                 std::string_view model, std::string_view content,
+                                 std::string_view finish_reason,
+                                 std::size_t prompt_tokens,
+                                 std::size_t completion_tokens) {
   std::ostringstream output;
   output << "{\"id\":\"" << json_escape(id) << "\",\"object\":\"chat.completion\",";
   output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
          << "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\""
          << json_escape(content)
-         << "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,"
-            "\"completion_tokens\":0,\"total_tokens\":0}}";
+         << "\"},\"finish_reason\":\"" << json_escape(finish_reason)
+         << "\"}],\"usage\":{\"prompt_tokens\":" << prompt_tokens
+         << ",\"completion_tokens\":" << completion_tokens
+         << ",\"total_tokens\":" << (prompt_tokens + completion_tokens) << "}}";
   return output.str();
 }
 
@@ -1159,7 +1168,11 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
                          {{"X-Request-Id", std::string{request_id}}});
       return;
     }
-    send_json_response(fd, 200, completion_body(id, created, request.model, result.value().text),
+    send_json_response(fd, 200,
+                       completion_body(id, created, request.model, result.value().text,
+                                       result.value().finish_reason,
+                                       result.value().prompt_tokens,
+                                       result.value().generated_tokens),
                        {{"X-Request-Id", std::string{request_id}}});
     return;
   }
@@ -1174,7 +1187,8 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
     send_sse(fd, "[DONE]");
     return;
   }
-  send_sse(fd, completion_stream_chunk(id, created, request.model, {}, "stop"));
+  send_sse(fd, completion_stream_chunk(id, created, request.model, {},
+                                       result.value().finish_reason));
   send_sse(fd, "[DONE]");
 }
 
@@ -1207,7 +1221,10 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
       return;
     }
     send_json_response(fd, 200,
-                       chat_completion_body(id, created, request.model, result.value().text),
+                       chat_completion_body(id, created, request.model, result.value().text,
+                                            result.value().finish_reason,
+                                            result.value().prompt_tokens,
+                                            result.value().generated_tokens),
                        {{"X-Request-Id", std::string{request_id}}});
     return;
   }
@@ -1223,7 +1240,8 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
     send_sse(fd, "[DONE]");
     return;
   }
-  send_sse(fd, stream_chunk(id, created, request.model, {}, false, "stop"));
+  send_sse(fd, stream_chunk(id, created, request.model, {}, false,
+                            result.value().finish_reason));
   send_sse(fd, "[DONE]");
 }
 
@@ -1410,6 +1428,7 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
   if (config.port <= 0 || config.port > 65535) {
     return Status::invalid_argument("gateway port must be in 1..65535");
   }
+  (void)::signal(SIGPIPE, SIG_IGN);
 
   const int server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
@@ -1418,6 +1437,10 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
 
   const int reuse = 1;
   (void)::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+#ifdef SO_NOSIGPIPE
+  const int no_sigpipe = 1;
+  (void)::setsockopt(server_fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
 
   sockaddr_in address{};
   address.sin_family = AF_INET;
@@ -1455,6 +1478,9 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
       ::close(server_fd);
       return status;
     }
+#ifdef SO_NOSIGPIPE
+    (void)::setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
     handle_client(client_fd, config);
     ::close(client_fd);
   }

@@ -368,3 +368,14 @@ web/                     Static browser chat page assets
 - Gateway usage token 统计当前返回 `0`。
 - Tool calling 只做 OpenAI-compatible 协议，不执行工具。
 - Vision、audio、embeddings、Responses API 不在当前范围。
+
+
+```
+source ~/.zshrc
+./build/debug/kraken-infer serve \
+  --model models/qwen3-0.6b \
+  --device mpsgraph \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --profile summary
+```
