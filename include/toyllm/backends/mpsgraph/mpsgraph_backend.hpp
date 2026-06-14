@@ -98,6 +98,14 @@ class MpsGraphContext {
                                const MpsGraphBuffer& rhs,
                                std::size_t size,
                                MpsGraphBuffer& output) const;
+  [[nodiscard]] Status write_kv_cache_f32(const MpsGraphBuffer& source,
+                                          MpsGraphBuffer& cache,
+                                          std::size_t layer,
+                                          std::size_t position,
+                                          std::size_t layers,
+                                          std::size_t capacity_tokens,
+                                          std::size_t kv_heads,
+                                          std::size_t head_dim) const;
   [[nodiscard]] Status attention_f32(const MpsGraphBuffer& query,
                                      const MpsGraphBuffer& key_cache,
                                      const MpsGraphBuffer& value_cache,

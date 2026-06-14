@@ -36,6 +36,11 @@ class MpsGraphKvCache {
                              std::size_t capacity_tokens,
                              std::size_t kv_heads,
                              std::size_t head_dim);
+  [[nodiscard]] Status store(const MpsGraphContext& context,
+                             std::size_t layer,
+                             std::size_t position,
+                             const MpsGraphBuffer& key,
+                             const MpsGraphBuffer& value);
   [[nodiscard]] Status mark_position_used(std::size_t position);
 
   [[nodiscard]] bool allocated() const;

@@ -160,6 +160,25 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
+                                           MpsGraphBuffer& cache,
+                                           std::size_t layer,
+                                           std::size_t position,
+                                           std::size_t layers,
+                                           std::size_t capacity_tokens,
+                                           std::size_t kv_heads,
+                                           std::size_t head_dim) const {
+  (void)source;
+  (void)cache;
+  (void)layer;
+  (void)position;
+  (void)layers;
+  (void)capacity_tokens;
+  (void)kv_heads;
+  (void)head_dim;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::attention_f32(const MpsGraphBuffer& query,
                                       const MpsGraphBuffer& key_cache,
                                       const MpsGraphBuffer& value_cache,

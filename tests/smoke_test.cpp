@@ -201,6 +201,33 @@ std::vector<float> read_mpsgraph_f32_buffer(
   return output;
 }
 
+void test_mpsgraph_kv_cache_store() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  toyllm::mpsgraph::MpsGraphKvCache cache;
+  assert(cache.reset(context, 1, 2, 1, 2).is_ok());
+
+  auto key = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F});
+  auto value = make_mpsgraph_f32_buffer(context, {3.0F, 4.0F});
+  assert(cache.store(context, 0, 1, key, value).is_ok());
+
+  auto key_values = read_mpsgraph_f32_buffer(context, cache.key_buffer(), 4);
+  auto value_values = read_mpsgraph_f32_buffer(context, cache.value_buffer(), 4);
+  assert_close(key_values[0], 0.0F);
+  assert_close(key_values[1], 0.0F);
+  assert_close(key_values[2], 1.0F);
+  assert_close(key_values[3], 2.0F);
+  assert_close(value_values[0], 0.0F);
+  assert_close(value_values[1], 0.0F);
+  assert_close(value_values[2], 3.0F);
+  assert_close(value_values[3], 4.0F);
+  assert(cache.stats().used_tokens == 2);
+}
+
 void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
   if (!context_result.is_ok()) {
@@ -557,6 +584,48 @@ std::filesystem::path create_tiny_model_dir(std::string_view name) {
   return model_dir;
 }
 
+std::filesystem::path create_tiny_forward_model_dir(std::string_view name) {
+  const auto model_dir = std::filesystem::temp_directory_path() / std::filesystem::path{name};
+  std::filesystem::remove_all(model_dir);
+  std::filesystem::create_directories(model_dir);
+
+  write_text_file(
+    model_dir / "config.json",
+    R"({
+      "architectures": ["Qwen3ForCausalLM"],
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "bos_token_id": 0,
+      "eos_token_id": 1,
+      "head_dim": 2,
+      "hidden_act": "silu",
+      "hidden_size": 4,
+      "initializer_range": 0.02,
+      "intermediate_size": 5,
+      "max_position_embeddings": 16,
+      "max_window_layers": 1,
+      "model_type": "qwen3",
+      "num_attention_heads": 2,
+      "num_hidden_layers": 1,
+      "num_key_value_heads": 1,
+      "rms_norm_eps": 1e-6,
+      "rope_theta": 10000,
+      "tie_word_embeddings": true,
+      "torch_dtype": "bfloat16",
+      "transformers_version": "test",
+      "use_cache": true,
+      "use_sliding_window": false,
+      "vocab_size": 4
+    })");
+  write_text_file(model_dir / "generation_config.json",
+                  R"({"bos_token_id":0,"do_sample":false,"eos_token_id":[1],"pad_token_id":0,"temperature":1.0,"top_k":0,"top_p":1.0})");
+  write_text_file(model_dir / "tokenizer.json",
+                  R"({"model":{"vocab":{"a":0,"b":1,"c":2,"d":3}},"added_tokens":[]})");
+  write_text_file(model_dir / "tokenizer_config.json", R"({"added_tokens_decoder":{}})");
+  write_text_file(model_dir / "vocab.json", R"({"a":0,"b":1,"c":2,"d":3})");
+  return model_dir;
+}
+
 void write_tiny_qwen_mpsgraph_safetensors(const std::filesystem::path& path) {
   write_bf16_safetensors(
     path,
@@ -580,6 +649,52 @@ void write_tiny_qwen_mpsgraph_safetensors(const std::filesystem::path& path) {
                                                      1.0F, 1.0F, 1.0F}},
       {"model.layers.0.mlp.down_proj.weight", {2, 3}, {1.0F, 0.0F, 0.0F,
                                                        0.0F, 1.0F, 0.0F}},
+    });
+}
+
+void write_tiny_qwen_mpsgraph_forward_safetensors(const std::filesystem::path& path) {
+  write_bf16_safetensors(
+    path,
+    {
+      {"model.embed_tokens.weight", {4, 4}, {0.0F, 0.0F, 0.0F, 0.0F,
+                                             1.0F, 1.0F, 1.0F, 1.0F,
+                                             2.0F, 2.0F, 2.0F, 2.0F,
+                                             3.0F, 3.0F, 3.0F, 3.0F}},
+      {"lm_head.weight", {4, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                  0.0F, 1.0F, 0.0F, 0.0F,
+                                  0.0F, 0.0F, 1.0F, 0.0F,
+                                  0.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.norm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.input_layernorm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.post_attention_layernorm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_proj.weight", {4, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F,
+                                                          0.0F, 0.0F, 1.0F, 0.0F,
+                                                          0.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.k_proj.weight", {2, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F}},
+      {"model.layers.0.self_attn.v_proj.weight", {2, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F}},
+      {"model.layers.0.self_attn.o_proj.weight", {4, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F,
+                                                          0.0F, 0.0F, 1.0F, 0.0F,
+                                                          0.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_norm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.self_attn.k_norm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.mlp.gate_proj.weight", {5, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 1.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F}},
+      {"model.layers.0.mlp.up_proj.weight", {5, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 1.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F}},
+      {"model.layers.0.mlp.down_proj.weight", {4, 5}, {1.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 1.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F}},
     });
 }
 
@@ -648,6 +763,79 @@ void test_qwen_mpsgraph_model_core_weight_load() {
   std::filesystem::remove_all(model_dir, ec);
 }
 
+void test_qwen_mpsgraph_model_all_weight_load() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  auto model_dir = create_tiny_model_dir("kraken-infer-qwen-mpsgraph-all-weight-smoke");
+  write_tiny_qwen_mpsgraph_safetensors(model_dir / "model.safetensors");
+
+  auto model = toyllm::mpsgraph::QwenMpsGraphModel::load_all_weights(model_dir, context);
+  assert(model.is_ok());
+  assert(model.value().all_weights_uploaded());
+  assert(model.value().info().core_weights_uploaded);
+  assert(model.value().info().lm_head_uploaded);
+  assert(model.value().info().layer_weights_uploaded);
+  assert(model.value().info().uploaded_layer_count == 1);
+  assert(model.value().info().device_tensor_count == 14);
+  assert(model.value().info().device_weight_bytes == 216);
+
+  std::error_code ec;
+  std::filesystem::remove_all(model_dir, ec);
+}
+
+void test_qwen_mpsgraph_model_forward_token() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  auto model_dir = create_tiny_forward_model_dir("kraken-infer-qwen-mpsgraph-forward-smoke");
+  write_tiny_qwen_mpsgraph_forward_safetensors(model_dir / "model.safetensors");
+
+  auto model = toyllm::mpsgraph::QwenMpsGraphModel::load_all_weights(model_dir, context);
+  assert(model.is_ok());
+  auto state = model.value().create_run_state(context, 1);
+  assert(state.is_ok());
+
+  const auto hidden = model.value().debug_forward_token(context, 1, 0, state.value());
+  assert(hidden.is_ok());
+  assert(hidden.value().size() == 4);
+
+  const auto eps = 1e-6F;
+  const auto one_norm = 1.0F / std::sqrt(1.0F + eps);
+  const auto qk_norm = one_norm / std::sqrt(one_norm * one_norm + eps);
+  const auto attention_residual = 1.0F + one_norm;
+  const auto post_mean_square = attention_residual * attention_residual;
+  const auto post_norm = attention_residual / std::sqrt(post_mean_square + eps);
+  const auto silu_post_norm = post_norm / (1.0F + std::exp(-post_norm));
+  const auto residual = attention_residual + silu_post_norm * post_norm;
+  const auto mean_square =
+    (2.0F * residual * residual + 2.0F * attention_residual * attention_residual) /
+    4.0F;
+  const auto scale = 1.0F / std::sqrt(mean_square + eps);
+  assert(std::abs(hidden.value()[0] - residual * scale) < 1e-4F);
+  assert(std::abs(hidden.value()[1] - residual * scale) < 1e-4F);
+  assert(std::abs(hidden.value()[2] - attention_residual * scale) < 1e-4F);
+  assert(std::abs(hidden.value()[3] - attention_residual * scale) < 1e-4F);
+  assert(state.value().kv_cache.stats().used_tokens == 1);
+
+  const auto key_cache = read_mpsgraph_f32_buffer(context, state.value().kv_cache.key_buffer(), 2);
+  const auto value_cache =
+    read_mpsgraph_f32_buffer(context, state.value().kv_cache.value_buffer(), 2);
+  assert(std::abs(key_cache[0] - qk_norm) < 1e-4F);
+  assert(std::abs(key_cache[1] - qk_norm) < 1e-4F);
+  assert(std::abs(value_cache[0] - one_norm) < 1e-4F);
+  assert(std::abs(value_cache[1] - one_norm) < 1e-4F);
+
+  std::error_code ec;
+  std::filesystem::remove_all(model_dir, ec);
+}
+
 void test_weight_summary_regressions() {
   auto invalid_header_dir = create_tiny_model_dir("kraken-infer-invalid-header-smoke");
   write_fake_safetensors(invalid_header_dir / "model.safetensors", R"({})", 0);
@@ -686,6 +874,7 @@ int main() {
   test_mpsgraph_operator_smoke();
   test_mpsgraph_generation_does_not_fallback();
   test_mpsgraph_kv_cache_layout();
+  test_mpsgraph_kv_cache_store();
   test_mpsgraph_qk_norm_rope_and_attention_ops();
   test_mps_matvec_workspace_reuse();
   test_mps_full_forward_operators();
@@ -696,6 +885,8 @@ int main() {
   test_weight_summary_regressions();
   test_mpsgraph_weight_store_metadata_and_upload();
   test_qwen_mpsgraph_model_core_weight_load();
+  test_qwen_mpsgraph_model_all_weight_load();
+  test_qwen_mpsgraph_model_forward_token();
 
   std::cout << "smoke tests passed\n";
   return 0;

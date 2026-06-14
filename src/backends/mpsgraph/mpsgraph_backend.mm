@@ -931,6 +931,124 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
   }
 }
 
+Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
+                                           MpsGraphBuffer& cache,
+                                           std::size_t layer,
+                                           std::size_t position,
+                                           std::size_t layers,
+                                           std::size_t capacity_tokens,
+                                           std::size_t kv_heads,
+                                           std::size_t head_dim) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto layers_status = validate_positive_dim(layers, "KV cache layers");
+  if (!layers_status.is_ok()) {
+    return layers_status;
+  }
+  auto capacity_status = validate_positive_dim(capacity_tokens, "KV cache capacity");
+  if (!capacity_status.is_ok()) {
+    return capacity_status;
+  }
+  auto kv_heads_status = validate_positive_dim(kv_heads, "KV cache kv_heads");
+  if (!kv_heads_status.is_ok()) {
+    return kv_heads_status;
+  }
+  auto head_dim_status = validate_positive_dim(head_dim, "KV cache head_dim");
+  if (!head_dim_status.is_ok()) {
+    return head_dim_status;
+  }
+  if (layer >= layers) {
+    return Status::invalid_argument("MPSGraph KV cache write layer exceeds capacity");
+  }
+  if (position >= capacity_tokens) {
+    return Status::invalid_argument("MPSGraph KV cache write position exceeds capacity");
+  }
+
+  std::size_t kv_values = 0;
+  if (!checked_mul(kv_heads, head_dim, kv_values)) {
+    return Status::invalid_argument("MPSGraph KV cache write source size overflow");
+  }
+  std::size_t token_values = 0;
+  if (!checked_mul(capacity_tokens, kv_values, token_values)) {
+    return Status::invalid_argument("MPSGraph KV cache write layer size overflow");
+  }
+  std::size_t cache_values = 0;
+  if (!checked_mul(layers, token_values, cache_values)) {
+    return Status::invalid_argument("MPSGraph KV cache write total size overflow");
+  }
+
+  auto source_status = validate_f32_buffer(source, kv_values, "KV cache write source");
+  if (!source_status.is_ok()) {
+    return source_status;
+  }
+  auto cache_status = validate_f32_buffer(cache, cache_values, "KV cache write destination");
+  if (!cache_status.is_ok()) {
+    return cache_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* source_shape = make_shape({kv_heads, head_dim});
+    MPSShape* update_shape = make_shape({1, 1, kv_heads, head_dim});
+    MPSShape* cache_shape = make_shape({layers, capacity_tokens, kv_heads, head_dim});
+    MPSGraphTensor* cache_tensor =
+      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* source_tensor =
+      [graph placeholderWithShape:source_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* update_tensor =
+      [graph reshapeTensor:source_tensor withShape:update_shape name:nil];
+    MPSGraphTensor* result =
+      [graph sliceUpdateDataTensor:cache_tensor
+                       updateTensor:update_tensor
+                             starts:@[
+                               @(static_cast<NSInteger>(layer)),
+                               @(static_cast<NSInteger>(position)),
+                               @0,
+                               @0,
+                             ]
+                               ends:@[
+                                 @(static_cast<NSInteger>(layer + 1U)),
+                                 @(static_cast<NSInteger>(position + 1U)),
+                                 @(static_cast<NSInteger>(kv_heads)),
+                                 @(static_cast<NSInteger>(head_dim)),
+                               ]
+                            strides:@[ @1, @1, @1, @1 ]
+                          startMask:0
+                            endMask:0
+                        squeezeMask:0
+                               name:nil];
+
+    MPSGraphTensorData* cache_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* source_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:source.impl_->buffer
+                                             shape:source_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* cache_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      cache_tensor : cache_input_data,
+      source_tensor : source_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, cache_output_data);
+    [cache_input_data release];
+    [source_data release];
+    [cache_output_data release];
+    [graph release];
+    return status;
+  }
+}
+
 Status MpsGraphContext::attention_f32(const MpsGraphBuffer& query,
                                       const MpsGraphBuffer& key_cache,
                                       const MpsGraphBuffer& value_cache,

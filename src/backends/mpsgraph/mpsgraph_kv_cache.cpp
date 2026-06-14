@@ -82,6 +82,34 @@ Status MpsGraphKvCache::reset(const MpsGraphContext& context,
   return Status::ok();
 }
 
+Status MpsGraphKvCache::store(const MpsGraphContext& context,
+                              std::size_t layer,
+                              std::size_t position,
+                              const MpsGraphBuffer& key,
+                              const MpsGraphBuffer& value) {
+  if (!allocated()) {
+    return Status::invalid_argument("MPSGraph KV cache is not allocated");
+  }
+  if (layer >= layers_) {
+    return Status::invalid_argument("MPSGraph KV cache layer exceeds capacity");
+  }
+  if (position >= capacity_tokens_) {
+    return Status::invalid_argument("MPSGraph KV cache position exceeds capacity");
+  }
+
+  auto status = context.write_kv_cache_f32(key, key_cache_, layer, position, layers_,
+                                           capacity_tokens_, kv_heads_, head_dim_);
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = context.write_kv_cache_f32(value, value_cache_, layer, position, layers_,
+                                      capacity_tokens_, kv_heads_, head_dim_);
+  if (!status.is_ok()) {
+    return status;
+  }
+  return mark_position_used(position);
+}
+
 Status MpsGraphKvCache::mark_position_used(std::size_t position) {
   if (!allocated()) {
     return Status::invalid_argument("MPSGraph KV cache is not allocated");
