@@ -6,8 +6,10 @@
 #include "toyllm/core/tensor.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
+#include "toyllm/runtime/qwen_tokenizer.hpp"
 #include "toyllm/runtime/runtime.hpp"
 
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -282,6 +284,37 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   std::int32_t argmax = -1;
   assert(context.copy_from_buffer(argmax_output, &argmax, sizeof(argmax)).is_ok());
   assert(argmax == 2);
+
+  auto embedding_weight = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F, 3.0F, 4.0F});
+  auto embedding_token_result = context.make_buffer(sizeof(std::int32_t));
+  assert(embedding_token_result.is_ok());
+  auto embedding_token = std::move(embedding_token_result.value());
+  std::int32_t token_id = 1;
+  assert(context.copy_to_buffer(embedding_token, &token_id, sizeof(token_id)).is_ok());
+  auto embedding_output_result = context.make_buffer(2U * sizeof(float));
+  assert(embedding_output_result.is_ok());
+  auto embedding_output = std::move(embedding_output_result.value());
+  assert(context.embedding_from_token_f32(embedding_weight, 2, 2, embedding_token,
+                                          embedding_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, embedding_output, 2);
+  assert_close(output[0], 3.0F);
+  assert_close(output[1], 4.0F);
+
+  auto generated_result = context.make_buffer(3U * sizeof(std::int32_t));
+  assert(generated_result.is_ok());
+  auto generated = std::move(generated_result.value());
+  std::array<std::int32_t, 3> zeros{0, 0, 0};
+  assert(context.copy_to_buffer(generated, zeros.data(), zeros.size() * sizeof(std::int32_t))
+           .is_ok());
+  assert(context.write_i32_token(embedding_token, generated, 1, 3).is_ok());
+  std::array<std::int32_t, 3> generated_values{0, 0, 0};
+  assert(context.copy_from_buffer(generated, generated_values.data(),
+                                  generated_values.size() * sizeof(std::int32_t))
+           .is_ok());
+  assert(generated_values[0] == 0);
+  assert(generated_values[1] == 1);
+  assert(generated_values[2] == 0);
 }
 
 void test_mps_matvec_workspace_reuse() {
@@ -637,6 +670,55 @@ std::filesystem::path create_tiny_forward_model_dir(std::string_view name) {
   return model_dir;
 }
 
+std::filesystem::path create_tiny_runtime_model_dir(std::string_view name) {
+  const auto model_dir = std::filesystem::temp_directory_path() / std::filesystem::path{name};
+  std::filesystem::remove_all(model_dir);
+  std::filesystem::create_directories(model_dir);
+
+  write_text_file(
+    model_dir / "config.json",
+    R"({
+      "architectures": ["Qwen3ForCausalLM"],
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "bos_token_id": 0,
+      "eos_token_id": 151643,
+      "head_dim": 2,
+      "hidden_act": "silu",
+      "hidden_size": 4,
+      "initializer_range": 0.02,
+      "intermediate_size": 5,
+      "max_position_embeddings": 32,
+      "max_window_layers": 1,
+      "model_type": "qwen3",
+      "num_attention_heads": 2,
+      "num_hidden_layers": 1,
+      "num_key_value_heads": 1,
+      "rms_norm_eps": 1e-6,
+      "rope_theta": 10000,
+      "tie_word_embeddings": true,
+      "torch_dtype": "bfloat16",
+      "transformers_version": "test",
+      "use_cache": true,
+      "use_sliding_window": false,
+      "vocab_size": 151669
+    })");
+  write_text_file(
+    model_dir / "generation_config.json",
+    R"({"bos_token_id":0,"do_sample":false,"eos_token_id":[151643],"pad_token_id":0,"temperature":1.0,"top_k":0,"top_p":1.0})");
+  write_text_file(
+    model_dir / "tokenizer.json",
+    R"({"model":{"vocab":{"a":0,"b":1,"c":2,"d":3,"h":4,"e":5,"l":6,"o":7,"\n":8,"s":9,"r":10,"u":11,"t":12,"n":13,"i":14}},"added_tokens":[{"id":151643,"content":"<|endoftext|>"},{"id":151644,"content":"<|im_start|>"},{"id":151645,"content":"<|im_end|>"},{"id":151667,"content":"<think>"},{"id":151668,"content":"</think>"}]})");
+  write_text_file(
+    model_dir / "tokenizer_config.json",
+    R"({"added_tokens_decoder":{"151643":{"content":"<|endoftext|>"},"151644":{"content":"<|im_start|>"},"151645":{"content":"<|im_end|>"},"151667":{"content":"<think>"},"151668":{"content":"</think>"}}})");
+  write_text_file(
+    model_dir / "vocab.json",
+    R"({"a":0,"b":1,"c":2,"d":3,"h":4,"e":5,"l":6,"o":7,"\n":8,"s":9,"r":10,"u":11,"t":12,"n":13,"i":14})");
+  write_text_file(model_dir / "merges.txt", "#version: 0.2\n");
+  return model_dir;
+}
+
 void write_tiny_qwen_mpsgraph_safetensors(const std::filesystem::path& path) {
   write_bf16_safetensors(
     path,
@@ -704,6 +786,75 @@ void write_tiny_qwen_mpsgraph_forward_safetensors(const std::filesystem::path& p
                                                      0.0F, 0.0F, 0.0F, 0.0F}},
       {"model.layers.0.mlp.down_proj.weight", {4, 5}, {1.0F, 0.0F, 0.0F, 0.0F, 0.0F,
                                                        0.0F, 1.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F}},
+    });
+}
+
+std::vector<float> make_zero_values(std::size_t count) {
+  return std::vector<float>(count, 0.0F);
+}
+
+void set_row(std::vector<float>& values, std::size_t row, std::size_t cols,
+             const std::array<float, 4>& row_values) {
+  assert(cols == row_values.size());
+  const auto offset = row * cols;
+  assert(offset + cols <= values.size());
+  for (std::size_t col = 0; col < cols; ++col) {
+    values[offset + col] = row_values[col];
+  }
+}
+
+void write_tiny_qwen_mpsgraph_runtime_safetensors(const std::filesystem::path& path) {
+  constexpr std::uint64_t kVocab = 151669;
+  constexpr std::uint64_t kHidden = 4;
+  auto embeddings = make_zero_values(static_cast<std::size_t>(kVocab * kHidden));
+  auto lm_head = make_zero_values(static_cast<std::size_t>(kVocab * kHidden));
+  set_row(embeddings, 0, kHidden, {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenImStart), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenImEnd), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenThinkStart), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenThinkEnd), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(lm_head, 0, kHidden, {10.0F, 10.0F, 10.0F, 10.0F});
+
+  write_bf16_safetensors(
+    path,
+    {
+      {"model.embed_tokens.weight", {kVocab, kHidden}, std::move(embeddings)},
+      {"lm_head.weight", {kVocab, kHidden}, std::move(lm_head)},
+      {"model.norm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.input_layernorm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.post_attention_layernorm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_proj.weight", {4, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F,
+                                                          0.0F, 0.0F, 1.0F, 0.0F,
+                                                          0.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.k_proj.weight", {2, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F}},
+      {"model.layers.0.self_attn.v_proj.weight", {2, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F}},
+      {"model.layers.0.self_attn.o_proj.weight", {4, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F,
+                                                          0.0F, 0.0F, 1.0F, 0.0F,
+                                                          0.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_norm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.self_attn.k_norm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.mlp.gate_proj.weight", {5, 4}, {0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F}},
+      {"model.layers.0.mlp.up_proj.weight", {5, 4}, {0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F}},
+      {"model.layers.0.mlp.down_proj.weight", {4, 5}, {0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
                                                        0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
                                                        0.0F, 0.0F, 0.0F, 0.0F, 0.0F}},
     });
@@ -885,19 +1036,33 @@ void test_mpsgraph_generation_initializes_without_fallback() {
     return;
   }
 
-  auto model_dir = create_tiny_forward_model_dir("kraken-infer-mpsgraph-runtime-smoke");
-  write_tiny_qwen_mpsgraph_forward_safetensors(model_dir / "model.safetensors");
+  auto model_dir = create_tiny_runtime_model_dir("kraken-infer-mpsgraph-runtime-smoke");
+  write_tiny_qwen_mpsgraph_runtime_safetensors(model_dir / "model.safetensors");
 
   toyllm::CpuGenerationRequest request;
   request.compute_device = toyllm::Device::mpsgraph();
   request.model_dir = model_dir;
   request.prompt = "hello";
-  request.max_new_tokens = 1;
+  request.max_new_tokens = 2;
 
   const auto result = toyllm::generate_cpu(request);
-  assert(!result.is_ok());
-  assert(result.status().code() == toyllm::StatusCode::unavailable);
-  assert(result.status().message().find("prefill/decode") != std::string::npos);
+  assert(result.is_ok());
+  assert(result.value().implemented);
+  assert(result.value().text == "aa");
+  assert(result.value().kv_cache.available);
+  assert(result.value().kv_cache.used_tokens > 0);
+
+  auto cpu_request = request;
+  cpu_request.compute_device = toyllm::Device::cpu();
+  const auto cpu_result = toyllm::generate_cpu(cpu_request);
+  assert(cpu_result.is_ok());
+  assert(cpu_result.value().text == result.value().text);
+
+  request.sampling.do_sample = true;
+  const auto sampled = toyllm::generate_cpu(request);
+  assert(!sampled.is_ok());
+  assert(sampled.status().code() == toyllm::StatusCode::unavailable);
+  assert(sampled.status().message().find("greedy") != std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove_all(model_dir, ec);

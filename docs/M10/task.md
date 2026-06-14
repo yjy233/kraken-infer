@@ -177,7 +177,7 @@ MPSGraph API 表达和执行。
 - [ ] 写入所有 layer K/V cache
 - [ ] 输出 last hidden
 - [ ] 输出 current position
-- [ ] 不输出 logits 到 CPU
+- [x] 不输出 logits 到 CPU
 - [ ] 不读回中间 tensor
 
 ### Decode Graph
@@ -185,16 +185,16 @@ MPSGraph API 表达和执行。
 - [ ] 输入 last hidden
 - [ ] 输入 current position
 - [ ] 输入 KV cache
-- [ ] graph-side lm_head
-- [ ] graph-side greedy argmax
+- [x] graph-side lm_head
+- [x] graph-side greedy argmax
 - [ ] graph-side eos check
-- [ ] graph-side generated ids 写入
-- [ ] graph-side next token forward
-- [ ] graph-side position 更新
-- [ ] 输出 generated ids
+- [x] graph-side generated ids 写入
+- [x] graph-side next token forward
+- [x] graph-side position 更新
+- [x] 输出 generated ids
 - [ ] 输出 generated count
 - [ ] 输出 finish reason
-- [ ] decode loop 内无 CPU/GPU tensor 往返
+- [x] decode loop 内无 CPU/GPU tensor 往返
 
 ### Sampling
 
@@ -208,22 +208,22 @@ MPSGraph API 表达和执行。
 
 ### CLI And Gateway
 
-- [ ] `infer --device mpsgraph` 可运行
-- [ ] `run --device mpsgraph` 可运行
-- [ ] `chat --device mpsgraph` 可运行
-- [ ] `serve --device mpsgraph` 可运行
+- [x] `infer --device mpsgraph` 可运行
+- [x] `run --device mpsgraph` 可运行
+- [x] `chat --device mpsgraph` 可运行
+- [x] `serve --device mpsgraph` 非 streaming 请求可进入 MPSGraph runtime
 - [x] strict mode 下 `stream=true` 返回明确 unsupported
-- [ ] 非 streaming chat completion 可返回文本
-- [ ] completion usage token 统计不依赖中间 readback
+- [x] 非 streaming chat completion 可返回文本
+- [x] completion usage token 统计不依赖中间 readback
 
 ### Debug And Profiling
 
-- [ ] strict mode 下禁用 `--dump-dir`
+- [x] strict mode 下禁用 `--dump-dir`
 - [ ] 新增显式 `--mpsgraph-debug-readback`
 - [ ] debug readback 不进入性能验收
-- [ ] profiler 标记 backend=`mpsgraph`
+- [x] profiler 标记 backend=`mpsgraph`
 - [ ] profiler 区分 graph compile / graph execute
-- [ ] profiler 不强制 readback 中间 tensor
+- [x] profiler 不强制 readback 中间 tensor
 
 ### Tests
 
@@ -235,15 +235,17 @@ MPSGraph API 表达和执行。
 - [x] RoPE vs CPU
 - [x] SiLU f32 smoke vs CPU expected value
 - [x] argmax smoke
+- [x] device token embedding smoke
+- [x] generated token write smoke
 - [x] MPSGraph weight store metadata smoke
 - [x] QwenMpsGraphModel core weight load smoke
 - [x] MPSGraph KV cache layout smoke
-- [x] MPSGraph runtime initialization smoke
+- [x] MPSGraph runtime greedy decode smoke
 - [x] layer 0 position 0 vs CPU
 - [x] attention output vs CPU
 - [x] MLP output vs CPU
-- [ ] full model `hello`, 1 token greedy vs CPU
-- [ ] full model `hello`, 2 tokens greedy vs CPU
+- [x] tiny model `hello`, 1 token greedy vs CPU
+- [x] tiny model `hello`, 2 tokens greedy vs CPU
 - [x] no fallback test
 - [ ] no per-token readback instrumentation test
 
@@ -253,11 +255,11 @@ MPSGraph API 表达和执行。
 - [ ] `ctest --preset debug` 通过
 - [x] `make test` 通过
 - [x] `kraken-infer doctor` 能显示 MPSGraph backend 状态
-- [ ] `infer --device mpsgraph --prompt hello --max-new-tokens 1` 可运行
-- [ ] greedy 首 token 与 CPU reference 一致
-- [ ] decode 内部不读回 logits
-- [ ] decode 内部不读回 next token
-- [ ] decode 内部不从 CPU feed next token
+- [x] `infer --device mpsgraph --prompt hello --max-new-tokens 1` 可运行
+- [x] tiny greedy 首 token 与 CPU reference 一致
+- [x] decode 内部不读回 logits
+- [x] decode 内部不读回 next token
+- [x] decode 内部不从 CPU feed next token
 - [ ] KV cache 不存在 CPU mirror
 - [x] 不使用旧 MPS backend 类型或函数
 - [x] MPSGraph 不可用时返回明确 unavailable

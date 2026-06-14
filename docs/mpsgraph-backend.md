@@ -226,6 +226,13 @@ per-token CPU/GPU 往返的要求。
 
 temperature / top-k / top-p 可以作为后续阶段。
 
+当前实现状态：第一版已经把 Qwen3 greedy decode 串到 `generate_mpsgraph()`。C++ runtime
+仍按 token 调度若干 MPSGraph op，但每一步不读回 logits 或 next token，也不把 next token 从
+CPU 再写回 GPU；`argmax` 结果保留在 device token buffer，随后用于 embedding gather 和
+generated ids 的 device-side slice update。请求结束时一次性 read back generated ids 给
+tokenizer decode。尚未实现 MPSGraph control-flow loop、device-side EOS break、top-k/top-p/
+temperature sampling。
+
 ## Qwen3 Graph Decomposition
 
 单 token forward 的图结构：

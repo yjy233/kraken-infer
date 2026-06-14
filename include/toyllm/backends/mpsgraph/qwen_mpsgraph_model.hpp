@@ -58,8 +58,10 @@ struct QwenMpsGraphRunState {
   MpsGraphBuffer down;
   MpsGraphBuffer logits;
   MpsGraphBuffer next_token;
+  MpsGraphBuffer generated_tokens;
   MpsGraphKvCache kv_cache;
   std::size_t capacity_tokens{0};
+  std::size_t generated_capacity{0};
 };
 
 class QwenMpsGraphModel {
@@ -81,6 +83,7 @@ class QwenMpsGraphModel {
     const std::filesystem::path& model_dir, const MpsGraphContext& context);
 
   [[nodiscard]] const ModelConfig& config() const;
+  [[nodiscard]] const GenerationConfig& generation() const;
   [[nodiscard]] const QwenMpsGraphModelInfo& info() const;
   [[nodiscard]] bool core_weights_uploaded() const;
   [[nodiscard]] bool all_weights_uploaded() const;
@@ -92,10 +95,16 @@ class QwenMpsGraphModel {
   [[nodiscard]] Status forward_token(const MpsGraphContext& context, std::int64_t token,
                                      std::size_t position,
                                      QwenMpsGraphRunState& state) const;
+  [[nodiscard]] Status forward_next_token(const MpsGraphContext& context,
+                                          std::size_t position,
+                                          QwenMpsGraphRunState& state) const;
   [[nodiscard]] Status prefill_token_ids(const MpsGraphContext& context,
                                          const std::vector<std::int64_t>& tokens,
                                          QwenMpsGraphRunState& state) const;
   [[nodiscard]] Status greedy_next_token(const MpsGraphContext& context,
+                                         QwenMpsGraphRunState& state) const;
+  [[nodiscard]] Status record_next_token(const MpsGraphContext& context,
+                                         std::size_t step,
                                          QwenMpsGraphRunState& state) const;
   [[nodiscard]] Result<std::vector<float>> debug_forward_token(
     const MpsGraphContext& context, std::int64_t token, std::size_t position,

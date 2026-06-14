@@ -138,6 +138,10 @@ const ModelConfig& QwenMpsGraphModel::config() const {
   return bundle_.model;
 }
 
+const GenerationConfig& QwenMpsGraphModel::generation() const {
+  return bundle_.generation;
+}
+
 const QwenMpsGraphModelInfo& QwenMpsGraphModel::info() const {
   return info_;
 }
@@ -240,11 +244,24 @@ Result<QwenMpsGraphRunState> QwenMpsGraphModel::create_run_state(
     return next_token.status();
   }
   state.next_token = std::move(next_token.value());
+  auto generated_tokens =
+    context.make_buffer(capacity_tokens * sizeof(std::int32_t));
+  if (!generated_tokens.is_ok()) {
+    return generated_tokens.status();
+  }
+  state.generated_tokens = std::move(generated_tokens.value());
+  std::vector<std::int32_t> zero_generated(capacity_tokens, 0);
+  status = context.copy_to_buffer(state.generated_tokens, zero_generated.data(),
+                                  zero_generated.size() * sizeof(std::int32_t));
+  if (!status.is_ok()) {
+    return status;
+  }
   status = state.kv_cache.reset(context, layers, capacity_tokens, kv_heads, head_dim);
   if (!status.is_ok()) {
     return status;
   }
   state.capacity_tokens = capacity_tokens;
+  state.generated_capacity = capacity_tokens;
   return Result<QwenMpsGraphRunState>(std::move(state));
 }
 
@@ -315,6 +332,37 @@ Status QwenMpsGraphModel::forward_token(const MpsGraphContext& context, std::int
   return Status::ok();
 }
 
+Status QwenMpsGraphModel::forward_next_token(const MpsGraphContext& context,
+                                             std::size_t position,
+                                             QwenMpsGraphRunState& state) const {
+  if (!forward_weights_uploaded()) {
+    return Status::invalid_argument("MPSGraph Qwen weights are not fully uploaded");
+  }
+  if (position >= state.capacity_tokens) {
+    return Status::invalid_argument("MPSGraph Qwen position exceeds run state capacity");
+  }
+  if (!state.kv_cache.allocated()) {
+    return Status::invalid_argument("MPSGraph Qwen KV cache is not allocated");
+  }
+
+  const auto hidden_size = static_cast<std::size_t>(bundle_.model.hidden_size);
+  auto status = context.embedding_from_token_f32(
+    embedding_.buffer, static_cast<std::size_t>(bundle_.model.vocab_size), hidden_size,
+    state.next_token, state.hidden);
+  if (!status.is_ok()) {
+    return status;
+  }
+  for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
+    status = apply_layer(context, layers_[layer_index], layer_index, position, state);
+    if (!status.is_ok()) {
+      return status;
+    }
+  }
+  return context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size,
+                              static_cast<float>(bundle_.model.rms_norm_eps),
+                              state.normed);
+}
+
 Status QwenMpsGraphModel::greedy_next_token(const MpsGraphContext& context,
                                             QwenMpsGraphRunState& state) const {
   if (!all_weights_uploaded()) {
@@ -326,6 +374,16 @@ Status QwenMpsGraphModel::greedy_next_token(const MpsGraphContext& context,
   }
   return context.argmax_i32(state.logits, static_cast<std::size_t>(bundle_.model.vocab_size),
                             state.next_token);
+}
+
+Status QwenMpsGraphModel::record_next_token(const MpsGraphContext& context,
+                                            std::size_t step,
+                                            QwenMpsGraphRunState& state) const {
+  if (!state.generated_tokens.valid()) {
+    return Status::invalid_argument("MPSGraph generated token buffer is not allocated");
+  }
+  return context.write_i32_token(state.next_token, state.generated_tokens, step,
+                                 state.generated_capacity);
 }
 
 Status QwenMpsGraphModel::prefill_token_ids(

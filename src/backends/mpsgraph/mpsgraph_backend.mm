@@ -1067,6 +1067,86 @@ Status MpsGraphContext::argmax_i32(const MpsGraphBuffer& input,
   }
 }
 
+Status MpsGraphContext::write_i32_token(const MpsGraphBuffer& token,
+                                        MpsGraphBuffer& output,
+                                        std::size_t index,
+                                        std::size_t capacity) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto capacity_status = validate_positive_dim(capacity, "generated token capacity");
+  if (!capacity_status.is_ok()) {
+    return capacity_status;
+  }
+  if (index >= capacity) {
+    return Status::invalid_argument("MPSGraph generated token index exceeds capacity");
+  }
+  if (!token.valid()) {
+    return Status::invalid_argument("MPSGraph generated token source is not initialized");
+  }
+  if (token.byte_size() < sizeof(std::int32_t)) {
+    return Status::invalid_argument("MPSGraph generated token source is too small");
+  }
+  std::size_t output_bytes = 0;
+  if (!checked_mul(capacity, sizeof(std::int32_t), output_bytes)) {
+    return Status::invalid_argument("MPSGraph generated token byte count overflow");
+  }
+  if (!output.valid()) {
+    return Status::invalid_argument("MPSGraph generated token output is not initialized");
+  }
+  if (output.byte_size() < output_bytes) {
+    return Status::invalid_argument("MPSGraph generated token output is too small");
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* token_shape = make_shape({1});
+    MPSShape* output_shape = make_shape({capacity});
+    MPSGraphTensor* output_tensor =
+      [graph placeholderWithShape:output_shape dataType:MPSDataTypeInt32 name:nil];
+    MPSGraphTensor* token_tensor =
+      [graph placeholderWithShape:token_shape dataType:MPSDataTypeInt32 name:nil];
+    MPSGraphTensor* result =
+      [graph sliceUpdateDataTensor:output_tensor
+                       updateTensor:token_tensor
+                             starts:@[ @(static_cast<NSInteger>(index)) ]
+                               ends:@[ @(static_cast<NSInteger>(index + 1U)) ]
+                            strides:@[ @1 ]
+                          startMask:0
+                            endMask:0
+                        squeezeMask:0
+                               name:nil];
+
+    MPSGraphTensorData* output_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeInt32];
+    MPSGraphTensorData* token_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:token.impl_->buffer
+                                             shape:token_shape
+                                          dataType:MPSDataTypeInt32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeInt32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      output_tensor : output_input_data,
+      token_tensor : token_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [output_input_data release];
+    [token_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
 Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
                                            MpsGraphBuffer& cache,
                                            std::size_t layer,

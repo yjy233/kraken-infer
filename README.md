@@ -67,10 +67,14 @@ prefill/decode，并保持 weights、KV cache、hidden、logits 和 sampling 都
 - MPSGraph availability probe。
 - MPSGraph tiny graph smoke test。
 - CLI / gateway / OpenAPI 的 `mpsgraph` device 解析。
-- strict no-fallback 行为：Qwen3 图推理未完成前，`--device mpsgraph` 会明确返回
+- Qwen3 greedy prefill/decode 第一版：weights、KV cache、hidden、logits、argmax 和
+  generated token 写入都在 MPSGraph path 内完成。
+- strict no-fallback 行为：不支持的 streaming、sampling、debug dump 会明确返回
   unavailable，不会偷偷走 CPU 或旧 MPS。
 
-当前尚未实现完整 Qwen3 MPSGraph prefill/decode。可用探测命令：
+当前限制：第一版只支持非 streaming greedy decode；temperature / top-k / top-p sampling 和
+device-side EOS break 还在后续阶段。请求结束时会一次性 read back generated token ids 用于
+tokenizer decode。可用探测命令：
 
 ```bash
 ./build/debug/kraken-infer mpsgraph
