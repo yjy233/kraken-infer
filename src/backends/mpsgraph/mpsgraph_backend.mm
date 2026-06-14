@@ -421,6 +421,87 @@ Status MpsGraphContext::embedding_f32(const MpsGraphBuffer& weight,
   }
 }
 
+Status MpsGraphContext::embedding_from_token_f32(const MpsGraphBuffer& weight,
+                                                std::size_t vocab_size,
+                                                std::size_t hidden_size,
+                                                const MpsGraphBuffer& token,
+                                                MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto vocab_status = validate_positive_dim(vocab_size, "embedding vocab_size");
+  if (!vocab_status.is_ok()) {
+    return vocab_status;
+  }
+  auto hidden_status = validate_positive_dim(hidden_size, "embedding hidden_size");
+  if (!hidden_status.is_ok()) {
+    return hidden_status;
+  }
+  std::size_t weight_values = 0;
+  if (!checked_mul(vocab_size, hidden_size, weight_values)) {
+    return Status::invalid_argument("MPSGraph embedding weight element count overflow");
+  }
+  auto weight_status = validate_f32_buffer(weight, weight_values, "embedding weight");
+  if (!weight_status.is_ok()) {
+    return weight_status;
+  }
+  if (!token.valid()) {
+    return Status::invalid_argument("MPSGraph embedding token buffer is not initialized");
+  }
+  if (token.byte_size() < sizeof(std::int32_t)) {
+    return Status::invalid_argument("MPSGraph embedding token buffer is too small");
+  }
+  auto output_status = validate_f32_buffer(output, hidden_size, "embedding output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* weight_shape = make_shape({vocab_size, hidden_size});
+    MPSShape* token_shape = make_shape({1});
+    MPSShape* output_shape = make_shape({hidden_size});
+    MPSGraphTensor* weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* token_tensor =
+      [graph placeholderWithShape:token_shape dataType:MPSDataTypeInt32 name:nil];
+    MPSGraphTensor* gathered = [graph gatherWithUpdatesTensor:weight_tensor
+                                                indicesTensor:token_tensor
+                                                         axis:0
+                                              batchDimensions:0
+                                                         name:nil];
+    MPSGraphTensor* result = [graph reshapeTensor:gathered withShape:output_shape name:nil];
+
+    MPSGraphTensorData* weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* token_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:token.impl_->buffer
+                                             shape:token_shape
+                                          dataType:MPSDataTypeInt32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      weight_tensor : weight_data,
+      token_tensor : token_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [weight_data release];
+    [token_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
 Status MpsGraphContext::rms_norm_f32(const MpsGraphBuffer& input,
                                      const MpsGraphBuffer& weight,
                                      std::size_t size, float eps,

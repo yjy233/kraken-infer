@@ -2,6 +2,7 @@
 
 #include "toyllm/core/device.hpp"
 #include "toyllm/core/status.hpp"
+#include "toyllm/runtime/chat_message.hpp"
 #include "toyllm/runtime/profiling.hpp"
 
 #include <cstddef>
@@ -13,11 +14,6 @@
 #include <vector>
 
 namespace toyllm {
-
-struct ChatMessage {
-  std::string role;
-  std::string content;
-};
 
 struct CpuSamplingConfig {
   bool do_sample{false};

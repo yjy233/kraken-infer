@@ -27,6 +27,7 @@ CORE_SRCS := \
 	src/runtime/mpsgraph_inference.cpp \
 	src/runtime/openai_gateway.cpp \
 	src/runtime/profiling.cpp \
+	src/runtime/qwen_tokenizer.cpp \
 	src/runtime/runtime.cpp \
 	src/backends/mpsgraph/mpsgraph_kv_cache.cpp \
 	src/backends/mpsgraph/qwen_mpsgraph_model.cpp \

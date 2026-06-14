@@ -73,6 +73,11 @@ class MpsGraphContext {
                                      std::size_t hidden_size,
                                      std::int64_t token,
                                      MpsGraphBuffer& output) const;
+  [[nodiscard]] Status embedding_from_token_f32(const MpsGraphBuffer& weight,
+                                                std::size_t vocab_size,
+                                                std::size_t hidden_size,
+                                                const MpsGraphBuffer& token,
+                                                MpsGraphBuffer& output) const;
   [[nodiscard]] Status rms_norm_f32(const MpsGraphBuffer& input,
                                     const MpsGraphBuffer& weight,
                                     std::size_t size, float eps,
@@ -101,6 +106,10 @@ class MpsGraphContext {
   [[nodiscard]] Status argmax_i32(const MpsGraphBuffer& input,
                                   std::size_t size,
                                   MpsGraphBuffer& output) const;
+  [[nodiscard]] Status write_i32_token(const MpsGraphBuffer& token,
+                                       MpsGraphBuffer& output,
+                                       std::size_t index,
+                                       std::size_t capacity) const;
   [[nodiscard]] Status write_kv_cache_f32(const MpsGraphBuffer& source,
                                           MpsGraphBuffer& cache,
                                           std::size_t layer,

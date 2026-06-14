@@ -87,6 +87,19 @@ Status MpsGraphContext::embedding_f32(const MpsGraphBuffer& weight,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::embedding_from_token_f32(const MpsGraphBuffer& weight,
+                                                 std::size_t vocab_size,
+                                                 std::size_t hidden_size,
+                                                 const MpsGraphBuffer& token,
+                                                 MpsGraphBuffer& output) const {
+  (void)weight;
+  (void)vocab_size;
+  (void)hidden_size;
+  (void)token;
+  (void)output;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::rms_norm_f32(const MpsGraphBuffer& input,
                                      const MpsGraphBuffer& weight,
                                      std::size_t size, float eps,
@@ -166,6 +179,17 @@ Status MpsGraphContext::argmax_i32(const MpsGraphBuffer& input,
   (void)input;
   (void)size;
   (void)output;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::write_i32_token(const MpsGraphBuffer& token,
+                                        MpsGraphBuffer& output,
+                                        std::size_t index,
+                                        std::size_t capacity) const {
+  (void)token;
+  (void)output;
+  (void)index;
+  (void)capacity;
   return Status::unavailable(kUnavailable);
 }
 
