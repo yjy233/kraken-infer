@@ -931,6 +931,61 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
   }
 }
 
+Status MpsGraphContext::argmax_i32(const MpsGraphBuffer& input,
+                                   std::size_t size,
+                                   MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto size_status = validate_positive_dim(size, "argmax size");
+  if (!size_status.is_ok()) {
+    return size_status;
+  }
+  auto input_status = validate_f32_buffer(input, size, "argmax input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  if (!output.valid()) {
+    return Status::invalid_argument("MPSGraph argmax output buffer is not initialized");
+  }
+  if (output.byte_size() < sizeof(std::int32_t)) {
+    return Status::invalid_argument("MPSGraph argmax output buffer is too small");
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* input_shape = make_shape({size});
+    MPSShape* output_shape = make_shape({1});
+    MPSGraphTensor* input_tensor =
+      [graph placeholderWithShape:input_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* result =
+      [graph reductionArgMaximumWithTensor:input_tensor axis:0 name:nil];
+    result = [graph reshapeTensor:result withShape:output_shape name:nil];
+
+    MPSGraphTensorData* input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
+                                             shape:input_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeInt32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      input_tensor : input_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [input_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
 Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
                                            MpsGraphBuffer& cache,
                                            std::size_t layer,

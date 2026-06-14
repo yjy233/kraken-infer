@@ -160,6 +160,15 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::argmax_i32(const MpsGraphBuffer& input,
+                                   std::size_t size,
+                                   MpsGraphBuffer& output) const {
+  (void)input;
+  (void)size;
+  (void)output;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::write_kv_cache_f32(const MpsGraphBuffer& source,
                                            MpsGraphBuffer& cache,
                                            std::size_t layer,

@@ -98,6 +98,9 @@ class MpsGraphContext {
                                const MpsGraphBuffer& rhs,
                                std::size_t size,
                                MpsGraphBuffer& output) const;
+  [[nodiscard]] Status argmax_i32(const MpsGraphBuffer& input,
+                                  std::size_t size,
+                                  MpsGraphBuffer& output) const;
   [[nodiscard]] Status write_kv_cache_f32(const MpsGraphBuffer& source,
                                           MpsGraphBuffer& cache,
                                           std::size_t layer,
