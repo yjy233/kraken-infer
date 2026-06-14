@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -511,6 +512,24 @@ void write_text_file(const std::filesystem::path& path, const std::string& conte
   output << content;
 }
 
+std::string read_text_file(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("failed to open " + path.string());
+  }
+  std::ostringstream buffer;
+  buffer << input.rdbuf();
+  return buffer.str();
+}
+
+std::filesystem::path unique_temp_dir(std::string_view name) {
+  static std::uint64_t counter = 0;
+  const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto suffix = std::to_string(ticks) + "-" + std::to_string(counter++);
+  return std::filesystem::temp_directory_path() /
+         std::filesystem::path{std::string{name} + "-" + suffix};
+}
+
 void write_fake_safetensors(const std::filesystem::path& path, const std::string& header,
                             std::size_t data_bytes) {
   std::ofstream output(path, std::ios::binary);
@@ -587,7 +606,7 @@ void write_bf16_safetensors(const std::filesystem::path& path,
 }
 
 std::filesystem::path create_tiny_model_dir(std::string_view name) {
-  const auto model_dir = std::filesystem::temp_directory_path() / std::filesystem::path{name};
+  const auto model_dir = unique_temp_dir(name);
   std::filesystem::remove_all(model_dir);
   std::filesystem::create_directories(model_dir);
 
@@ -629,7 +648,7 @@ std::filesystem::path create_tiny_model_dir(std::string_view name) {
 }
 
 std::filesystem::path create_tiny_forward_model_dir(std::string_view name) {
-  const auto model_dir = std::filesystem::temp_directory_path() / std::filesystem::path{name};
+  const auto model_dir = unique_temp_dir(name);
   std::filesystem::remove_all(model_dir);
   std::filesystem::create_directories(model_dir);
 
@@ -671,7 +690,7 @@ std::filesystem::path create_tiny_forward_model_dir(std::string_view name) {
 }
 
 std::filesystem::path create_tiny_runtime_model_dir(std::string_view name) {
-  const auto model_dir = std::filesystem::temp_directory_path() / std::filesystem::path{name};
+  const auto model_dir = unique_temp_dir(name);
   std::filesystem::remove_all(model_dir);
   std::filesystem::create_directories(model_dir);
 
@@ -820,6 +839,62 @@ void write_tiny_qwen_mpsgraph_runtime_safetensors(const std::filesystem::path& p
   set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenThinkEnd), kHidden,
           {1.0F, 1.0F, 1.0F, 1.0F});
   set_row(lm_head, 0, kHidden, {10.0F, 10.0F, 10.0F, 10.0F});
+
+  write_bf16_safetensors(
+    path,
+    {
+      {"model.embed_tokens.weight", {kVocab, kHidden}, std::move(embeddings)},
+      {"lm_head.weight", {kVocab, kHidden}, std::move(lm_head)},
+      {"model.norm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.input_layernorm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.post_attention_layernorm.weight", {4}, {1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_proj.weight", {4, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F,
+                                                          0.0F, 0.0F, 1.0F, 0.0F,
+                                                          0.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.k_proj.weight", {2, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F}},
+      {"model.layers.0.self_attn.v_proj.weight", {2, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F}},
+      {"model.layers.0.self_attn.o_proj.weight", {4, 4}, {1.0F, 0.0F, 0.0F, 0.0F,
+                                                          0.0F, 1.0F, 0.0F, 0.0F,
+                                                          0.0F, 0.0F, 1.0F, 0.0F,
+                                                          0.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_norm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.self_attn.k_norm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.mlp.gate_proj.weight", {5, 4}, {0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F}},
+      {"model.layers.0.mlp.up_proj.weight", {5, 4}, {0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 0.0F}},
+      {"model.layers.0.mlp.down_proj.weight", {4, 5}, {0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+                                                       0.0F, 0.0F, 0.0F, 0.0F, 0.0F}},
+    });
+}
+
+void write_tiny_qwen_mpsgraph_eos_runtime_safetensors(const std::filesystem::path& path) {
+  constexpr std::uint64_t kVocab = 151669;
+  constexpr std::uint64_t kHidden = 4;
+  auto embeddings = make_zero_values(static_cast<std::size_t>(kVocab * kHidden));
+  auto lm_head = make_zero_values(static_cast<std::size_t>(kVocab * kHidden));
+  set_row(embeddings, 0, kHidden, {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenImStart), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenImEnd), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenThinkStart), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(embeddings, static_cast<std::size_t>(toyllm::kQwenThinkEnd), kHidden,
+          {1.0F, 1.0F, 1.0F, 1.0F});
+  set_row(lm_head, static_cast<std::size_t>(toyllm::kQwenEndOfText), kHidden,
+          {10.0F, 10.0F, 10.0F, 10.0F});
 
   write_bf16_safetensors(
     path,
@@ -1044,6 +1119,13 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   request.model_dir = model_dir;
   request.prompt = "hello";
   request.max_new_tokens = 2;
+  const auto profile_root =
+    std::filesystem::temp_directory_path() / "kraken-infer-mpsgraph-profile-smoke";
+  std::error_code ec;
+  std::filesystem::remove_all(profile_root, ec);
+  request.observability.profile_mode = toyllm::ProfileMode::summary;
+  request.observability.profile_output_dir = profile_root;
+  request.observability.request_id = "mpsgraph-profile-smoke";
 
   const auto result = toyllm::generate_cpu(request);
   assert(result.is_ok());
@@ -1051,9 +1133,19 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(result.value().text == "aa");
   assert(result.value().kv_cache.available);
   assert(result.value().kv_cache.used_tokens > 0);
+  assert(std::filesystem::exists(result.value().profile_dir / "summary.json"));
+  const auto summary_json = read_text_file(result.value().profile_dir / "summary.json");
+  assert(summary_json.find("mpsgraph.load_weights") != std::string::npos);
+  assert(summary_json.find("mpsgraph.decode.argmax") != std::string::npos);
+  assert(summary_json.find("mpsgraph.decode.update_generation_status") != std::string::npos);
+  assert(summary_json.find("mpsgraph.final_readback.generation_status") != std::string::npos);
+  assert(summary_json.find("mpsgraph.final_readback.generated_ids") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_d2h_calls\":\"2\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_finish_reason\":\"length\"") != std::string::npos);
 
   auto cpu_request = request;
   cpu_request.compute_device = toyllm::Device::cpu();
+  cpu_request.observability.profile_mode = toyllm::ProfileMode::off;
   const auto cpu_result = toyllm::generate_cpu(cpu_request);
   assert(cpu_result.is_ok());
   assert(cpu_result.value().text == result.value().text);
@@ -1064,7 +1156,45 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(sampled.status().code() == toyllm::StatusCode::unavailable);
   assert(sampled.status().message().find("greedy") != std::string::npos);
 
+  std::filesystem::remove_all(profile_root, ec);
+  std::filesystem::remove_all(model_dir, ec);
+}
+
+void test_mpsgraph_generation_device_side_eos_status() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+
+  auto model_dir = create_tiny_runtime_model_dir("kraken-infer-mpsgraph-eos-smoke");
+  write_tiny_qwen_mpsgraph_eos_runtime_safetensors(model_dir / "model.safetensors");
+
+  const auto profile_root =
+    std::filesystem::temp_directory_path() / "kraken-infer-mpsgraph-eos-profile-smoke";
   std::error_code ec;
+  std::filesystem::remove_all(profile_root, ec);
+
+  toyllm::CpuGenerationRequest request;
+  request.compute_device = toyllm::Device::mpsgraph();
+  request.model_dir = model_dir;
+  request.prompt = "hello";
+  request.max_new_tokens = 2;
+  request.observability.profile_mode = toyllm::ProfileMode::summary;
+  request.observability.profile_output_dir = profile_root;
+  request.observability.request_id = "mpsgraph-eos-profile-smoke";
+
+  const auto result = toyllm::generate_cpu(request);
+  assert(result.is_ok());
+  assert(result.value().implemented);
+  assert(result.value().text.empty());
+  assert(std::filesystem::exists(result.value().profile_dir / "summary.json"));
+  const auto summary_json = read_text_file(result.value().profile_dir / "summary.json");
+  assert(summary_json.find("\"generated_tokens\":0") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_finish_reason\":\"stop\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_d2h_calls\":\"1\"") != std::string::npos);
+  assert(summary_json.find("mpsgraph.final_readback.generated_ids") == std::string::npos);
+
+  std::filesystem::remove_all(profile_root, ec);
   std::filesystem::remove_all(model_dir, ec);
 }
 
@@ -1121,6 +1251,7 @@ int main() {
   test_qwen_mpsgraph_model_forward_token();
   test_qwen_mpsgraph_model_prefill_token_ids();
   test_mpsgraph_generation_initializes_without_fallback();
+  test_mpsgraph_generation_device_side_eos_status();
 
   std::cout << "smoke tests passed\n";
   return 0;

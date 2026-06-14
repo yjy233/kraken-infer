@@ -490,8 +490,19 @@ ProfileArtifacts RequestProfiler::write_artifacts() {
     summary_json << "\"decode_ms\":" << decode_ms << ',';
     summary_json << "\"tok_s\":" << tok_s << ',';
     summary_json << "\"status\":\"" << json_escape(impl_->status) << "\",";
-    summary_json << "\"operators\":[";
+    summary_json << "\"metadata\":{";
     bool first = true;
+    for (const auto& entry : impl_->metadata) {
+      if (!first) {
+        summary_json << ',';
+      }
+      first = false;
+      summary_json << "\"" << json_escape(entry.first) << "\":\""
+                   << json_escape(entry.second) << "\"";
+    }
+    summary_json << "},";
+    summary_json << "\"operators\":[";
+    first = true;
     for (const auto& entry : sorted_ops) {
       if (!first) {
         summary_json << ',';

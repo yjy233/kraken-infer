@@ -17,7 +17,7 @@ MPSGraph API 表达和执行。
 - [x] 已接入 `--device mpsgraph`
 - [x] 已实现 MPSGraph availability probe
 - [x] 已实现 tiny MPSGraph smoke executable
-- [ ] 尚未实现完整 Qwen3 MPSGraph prefill/decode
+- [x] 已实现 Qwen3 greedy prefill/decode 的第一版 MPSGraph 路径
 
 ## Scope
 
@@ -54,13 +54,13 @@ MPSGraph API 表达和执行。
 - [x] 不使用 `MPSMatrixMultiplication` 等直接 MPS primitive 路径
 - [x] 不做 `mpsgraph -> mps` fallback
 - [x] 不做 `mpsgraph -> cpu` fallback
-- [ ] prefill 不读回 hidden / logits / KV cache
-- [ ] decode 每步不读回 logits
-- [ ] decode 每步不读回 next token
-- [ ] decode 每步不从 CPU feed next token
-- [ ] sampling 必须在 graph 内完成
-- [ ] KV cache 必须 device-resident
-- [ ] weights 必须 device-resident
+- [x] prefill 不读回 hidden / logits / KV cache
+- [x] decode 每步不读回 logits
+- [x] decode 每步不读回 next token
+- [x] decode 每步不从 CPU feed next token
+- [x] sampling 必须在 graph 内完成
+- [x] KV cache 必须 device-resident
+- [x] weights 必须 device-resident
 
 ## Tasks
 
@@ -163,7 +163,7 @@ MPSGraph API 表达和执行。
 - [x] 分配 device-resident K cache
 - [x] 分配 device-resident V cache
 - [x] prefill 写入 cache
-- [ ] decode 追加 cache
+- [x] decode 追加 cache
 - [x] attention operator 读取 `0..position`
 - [ ] fixed-shape causal mask
 - [x] cache capacity 越界返回明确错误
@@ -171,37 +171,40 @@ MPSGraph API 表达和执行。
 
 ### Prefill Graph
 
-- [ ] 输入 prompt token ids
+- [x] 输入 prompt token ids
 - [ ] 输入 prompt length
-- [ ] 对 prompt positions 执行 forward
-- [ ] 写入所有 layer K/V cache
-- [ ] 输出 last hidden
+- [x] 对 prompt positions 执行 forward
+- [x] 写入所有 layer K/V cache
+- [x] 保留 last hidden 于 device run state
 - [ ] 输出 current position
 - [x] 不输出 logits 到 CPU
-- [ ] 不读回中间 tensor
+- [x] 不读回中间 tensor
+- [ ] 单个 graph/control-flow prefill
 
 ### Decode Graph
 
-- [ ] 输入 last hidden
-- [ ] 输入 current position
-- [ ] 输入 KV cache
+- [x] 从 device run state 读取 last hidden
+- [x] runtime 传入 current position
+- [x] 从 device-resident KV cache 读取历史 K/V
 - [x] graph-side lm_head
 - [x] graph-side greedy argmax
-- [ ] graph-side eos check
+- [x] graph-side eos check
 - [x] graph-side generated ids 写入
 - [x] graph-side next token forward
 - [x] graph-side position 更新
 - [x] 输出 generated ids
-- [ ] 输出 generated count
-- [ ] 输出 finish reason
+- [x] 输出 generated count
+- [x] 输出 finish reason
 - [x] decode loop 内无 CPU/GPU tensor 往返
+- [ ] graph-side early break 跳过 EOS 后续 forward
+- [ ] 单个 graph/control-flow decode loop
 
 ### Sampling
 
 - [x] 第一版 greedy argmax
-- [ ] eos token ids 支持多值
-- [ ] generated count 正确
-- [ ] finish reason 区分 stop / length
+- [x] eos token ids 支持多值
+- [x] generated count 正确
+- [x] finish reason 区分 stop / length
 - [ ] top-k 设计文档补充
 - [ ] top-p 设计文档补充
 - [ ] temperature 设计文档补充
@@ -224,6 +227,7 @@ MPSGraph API 表达和执行。
 - [x] profiler 标记 backend=`mpsgraph`
 - [ ] profiler 区分 graph compile / graph execute
 - [x] profiler 不强制 readback 中间 tensor
+- [x] profiler 标记 MPSGraph load / prefill / decode / final readback 阶段
 
 ### Tests
 
@@ -246,13 +250,14 @@ MPSGraph API 表达和执行。
 - [x] MLP output vs CPU
 - [x] tiny model `hello`, 1 token greedy vs CPU
 - [x] tiny model `hello`, 2 tokens greedy vs CPU
+- [x] tiny EOS 首 token 走 device-side status
 - [x] no fallback test
-- [ ] no per-token readback instrumentation test
+- [x] no per-token readback instrumentation test
 
 ## Acceptance
 
-- [ ] `cmake --build --preset debug` 通过
-- [ ] `ctest --preset debug` 通过
+- [x] `cmake --build --preset debug` 通过
+- [x] `ctest --preset debug` 通过
 - [x] `make test` 通过
 - [x] `kraken-infer doctor` 能显示 MPSGraph backend 状态
 - [x] `infer --device mpsgraph --prompt hello --max-new-tokens 1` 可运行
@@ -260,7 +265,7 @@ MPSGraph API 表达和执行。
 - [x] decode 内部不读回 logits
 - [x] decode 内部不读回 next token
 - [x] decode 内部不从 CPU feed next token
-- [ ] KV cache 不存在 CPU mirror
+- [x] KV cache 不存在 CPU mirror
 - [x] 不使用旧 MPS backend 类型或函数
 - [x] MPSGraph 不可用时返回明确 unavailable
 

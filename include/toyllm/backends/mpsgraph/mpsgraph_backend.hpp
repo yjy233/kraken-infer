@@ -21,6 +21,13 @@ struct BackendInfo {
   std::string failure_reason;
 };
 
+struct MpsGraphTransferStats {
+  std::uint64_t host_to_device_calls{0};
+  std::uint64_t host_to_device_bytes{0};
+  std::uint64_t device_to_host_calls{0};
+  std::uint64_t device_to_host_bytes{0};
+};
+
 class MpsGraphBuffer {
  public:
   MpsGraphBuffer();
@@ -57,6 +64,7 @@ class MpsGraphContext {
 
   [[nodiscard]] static Result<MpsGraphContext> create();
   [[nodiscard]] bool valid() const;
+  [[nodiscard]] MpsGraphTransferStats transfer_stats() const;
 
   [[nodiscard]] Result<MpsGraphBuffer> make_buffer(std::size_t byte_size) const;
   [[nodiscard]] Status copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
@@ -110,6 +118,11 @@ class MpsGraphContext {
                                        MpsGraphBuffer& output,
                                        std::size_t index,
                                        std::size_t capacity) const;
+  [[nodiscard]] Status reset_generation_status_i32(MpsGraphBuffer& status) const;
+  [[nodiscard]] Status update_generation_status_i32(
+    const MpsGraphBuffer& token, const std::int64_t* eos_tokens,
+    std::size_t eos_token_count, std::size_t step, bool final_step,
+    MpsGraphBuffer& status) const;
   [[nodiscard]] Status write_kv_cache_f32(const MpsGraphBuffer& source,
                                           MpsGraphBuffer& cache,
                                           std::size_t layer,

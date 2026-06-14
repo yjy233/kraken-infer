@@ -70,6 +70,24 @@ Status validate_f32_buffer(const MpsGraphBuffer& buffer, std::size_t values,
   return Status::ok();
 }
 
+Status validate_i32_buffer(const MpsGraphBuffer& buffer, std::size_t values,
+                           const char* name) {
+  std::size_t byte_count = 0;
+  if (!checked_mul(values, sizeof(std::int32_t), byte_count)) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " byte count overflow");
+  }
+  if (!buffer.valid()) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " buffer is not initialized");
+  }
+  if (buffer.byte_size() < byte_count) {
+    return Status::invalid_argument(std::string{"MPSGraph "} + name +
+                                    " buffer is too small");
+  }
+  return Status::ok();
+}
+
 Status validate_positive_dim(std::size_t value, const char* name) {
   if (value == 0) {
     return Status::invalid_argument(std::string{"MPSGraph "} + name +
@@ -209,6 +227,7 @@ struct MpsGraphContext::Impl {
   id<MTLDevice> device{nil};
   id<MTLCommandQueue> queue{nil};
   MPSGraphDevice* graph_device{nil};
+  mutable MpsGraphTransferStats transfer_stats;
 
   ~Impl() {
     if (graph_device != nil) {
@@ -275,6 +294,10 @@ bool MpsGraphContext::valid() const {
          impl_->graph_device != nil;
 }
 
+MpsGraphTransferStats MpsGraphContext::transfer_stats() const {
+  return impl_ == nullptr ? MpsGraphTransferStats{} : impl_->transfer_stats;
+}
+
 Result<MpsGraphBuffer> MpsGraphContext::make_buffer(std::size_t byte_size) const {
   if (!valid()) {
     return Status::unavailable(kNotReady);
@@ -325,6 +348,8 @@ Status MpsGraphContext::copy_to_buffer_at(MpsGraphBuffer& buffer,
 
   auto* destination = static_cast<std::byte*>([buffer.impl_->buffer contents]);
   std::memcpy(destination + byte_offset, data, byte_size);
+  ++impl_->transfer_stats.host_to_device_calls;
+  impl_->transfer_stats.host_to_device_bytes += byte_size;
   return Status::ok();
 }
 
@@ -344,6 +369,8 @@ Status MpsGraphContext::copy_from_buffer(const MpsGraphBuffer& buffer, void* dat
   }
 
   std::memcpy(data, [buffer.impl_->buffer contents], byte_size);
+  ++impl_->transfer_stats.device_to_host_calls;
+  impl_->transfer_stats.device_to_host_bytes += byte_size;
   return Status::ok();
 }
 
@@ -1144,6 +1171,151 @@ Status MpsGraphContext::write_i32_token(const MpsGraphBuffer& token,
     [output_data release];
     [graph release];
     return status;
+  }
+}
+
+Status MpsGraphContext::reset_generation_status_i32(MpsGraphBuffer& status) const {
+  constexpr std::int32_t kGeneratedCount = 0;
+  constexpr std::int32_t kLengthReason = 2;
+  constexpr std::int32_t kNotFinished = 0;
+  const std::int32_t initial_status[] = {kGeneratedCount, kLengthReason, kNotFinished};
+  return copy_to_buffer(status, initial_status, sizeof(initial_status));
+}
+
+Status MpsGraphContext::update_generation_status_i32(
+  const MpsGraphBuffer& token, const std::int64_t* eos_tokens,
+  std::size_t eos_token_count, std::size_t step, bool final_step,
+  MpsGraphBuffer& status) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto token_status = validate_i32_buffer(token, 1, "generation status token");
+  if (!token_status.is_ok()) {
+    return token_status;
+  }
+  auto status_status = validate_i32_buffer(status, 3, "generation status");
+  if (!status_status.is_ok()) {
+    return status_status;
+  }
+  if (eos_token_count == 0) {
+    return Status::invalid_argument("MPSGraph generation status EOS tokens must not be empty");
+  }
+  if (eos_tokens == nullptr) {
+    return Status::invalid_argument("MPSGraph generation status EOS tokens must not be null");
+  }
+  if (step > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max() - 1)) {
+    return Status::invalid_argument("MPSGraph generation status step exceeds int32 range");
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* scalar_shape = make_shape({1});
+    MPSShape* status_shape = make_shape({3});
+    MPSGraphTensor* token_tensor =
+      [graph placeholderWithShape:scalar_shape dataType:MPSDataTypeInt32 name:nil];
+    MPSGraphTensor* status_tensor =
+      [graph placeholderWithShape:status_shape dataType:MPSDataTypeInt32 name:nil];
+
+    MPSGraphTensor* previous_count =
+      [graph sliceTensor:status_tensor dimension:0 start:0 length:1 name:nil];
+    MPSGraphTensor* previous_reason =
+      [graph sliceTensor:status_tensor dimension:0 start:1 length:1 name:nil];
+    MPSGraphTensor* previous_finished_i32 =
+      [graph sliceTensor:status_tensor dimension:0 start:2 length:1 name:nil];
+    MPSGraphTensor* zero_i32 =
+      [graph constantWithScalar:0.0 shape:scalar_shape dataType:MPSDataTypeInt32];
+    MPSGraphTensor* previous_finished =
+      [graph notEqualWithPrimaryTensor:previous_finished_i32
+                       secondaryTensor:zero_i32
+                                  name:nil];
+
+    MPSGraphTensor* is_eos = nil;
+    for (std::size_t index = 0; index < eos_token_count; ++index) {
+      const auto eos = static_cast<std::int32_t>(eos_tokens[index]);
+      MPSGraphTensor* eos_tensor =
+        [graph constantWithScalar:static_cast<double>(eos)
+                            shape:scalar_shape
+                         dataType:MPSDataTypeInt32];
+      MPSGraphTensor* matches =
+        [graph equalWithPrimaryTensor:token_tensor secondaryTensor:eos_tensor name:nil];
+      is_eos = is_eos == nil
+                 ? matches
+                 : [graph logicalORWithPrimaryTensor:is_eos
+                                      secondaryTensor:matches
+                                                 name:nil];
+    }
+    MPSGraphTensor* should_stop =
+      [graph logicalORWithPrimaryTensor:previous_finished
+                         secondaryTensor:is_eos
+                                    name:nil];
+
+    MPSGraphTensor* current_count =
+      [graph constantWithScalar:static_cast<double>(step + 1U)
+                          shape:scalar_shape
+                       dataType:MPSDataTypeInt32];
+    MPSGraphTensor* step_count =
+      [graph selectWithPredicateTensor:is_eos
+                   truePredicateTensor:previous_count
+                  falsePredicateTensor:current_count
+                                  name:nil];
+    MPSGraphTensor* next_count =
+      [graph selectWithPredicateTensor:should_stop
+                   truePredicateTensor:previous_count
+                  falsePredicateTensor:step_count
+                                  name:nil];
+    MPSGraphTensor* stop_reason =
+      [graph constantWithScalar:1.0 shape:scalar_shape dataType:MPSDataTypeInt32];
+    MPSGraphTensor* length_reason =
+      [graph constantWithScalar:2.0 shape:scalar_shape dataType:MPSDataTypeInt32];
+    MPSGraphTensor* step_reason =
+      [graph selectWithPredicateTensor:is_eos
+                   truePredicateTensor:stop_reason
+                  falsePredicateTensor:(final_step ? length_reason : previous_reason)
+                                  name:nil];
+    MPSGraphTensor* next_reason =
+      [graph selectWithPredicateTensor:previous_finished
+                   truePredicateTensor:previous_reason
+                  falsePredicateTensor:step_reason
+                                  name:nil];
+    MPSGraphTensor* one_i32 =
+      [graph constantWithScalar:1.0 shape:scalar_shape dataType:MPSDataTypeInt32];
+    MPSGraphTensor* next_finished =
+      [graph selectWithPredicateTensor:should_stop
+                   truePredicateTensor:one_i32
+                  falsePredicateTensor:zero_i32
+                                  name:nil];
+    MPSGraphTensor* count_reason =
+      [graph concatTensor:next_count withTensor:next_reason dimension:0 name:nil];
+    MPSGraphTensor* result =
+      [graph concatTensor:count_reason withTensor:next_finished dimension:0 name:nil];
+
+    MPSGraphTensorData* token_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:token.impl_->buffer
+                                             shape:scalar_shape
+                                          dataType:MPSDataTypeInt32];
+    MPSGraphTensorData* status_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:status.impl_->buffer
+                                             shape:status_shape
+                                          dataType:MPSDataTypeInt32];
+    MPSGraphTensorData* status_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:status.impl_->buffer
+                                             shape:status_shape
+                                          dataType:MPSDataTypeInt32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      token_tensor : token_data,
+      status_tensor : status_input_data,
+    };
+    const auto result_status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, status_output_data);
+    [token_data release];
+    [status_input_data release];
+    [status_output_data release];
+    [graph release];
+    return result_status;
   }
 }
 

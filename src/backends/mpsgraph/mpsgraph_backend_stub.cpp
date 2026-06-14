@@ -42,6 +42,10 @@ bool MpsGraphContext::valid() const {
   return false;
 }
 
+MpsGraphTransferStats MpsGraphContext::transfer_stats() const {
+  return {};
+}
+
 Result<MpsGraphBuffer> MpsGraphContext::make_buffer(std::size_t byte_size) const {
   (void)byte_size;
   return Status::unavailable(kUnavailable);
@@ -190,6 +194,24 @@ Status MpsGraphContext::write_i32_token(const MpsGraphBuffer& token,
   (void)output;
   (void)index;
   (void)capacity;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::reset_generation_status_i32(MpsGraphBuffer& status) const {
+  (void)status;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::update_generation_status_i32(
+  const MpsGraphBuffer& token, const std::int64_t* eos_tokens,
+  std::size_t eos_token_count, std::size_t step, bool final_step,
+  MpsGraphBuffer& status) const {
+  (void)token;
+  (void)eos_tokens;
+  (void)eos_token_count;
+  (void)step;
+  (void)final_step;
+  (void)status;
   return Status::unavailable(kUnavailable);
 }
 

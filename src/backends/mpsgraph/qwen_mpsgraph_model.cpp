@@ -1,5 +1,7 @@
 #include "toyllm/backends/mpsgraph/qwen_mpsgraph_model.hpp"
 
+#include "toyllm/runtime/qwen_tokenizer.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -256,6 +258,15 @@ Result<QwenMpsGraphRunState> QwenMpsGraphModel::create_run_state(
   if (!status.is_ok()) {
     return status;
   }
+  auto generation_status = context.make_buffer(3U * sizeof(std::int32_t));
+  if (!generation_status.is_ok()) {
+    return generation_status.status();
+  }
+  state.generation_status = std::move(generation_status.value());
+  status = context.reset_generation_status_i32(state.generation_status);
+  if (!status.is_ok()) {
+    return status;
+  }
   status = state.kv_cache.reset(context, layers, capacity_tokens, kv_heads, head_dim);
   if (!status.is_ok()) {
     return status;
@@ -384,6 +395,22 @@ Status QwenMpsGraphModel::record_next_token(const MpsGraphContext& context,
   }
   return context.write_i32_token(state.next_token, state.generated_tokens, step,
                                  state.generated_capacity);
+}
+
+Status QwenMpsGraphModel::update_generation_status(
+  const MpsGraphContext& context, std::size_t step, bool final_step,
+  QwenMpsGraphRunState& state) const {
+  if (!state.generation_status.valid()) {
+    return Status::invalid_argument("MPSGraph generation status buffer is not allocated");
+  }
+  std::vector<std::int64_t> eos_tokens = bundle_.generation.eos_token_ids;
+  eos_tokens.push_back(bundle_.model.eos_token_id);
+  eos_tokens.push_back(kQwenEndOfText);
+  std::sort(eos_tokens.begin(), eos_tokens.end());
+  eos_tokens.erase(std::unique(eos_tokens.begin(), eos_tokens.end()), eos_tokens.end());
+  return context.update_generation_status_i32(
+    state.next_token, eos_tokens.data(), eos_tokens.size(), step, final_step,
+    state.generation_status);
 }
 
 Status QwenMpsGraphModel::prefill_token_ids(

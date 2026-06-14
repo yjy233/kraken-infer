@@ -59,6 +59,7 @@ struct QwenMpsGraphRunState {
   MpsGraphBuffer logits;
   MpsGraphBuffer next_token;
   MpsGraphBuffer generated_tokens;
+  MpsGraphBuffer generation_status;
   MpsGraphKvCache kv_cache;
   std::size_t capacity_tokens{0};
   std::size_t generated_capacity{0};
@@ -106,6 +107,10 @@ class QwenMpsGraphModel {
   [[nodiscard]] Status record_next_token(const MpsGraphContext& context,
                                          std::size_t step,
                                          QwenMpsGraphRunState& state) const;
+  [[nodiscard]] Status update_generation_status(const MpsGraphContext& context,
+                                                std::size_t step,
+                                                bool final_step,
+                                                QwenMpsGraphRunState& state) const;
   [[nodiscard]] Result<std::vector<float>> debug_forward_token(
     const MpsGraphContext& context, std::int64_t token, std::size_t position,
     QwenMpsGraphRunState& state) const;
