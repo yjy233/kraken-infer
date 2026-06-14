@@ -106,7 +106,7 @@ MPSGraph API 表达和执行。
 ### Runtime Separation
 
 - [x] 新增 `src/runtime/mpsgraph/` 或等价独立 runtime 目录
-- [ ] 新增 `QwenMpsGraphModel`
+- [x] 新增 `QwenMpsGraphModel`
 - [x] 新增 `generate_mpsgraph()`
 - [x] runtime dispatch 支持 `DeviceKind::mpsgraph`
 - [x] 不把 MPSGraph path 塞进 `src/runtime/cpu/qwen_cpu_model.cpp`
@@ -114,14 +114,14 @@ MPSGraph API 表达和执行。
 
 ### Weight Store
 
-- [ ] 读取 safetensors metadata
-- [ ] 校验 Qwen3 0.6B 权重 shape
-- [ ] 建立 MPSGraph weight tensor store
-- [ ] embedding weight device-resident
+- [x] 读取 safetensors metadata
+- [x] 校验 Qwen3 0.6B 权重 shape
+- [x] 建立 MPSGraph weight tensor store
+- [x] embedding weight device-resident smoke
 - [ ] lm_head weight device-resident
 - [ ] 28 层 attention weights device-resident
 - [ ] 28 层 MLP weights device-resident
-- [ ] norm weights device-resident
+- [x] final norm weight device-resident smoke
 - [ ] 权重跨请求复用
 - [ ] 模型卸载时释放 weight store
 
@@ -140,7 +140,7 @@ MPSGraph API 表达和执行。
 
 - [x] embedding gather f32 smoke
 - [x] RMSNorm f32 smoke
-- [ ] Q/K per-head RMSNorm
+- [x] Q/K per-head RMSNorm
 - [ ] BF16/FP16/FP32 matmul policy spike
 - [x] matvec f32 smoke
 - [ ] q_proj
@@ -151,22 +151,23 @@ MPSGraph API 表达和执行。
 - [ ] up_proj
 - [ ] down_proj
 - [ ] lm_head
-- [ ] RoPE
+- [x] RoPE
 - [x] SiLU f32 smoke
 - [x] residual add f32 smoke
+- [x] single-token attention f32 smoke
 - [x] argmax smoke
 
 ### KV Cache
 
-- [ ] 设计 MPSGraph KV cache layout
-- [ ] 分配 device-resident K cache
-- [ ] 分配 device-resident V cache
+- [x] 设计 MPSGraph KV cache layout
+- [x] 分配 device-resident K cache
+- [x] 分配 device-resident V cache
 - [ ] prefill 写入 cache
 - [ ] decode 追加 cache
-- [ ] attention 读取 `0..position`
+- [x] attention operator 读取 `0..position`
 - [ ] fixed-shape causal mask
-- [ ] cache capacity 越界返回明确错误
-- [ ] 不维护 CPU mirror
+- [x] cache capacity 越界返回明确错误
+- [x] 不维护 CPU mirror
 
 ### Prefill Graph
 
@@ -229,12 +230,16 @@ MPSGraph API 表达和执行。
 - [x] MPSGraph availability smoke
 - [x] tiny add/mul/reduce graph smoke
 - [x] RMSNorm f32 smoke vs CPU expected value
+- [x] Q/K per-head RMSNorm smoke vs CPU expected value
 - [x] matvec f32 smoke vs CPU expected value
-- [ ] RoPE vs CPU
+- [x] RoPE vs CPU
 - [x] SiLU f32 smoke vs CPU expected value
 - [x] argmax smoke
+- [x] MPSGraph weight store metadata smoke
+- [x] QwenMpsGraphModel core weight load smoke
+- [x] MPSGraph KV cache layout smoke
 - [ ] layer 0 position 0 vs CPU
-- [ ] attention output vs CPU
+- [x] attention output vs CPU
 - [ ] MLP output vs CPU
 - [ ] full model `hello`, 1 token greedy vs CPU
 - [ ] full model `hello`, 2 tokens greedy vs CPU

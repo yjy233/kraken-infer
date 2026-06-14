@@ -28,6 +28,9 @@ CORE_SRCS := \
 	src/runtime/openai_gateway.cpp \
 	src/runtime/profiling.cpp \
 	src/runtime/runtime.cpp \
+	src/backends/mpsgraph/mpsgraph_kv_cache.cpp \
+	src/backends/mpsgraph/qwen_mpsgraph_model.cpp \
+	src/backends/mpsgraph/mpsgraph_weight_store.cpp \
 	src/backends/mps/mps_backend.mm \
 	src/backends/mpsgraph/mpsgraph_backend.mm
 

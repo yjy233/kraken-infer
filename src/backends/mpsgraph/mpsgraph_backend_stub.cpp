@@ -55,6 +55,17 @@ Status MpsGraphContext::copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::copy_to_buffer_at(MpsGraphBuffer& buffer,
+                                          std::size_t byte_offset,
+                                          const void* data,
+                                          std::size_t byte_size) const {
+  (void)buffer;
+  (void)byte_offset;
+  (void)data;
+  (void)byte_size;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::copy_from_buffer(const MpsGraphBuffer& buffer, void* data,
                                          std::size_t byte_size) const {
   (void)buffer;
@@ -84,6 +95,33 @@ Status MpsGraphContext::rms_norm_f32(const MpsGraphBuffer& input,
   (void)weight;
   (void)size;
   (void)eps;
+  (void)output;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::qk_norm_f32(const MpsGraphBuffer& input,
+                                    const MpsGraphBuffer& weight,
+                                    std::size_t heads, std::size_t head_dim,
+                                    float eps,
+                                    MpsGraphBuffer& output) const {
+  (void)input;
+  (void)weight;
+  (void)heads;
+  (void)head_dim;
+  (void)eps;
+  (void)output;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::rope_f32(const MpsGraphBuffer& input,
+                                 std::size_t heads, std::size_t head_dim,
+                                 std::size_t position, float theta,
+                                 MpsGraphBuffer& output) const {
+  (void)input;
+  (void)heads;
+  (void)head_dim;
+  (void)position;
+  (void)theta;
   (void)output;
   return Status::unavailable(kUnavailable);
 }
@@ -118,6 +156,27 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
   (void)lhs;
   (void)rhs;
   (void)size;
+  (void)output;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::attention_f32(const MpsGraphBuffer& query,
+                                      const MpsGraphBuffer& key_cache,
+                                      const MpsGraphBuffer& value_cache,
+                                      std::size_t layer, std::size_t position,
+                                      std::size_t capacity_tokens,
+                                      std::size_t heads, std::size_t kv_heads,
+                                      std::size_t head_dim,
+                                      MpsGraphBuffer& output) const {
+  (void)query;
+  (void)key_cache;
+  (void)value_cache;
+  (void)layer;
+  (void)position;
+  (void)capacity_tokens;
+  (void)heads;
+  (void)kv_heads;
+  (void)head_dim;
   (void)output;
   return Status::unavailable(kUnavailable);
 }

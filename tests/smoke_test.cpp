@@ -1,5 +1,8 @@
 #include "toyllm/backends/mps/mps_backend.hpp"
 #include "toyllm/backends/mpsgraph/mpsgraph_backend.hpp"
+#include "toyllm/backends/mpsgraph/mpsgraph_kv_cache.hpp"
+#include "toyllm/backends/mpsgraph/mpsgraph_weight_store.hpp"
+#include "toyllm/backends/mpsgraph/qwen_mpsgraph_model.hpp"
 #include "toyllm/core/tensor.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
@@ -12,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -93,6 +97,40 @@ void test_mpsgraph_generation_does_not_fallback() {
   assert(result.status().code() == toyllm::StatusCode::unavailable);
 }
 
+void test_mpsgraph_kv_cache_layout() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  toyllm::mpsgraph::MpsGraphKvCache cache;
+  assert(cache.reset(context, 2, 3, 2, 4).is_ok());
+  assert(cache.allocated());
+  assert(cache.key_buffer().valid());
+  assert(cache.value_buffer().valid());
+  assert(cache.value_offset(0, 0) == 0);
+  assert(cache.value_offset(0, 2) == 16);
+  assert(cache.value_offset(1, 0) == 24);
+
+  auto stats = cache.stats();
+  assert(stats.allocated);
+  assert(stats.layers == 2);
+  assert(stats.capacity_tokens == 3);
+  assert(stats.kv_heads == 2);
+  assert(stats.head_dim == 4);
+  assert(stats.kv_dim == 8);
+  assert(stats.key_bytes == 192);
+  assert(stats.value_bytes == 192);
+  assert(stats.total_bytes == 384);
+  assert(stats.used_tokens == 0);
+
+  assert(cache.mark_position_used(2).is_ok());
+  stats = cache.stats();
+  assert(stats.used_tokens == 3);
+  assert(!cache.mark_position_used(3).is_ok());
+}
+
 std::uint16_t float_to_bf16(float value) {
   std::uint32_t bits = 0;
   static_assert(sizeof(bits) == sizeof(value));
@@ -138,6 +176,74 @@ std::vector<float> read_f32_buffer(const toyllm::mps::MpsContext& context,
 
 void assert_close(float actual, float expected) {
   assert(std::abs(actual - expected) < 1e-5F);
+}
+
+toyllm::mpsgraph::MpsGraphBuffer make_mpsgraph_f32_buffer(
+  const toyllm::mpsgraph::MpsGraphContext& context,
+  const std::vector<float>& values) {
+  auto buffer_result = context.make_buffer(values.size() * sizeof(float));
+  assert(buffer_result.is_ok());
+  auto buffer = std::move(buffer_result.value());
+  const auto status = context.copy_to_buffer(buffer, values.data(),
+                                            values.size() * sizeof(float));
+  assert(status.is_ok());
+  return buffer;
+}
+
+std::vector<float> read_mpsgraph_f32_buffer(
+  const toyllm::mpsgraph::MpsGraphContext& context,
+  const toyllm::mpsgraph::MpsGraphBuffer& buffer,
+  std::size_t values) {
+  std::vector<float> output(values);
+  const auto status = context.copy_from_buffer(buffer, output.data(),
+                                              values * sizeof(float));
+  assert(status.is_ok());
+  return output;
+}
+
+void test_mpsgraph_qk_norm_rope_and_attention_ops() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  auto qk_input = make_mpsgraph_f32_buffer(context, {3.0F, 4.0F, 0.0F, 2.0F});
+  auto qk_weight = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F});
+  auto qk_output_result = context.make_buffer(4U * sizeof(float));
+  assert(qk_output_result.is_ok());
+  auto qk_output = std::move(qk_output_result.value());
+  assert(context.qk_norm_f32(qk_input, qk_weight, 2, 2, 0.0F, qk_output).is_ok());
+  auto output = read_mpsgraph_f32_buffer(context, qk_output, 4);
+  assert(std::abs(output[0] - 3.0F / std::sqrt(12.5F)) < 1e-4F);
+  assert(std::abs(output[1] - 8.0F / std::sqrt(12.5F)) < 1e-4F);
+  assert(std::abs(output[2]) < 1e-4F);
+  assert(std::abs(output[3] - 4.0F / std::sqrt(2.0F)) < 1e-4F);
+
+  auto rope_input = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F});
+  auto rope_output_result = context.make_buffer(2U * sizeof(float));
+  assert(rope_output_result.is_ok());
+  auto rope_output = std::move(rope_output_result.value());
+  assert(context.rope_f32(rope_input, 1, 2, 1, 10000.0F, rope_output).is_ok());
+  output = read_mpsgraph_f32_buffer(context, rope_output, 2);
+  assert(std::abs(output[0] - (std::cos(1.0F) - 2.0F * std::sin(1.0F))) < 1e-4F);
+  assert(std::abs(output[1] - (2.0F * std::cos(1.0F) + std::sin(1.0F))) < 1e-4F);
+
+  auto query = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F});
+  auto key_cache = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F, 0.0F, 1.0F});
+  auto value_cache = make_mpsgraph_f32_buffer(context, {5.0F, 6.0F, 7.0F, 8.0F});
+  auto attention_output_result = context.make_buffer(2U * sizeof(float));
+  assert(attention_output_result.is_ok());
+  auto attention_output = std::move(attention_output_result.value());
+  assert(context.attention_f32(query, key_cache, value_cache, 0, 1, 2, 1, 1, 2,
+                               attention_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, attention_output, 2);
+  const auto score0 = std::exp(1.0F / std::sqrt(2.0F));
+  const auto weight0 = score0 / (score0 + 1.0F);
+  const auto weight1 = 1.0F - weight0;
+  assert(std::abs(output[0] - (weight0 * 5.0F + weight1 * 7.0F)) < 1e-4F);
+  assert(std::abs(output[1] - (weight0 * 6.0F + weight1 * 8.0F)) < 1e-4F);
 }
 
 void test_mps_matvec_workspace_reuse() {
@@ -352,6 +458,63 @@ void write_fake_safetensors(const std::filesystem::path& path, const std::string
   }
 }
 
+struct TinyTensorSpec {
+  std::string name;
+  std::vector<std::uint64_t> shape;
+  std::vector<float> values;
+};
+
+void write_bf16_safetensors(const std::filesystem::path& path,
+                            const std::vector<TinyTensorSpec>& tensors) {
+  std::ostringstream header;
+  std::vector<std::uint16_t> payload;
+  std::uint64_t byte_offset = 0;
+
+  header << "{";
+  for (std::size_t tensor_index = 0; tensor_index < tensors.size(); ++tensor_index) {
+    const auto& tensor = tensors[tensor_index];
+    if (tensor_index != 0) {
+      header << ",";
+    }
+    std::uint64_t elements = 1;
+    for (const auto dim : tensor.shape) {
+      elements *= dim;
+    }
+    assert(elements == static_cast<std::uint64_t>(tensor.values.size()));
+    const auto begin = byte_offset;
+    const auto bytes = elements * sizeof(std::uint16_t);
+    const auto end = begin + bytes;
+    header << "\"" << tensor.name << "\":{\"dtype\":\"BF16\",\"shape\":[";
+    for (std::size_t dim_index = 0; dim_index < tensor.shape.size(); ++dim_index) {
+      if (dim_index != 0) {
+        header << ",";
+      }
+      header << tensor.shape[dim_index];
+    }
+    header << "],\"data_offsets\":[" << begin << "," << end << "]}";
+    for (const auto value : tensor.values) {
+      payload.push_back(float_to_bf16(value));
+    }
+    byte_offset = end;
+  }
+  header << "}";
+
+  std::ofstream output(path, std::ios::binary);
+  if (!output) {
+    throw std::runtime_error("failed to create " + path.string());
+  }
+  const auto header_text = header.str();
+  const auto header_size = static_cast<std::uint64_t>(header_text.size());
+  for (int index = 0; index < 8; ++index) {
+    const auto byte = static_cast<char>((header_size >> (8U * static_cast<unsigned int>(index))) &
+                                        0xFFU);
+    output.put(byte);
+  }
+  output.write(header_text.data(), static_cast<std::streamsize>(header_text.size()));
+  output.write(reinterpret_cast<const char*>(payload.data()),
+               static_cast<std::streamsize>(payload.size() * sizeof(std::uint16_t)));
+}
+
 std::filesystem::path create_tiny_model_dir(std::string_view name) {
   const auto model_dir = std::filesystem::temp_directory_path() / std::filesystem::path{name};
   std::filesystem::remove_all(model_dir);
@@ -394,6 +557,97 @@ std::filesystem::path create_tiny_model_dir(std::string_view name) {
   return model_dir;
 }
 
+void write_tiny_qwen_mpsgraph_safetensors(const std::filesystem::path& path) {
+  write_bf16_safetensors(
+    path,
+    {
+      {"model.embed_tokens.weight", {4, 2}, {1.0F, 2.0F, 3.0F, 4.0F,
+                                             5.0F, 6.0F, 7.0F, 8.0F}},
+      {"lm_head.weight", {4, 2}, {1.0F, 1.0F, 1.0F, 1.0F,
+                                  1.0F, 1.0F, 1.0F, 1.0F}},
+      {"model.norm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.input_layernorm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.post_attention_layernorm.weight", {2}, {1.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_proj.weight", {2, 2}, {1.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.k_proj.weight", {1, 2}, {1.0F, 0.0F}},
+      {"model.layers.0.self_attn.v_proj.weight", {1, 2}, {0.0F, 1.0F}},
+      {"model.layers.0.self_attn.o_proj.weight", {2, 2}, {1.0F, 0.0F, 0.0F, 1.0F}},
+      {"model.layers.0.self_attn.q_norm.weight", {1}, {1.0F}},
+      {"model.layers.0.self_attn.k_norm.weight", {1}, {1.0F}},
+      {"model.layers.0.mlp.gate_proj.weight", {3, 2}, {1.0F, 0.0F, 0.0F,
+                                                       1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.mlp.up_proj.weight", {3, 2}, {1.0F, 1.0F, 1.0F,
+                                                     1.0F, 1.0F, 1.0F}},
+      {"model.layers.0.mlp.down_proj.weight", {2, 3}, {1.0F, 0.0F, 0.0F,
+                                                       0.0F, 1.0F, 0.0F}},
+    });
+}
+
+void test_mpsgraph_weight_store_metadata_and_upload() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  auto model_dir = create_tiny_model_dir("kraken-infer-mpsgraph-weight-store-smoke");
+  write_tiny_qwen_mpsgraph_safetensors(model_dir / "model.safetensors");
+
+  const auto bundle = toyllm::load_model_bundle(model_dir);
+  assert(bundle.is_ok());
+  auto store_result =
+    toyllm::mpsgraph::MpsGraphWeightStore::load_metadata(model_dir / "model.safetensors");
+  assert(store_result.is_ok());
+  auto store = std::move(store_result.value());
+  assert(store.tensors().size() == 14);
+  assert(store.contains("model.embed_tokens.weight"));
+  assert(store.validate_qwen3_shapes(bundle.value().model).is_ok());
+
+  auto device_tensor = store.upload_tensor_f32(context, "model.embed_tokens.weight");
+  assert(device_tensor.is_ok());
+  assert(device_tensor.value().shape == std::vector<std::uint64_t>({4, 2}));
+  assert(device_tensor.value().elements == 8);
+
+  std::vector<float> output(8);
+  const auto read_status =
+    context.copy_from_buffer(device_tensor.value().buffer, output.data(),
+                             output.size() * sizeof(float));
+  assert(read_status.is_ok());
+  for (std::size_t i = 0; i < output.size(); ++i) {
+    assert_close(output[i], static_cast<float>(i + 1U));
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(model_dir, ec);
+}
+
+void test_qwen_mpsgraph_model_core_weight_load() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+  auto context = std::move(context_result.value());
+
+  auto model_dir = create_tiny_model_dir("kraken-infer-qwen-mpsgraph-model-smoke");
+  write_tiny_qwen_mpsgraph_safetensors(model_dir / "model.safetensors");
+
+  auto model = toyllm::mpsgraph::QwenMpsGraphModel::load_core_weights(model_dir, context);
+  assert(model.is_ok());
+  assert(model.value().config().hidden_size == 2);
+  assert(model.value().info().tensor_count == 14);
+  assert(model.value().info().core_weights_uploaded);
+  assert(model.value().info().device_tensor_count == 2);
+
+  const auto hidden = model.value().debug_embed_token(context, 2);
+  assert(hidden.is_ok());
+  assert(hidden.value().size() == 2);
+  assert_close(hidden.value()[0], 5.0F);
+  assert_close(hidden.value()[1], 6.0F);
+
+  std::error_code ec;
+  std::filesystem::remove_all(model_dir, ec);
+}
+
 void test_weight_summary_regressions() {
   auto invalid_header_dir = create_tiny_model_dir("kraken-infer-invalid-header-smoke");
   write_fake_safetensors(invalid_header_dir / "model.safetensors", R"({})", 0);
@@ -431,6 +685,8 @@ int main() {
   test_mpsgraph_backend_query();
   test_mpsgraph_operator_smoke();
   test_mpsgraph_generation_does_not_fallback();
+  test_mpsgraph_kv_cache_layout();
+  test_mpsgraph_qk_norm_rope_and_attention_ops();
   test_mps_matvec_workspace_reuse();
   test_mps_full_forward_operators();
   test_profile_artifacts();
@@ -438,6 +694,8 @@ int main() {
   test_cpu_generation_entrypoint();
   test_weight_summary();
   test_weight_summary_regressions();
+  test_mpsgraph_weight_store_metadata_and_upload();
+  test_qwen_mpsgraph_model_core_weight_load();
 
   std::cout << "smoke tests passed\n";
   return 0;

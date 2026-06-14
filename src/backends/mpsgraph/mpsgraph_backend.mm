@@ -303,6 +303,13 @@ Result<MpsGraphBuffer> MpsGraphContext::make_buffer(std::size_t byte_size) const
 
 Status MpsGraphContext::copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
                                        std::size_t byte_size) const {
+  return copy_to_buffer_at(buffer, 0, data, byte_size);
+}
+
+Status MpsGraphContext::copy_to_buffer_at(MpsGraphBuffer& buffer,
+                                          std::size_t byte_offset,
+                                          const void* data,
+                                          std::size_t byte_size) const {
   if (!valid()) {
     return Status::unavailable(kNotReady);
   }
@@ -312,11 +319,12 @@ Status MpsGraphContext::copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
   if (data == nullptr) {
     return Status::invalid_argument("MPSGraph copy source must not be null");
   }
-  if (byte_size > buffer.byte_size()) {
+  if (byte_offset > buffer.byte_size() || byte_size > buffer.byte_size() - byte_offset) {
     return Status::invalid_argument("MPSGraph copy size exceeds destination buffer size");
   }
 
-  std::memcpy([buffer.impl_->buffer contents], data, byte_size);
+  auto* destination = static_cast<std::byte*>([buffer.impl_->buffer contents]);
+  std::memcpy(destination + byte_offset, data, byte_size);
   return Status::ok();
 }
 
@@ -488,6 +496,227 @@ Status MpsGraphContext::rms_norm_f32(const MpsGraphBuffer& input,
       run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
     [input_data release];
     [weight_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::qk_norm_f32(const MpsGraphBuffer& input,
+                                    const MpsGraphBuffer& weight,
+                                    std::size_t heads, std::size_t head_dim,
+                                    float eps,
+                                    MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto heads_status = validate_positive_dim(heads, "qk norm heads");
+  if (!heads_status.is_ok()) {
+    return heads_status;
+  }
+  auto head_dim_status = validate_positive_dim(head_dim, "qk norm head_dim");
+  if (!head_dim_status.is_ok()) {
+    return head_dim_status;
+  }
+  if (!std::isfinite(eps)) {
+    return Status::invalid_argument("MPSGraph qk norm eps must be finite");
+  }
+  std::size_t values = 0;
+  if (!checked_mul(heads, head_dim, values)) {
+    return Status::invalid_argument("MPSGraph qk norm element count overflow");
+  }
+  auto input_status = validate_f32_buffer(input, values, "qk norm input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto weight_status = validate_f32_buffer(weight, head_dim, "qk norm weight");
+  if (!weight_status.is_ok()) {
+    return weight_status;
+  }
+  auto output_status = validate_f32_buffer(output, values, "qk norm output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* matrix_shape = make_shape({heads, head_dim});
+    MPSShape* vector_shape = make_shape({head_dim});
+    MPSShape* head_scale_shape = make_shape({heads, 1});
+    MPSGraphTensor* input_tensor =
+      [graph placeholderWithShape:matrix_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* weight_tensor =
+      [graph placeholderWithShape:vector_shape dataType:MPSDataTypeFloat32 name:nil];
+
+    MPSGraphTensor* squared = [graph squareWithTensor:input_tensor name:nil];
+    MPSGraphTensor* sum = [graph reductionSumWithTensor:squared axis:1 name:nil];
+    MPSGraphTensor* denom =
+      [graph constantWithScalar:static_cast<double>(head_dim)
+                          shape:@[ @1 ]
+                       dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* mean =
+      [graph divisionWithPrimaryTensor:sum secondaryTensor:denom name:nil];
+    MPSGraphTensor* eps_tensor =
+      [graph constantWithScalar:static_cast<double>(eps)
+                          shape:@[ @1 ]
+                       dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* variance =
+      [graph additionWithPrimaryTensor:mean secondaryTensor:eps_tensor name:nil];
+    MPSGraphTensor* scale = [graph reciprocalSquareRootWithTensor:variance name:nil];
+    MPSGraphTensor* scale_column =
+      [graph reshapeTensor:scale withShape:head_scale_shape name:nil];
+    MPSGraphTensor* scale_matrix =
+      [graph broadcastTensor:scale_column toShape:matrix_shape name:nil];
+    MPSGraphTensor* weight_row =
+      [graph reshapeTensor:weight_tensor withShape:make_shape({1, head_dim}) name:nil];
+    MPSGraphTensor* weight_matrix =
+      [graph broadcastTensor:weight_row toShape:matrix_shape name:nil];
+    MPSGraphTensor* normalized =
+      [graph multiplicationWithPrimaryTensor:input_tensor secondaryTensor:scale_matrix name:nil];
+    MPSGraphTensor* result =
+      [graph multiplicationWithPrimaryTensor:normalized secondaryTensor:weight_matrix name:nil];
+
+    MPSGraphTensorData* input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
+                                             shape:matrix_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:weight.impl_->buffer
+                                             shape:vector_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:matrix_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      input_tensor : input_data,
+      weight_tensor : weight_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [input_data release];
+    [weight_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::rope_f32(const MpsGraphBuffer& input,
+                                 std::size_t heads, std::size_t head_dim,
+                                 std::size_t position, float theta,
+                                 MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto heads_status = validate_positive_dim(heads, "RoPE heads");
+  if (!heads_status.is_ok()) {
+    return heads_status;
+  }
+  auto head_dim_status = validate_positive_dim(head_dim, "RoPE head_dim");
+  if (!head_dim_status.is_ok()) {
+    return head_dim_status;
+  }
+  if (head_dim % 2U != 0) {
+    return Status::invalid_argument("MPSGraph RoPE head_dim must be even");
+  }
+  if (!std::isfinite(theta) || theta <= 0.0F) {
+    return Status::invalid_argument("MPSGraph RoPE theta must be positive and finite");
+  }
+  std::size_t values = 0;
+  if (!checked_mul(heads, head_dim, values)) {
+    return Status::invalid_argument("MPSGraph RoPE element count overflow");
+  }
+  auto input_status = validate_f32_buffer(input, values, "RoPE input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto output_status = validate_f32_buffer(output, values, "RoPE output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+  const auto half_dim = head_dim / 2U;
+  auto trig_bytes = f32_bytes(half_dim, "RoPE trig constants");
+  if (!trig_bytes.is_ok()) {
+    return trig_bytes.status();
+  }
+
+  std::vector<float> cos_values(half_dim);
+  std::vector<float> sin_values(half_dim);
+  for (std::size_t dim = 0; dim < half_dim; ++dim) {
+    const auto exponent =
+      static_cast<double>(2U * dim) / static_cast<double>(head_dim);
+    const auto frequency = 1.0 / std::pow(static_cast<double>(theta), exponent);
+    const auto angle = static_cast<double>(position) * frequency;
+    cos_values[dim] = static_cast<float>(std::cos(angle));
+    sin_values[dim] = static_cast<float>(std::sin(angle));
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* matrix_shape = make_shape({heads, head_dim});
+    MPSShape* half_shape = make_shape({heads, half_dim});
+    MPSShape* trig_shape = make_shape({1, half_dim});
+    MPSGraphTensor* input_tensor =
+      [graph placeholderWithShape:matrix_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* first_half =
+      [graph sliceTensor:input_tensor dimension:1 start:0
+                  length:static_cast<NSInteger>(half_dim) name:nil];
+    MPSGraphTensor* second_half =
+      [graph sliceTensor:input_tensor dimension:1
+                   start:static_cast<NSInteger>(half_dim)
+                  length:static_cast<NSInteger>(half_dim) name:nil];
+
+    NSData* cos_data =
+      [NSData dataWithBytes:cos_values.data() length:trig_bytes.value()];
+    NSData* sin_data =
+      [NSData dataWithBytes:sin_values.data() length:trig_bytes.value()];
+    MPSGraphTensor* cos_row =
+      [graph constantWithData:cos_data shape:trig_shape dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* sin_row =
+      [graph constantWithData:sin_data shape:trig_shape dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* cos_matrix =
+      [graph broadcastTensor:cos_row toShape:half_shape name:nil];
+    MPSGraphTensor* sin_matrix =
+      [graph broadcastTensor:sin_row toShape:half_shape name:nil];
+
+    MPSGraphTensor* first_cos =
+      [graph multiplicationWithPrimaryTensor:first_half secondaryTensor:cos_matrix name:nil];
+    MPSGraphTensor* second_sin =
+      [graph multiplicationWithPrimaryTensor:second_half secondaryTensor:sin_matrix name:nil];
+    MPSGraphTensor* rotated_first =
+      [graph subtractionWithPrimaryTensor:first_cos secondaryTensor:second_sin name:nil];
+    MPSGraphTensor* second_cos =
+      [graph multiplicationWithPrimaryTensor:second_half secondaryTensor:cos_matrix name:nil];
+    MPSGraphTensor* first_sin =
+      [graph multiplicationWithPrimaryTensor:first_half secondaryTensor:sin_matrix name:nil];
+    MPSGraphTensor* rotated_second =
+      [graph additionWithPrimaryTensor:second_cos secondaryTensor:first_sin name:nil];
+    MPSGraphTensor* result =
+      [graph concatTensor:rotated_first withTensor:rotated_second dimension:1 name:nil];
+
+    MPSGraphTensorData* input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
+                                             shape:matrix_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:matrix_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      input_tensor : input_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [input_data release];
     [output_data release];
     [graph release];
     return status;
@@ -702,6 +931,197 @@ Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
   }
 }
 
+Status MpsGraphContext::attention_f32(const MpsGraphBuffer& query,
+                                      const MpsGraphBuffer& key_cache,
+                                      const MpsGraphBuffer& value_cache,
+                                      std::size_t layer, std::size_t position,
+                                      std::size_t capacity_tokens,
+                                      std::size_t heads, std::size_t kv_heads,
+                                      std::size_t head_dim,
+                                      MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto capacity_status = validate_positive_dim(capacity_tokens, "attention capacity");
+  if (!capacity_status.is_ok()) {
+    return capacity_status;
+  }
+  auto heads_status = validate_positive_dim(heads, "attention heads");
+  if (!heads_status.is_ok()) {
+    return heads_status;
+  }
+  auto kv_heads_status = validate_positive_dim(kv_heads, "attention kv_heads");
+  if (!kv_heads_status.is_ok()) {
+    return kv_heads_status;
+  }
+  auto head_dim_status = validate_positive_dim(head_dim, "attention head_dim");
+  if (!head_dim_status.is_ok()) {
+    return head_dim_status;
+  }
+  if (heads % kv_heads != 0) {
+    return Status::invalid_argument("MPSGraph attention heads must be divisible by kv_heads");
+  }
+  if (position >= capacity_tokens) {
+    return Status::invalid_argument("MPSGraph attention position exceeds KV cache capacity");
+  }
+  if (layer == std::numeric_limits<std::size_t>::max()) {
+    return Status::invalid_argument("MPSGraph attention layer count overflow");
+  }
+  const auto layer_count = layer + 1U;
+  auto layer_status = validate_positive_dim(layer_count, "attention layer count");
+  if (!layer_status.is_ok()) {
+    return layer_status;
+  }
+
+  std::size_t query_values = 0;
+  if (!checked_mul(heads, head_dim, query_values)) {
+    return Status::invalid_argument("MPSGraph attention query element count overflow");
+  }
+  std::size_t kv_dim = 0;
+  if (!checked_mul(kv_heads, head_dim, kv_dim)) {
+    return Status::invalid_argument("MPSGraph attention KV dimension overflow");
+  }
+  std::size_t cache_token_values = 0;
+  if (!checked_mul(capacity_tokens, kv_dim, cache_token_values)) {
+    return Status::invalid_argument("MPSGraph attention KV token count overflow");
+  }
+  std::size_t cache_values = 0;
+  if (!checked_mul(layer_count, cache_token_values, cache_values)) {
+    return Status::invalid_argument("MPSGraph attention KV cache element count overflow");
+  }
+
+  auto query_status = validate_f32_buffer(query, query_values, "attention query");
+  if (!query_status.is_ok()) {
+    return query_status;
+  }
+  auto key_status = validate_f32_buffer(key_cache, cache_values, "attention key cache");
+  if (!key_status.is_ok()) {
+    return key_status;
+  }
+  auto value_status = validate_f32_buffer(value_cache, cache_values, "attention value cache");
+  if (!value_status.is_ok()) {
+    return value_status;
+  }
+  auto output_status = validate_f32_buffer(output, query_values, "attention output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  const auto seq_len = position + 1U;
+  const auto kv_group = heads / kv_heads;
+
+  @autoreleasepool {
+    MPSGraph* graph = [MPSGraph new];
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* query_shape = make_shape({heads, head_dim});
+    MPSShape* cache_shape = make_shape({layer_count, capacity_tokens, kv_heads, head_dim});
+    MPSGraphTensor* query_tensor =
+      [graph placeholderWithShape:query_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* key_tensor =
+      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* value_tensor =
+      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+
+    MPSGraphTensor* layer_keys =
+      [graph sliceTensor:key_tensor dimension:0
+                   start:static_cast<NSInteger>(layer) length:1 name:nil];
+    MPSGraphTensor* layer_values =
+      [graph sliceTensor:value_tensor dimension:0
+                   start:static_cast<NSInteger>(layer) length:1 name:nil];
+    layer_keys =
+      [graph reshapeTensor:layer_keys withShape:make_shape({capacity_tokens, kv_heads, head_dim})
+                      name:nil];
+    layer_values =
+      [graph reshapeTensor:layer_values withShape:make_shape({capacity_tokens, kv_heads, head_dim})
+                      name:nil];
+    MPSGraphTensor* visible_keys =
+      [graph sliceTensor:layer_keys dimension:0 start:0
+                  length:static_cast<NSInteger>(seq_len) name:nil];
+    MPSGraphTensor* visible_values =
+      [graph sliceTensor:layer_values dimension:0 start:0
+                  length:static_cast<NSInteger>(seq_len) name:nil];
+
+    NSMutableArray<MPSGraphTensor*>* head_outputs =
+      [NSMutableArray arrayWithCapacity:static_cast<NSUInteger>(heads)];
+    MPSGraphTensor* scale_tensor =
+      [graph constantWithScalar:1.0 / std::sqrt(static_cast<double>(head_dim))
+                          shape:@[ @1 ]
+                       dataType:MPSDataTypeFloat32];
+    for (std::size_t head = 0; head < heads; ++head) {
+      const auto kv_head = head / kv_group;
+      MPSGraphTensor* query_head =
+        [graph sliceTensor:query_tensor dimension:0
+                     start:static_cast<NSInteger>(head) length:1 name:nil];
+      query_head =
+        [graph reshapeTensor:query_head withShape:make_shape({head_dim, 1}) name:nil];
+
+      MPSGraphTensor* key_head =
+        [graph sliceTensor:visible_keys dimension:1
+                     start:static_cast<NSInteger>(kv_head) length:1 name:nil];
+      key_head =
+        [graph reshapeTensor:key_head withShape:make_shape({seq_len, head_dim}) name:nil];
+      MPSGraphTensor* scores =
+        [graph matrixMultiplicationWithPrimaryTensor:key_head
+                                     secondaryTensor:query_head
+                                                name:nil];
+      scores = [graph reshapeTensor:scores withShape:make_shape({seq_len}) name:nil];
+      scores =
+        [graph multiplicationWithPrimaryTensor:scores secondaryTensor:scale_tensor name:nil];
+      MPSGraphTensor* probabilities = [graph softMaxWithTensor:scores axis:0 name:nil];
+      probabilities =
+        [graph reshapeTensor:probabilities withShape:make_shape({1, seq_len}) name:nil];
+
+      MPSGraphTensor* value_head =
+        [graph sliceTensor:visible_values dimension:1
+                     start:static_cast<NSInteger>(kv_head) length:1 name:nil];
+      value_head =
+        [graph reshapeTensor:value_head withShape:make_shape({seq_len, head_dim}) name:nil];
+      MPSGraphTensor* head_output =
+        [graph matrixMultiplicationWithPrimaryTensor:probabilities
+                                     secondaryTensor:value_head
+                                                name:nil];
+      [head_outputs addObject:head_output];
+    }
+
+    MPSGraphTensor* result = heads == 1U
+                               ? [head_outputs objectAtIndex:0]
+                               : [graph concatTensors:head_outputs dimension:0 name:nil];
+
+    MPSGraphTensorData* query_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:query.impl_->buffer
+                                             shape:query_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* key_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:key_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* value_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:value_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:query_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      query_tensor : query_data,
+      key_tensor : key_data,
+      value_tensor : value_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data);
+    [query_data release];
+    [key_data release];
+    [value_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
 BackendInfo query_backend() { return build_backend_info(); }
 
 std::string format_backend_info(const BackendInfo& info) {
@@ -798,6 +1218,71 @@ Status run_operator_smoke_test() {
     return status;
   }
 
+  auto qk_input = make_f32_buffer(context, {3.0F, 4.0F, 0.0F, 2.0F});
+  auto qk_weight = make_f32_buffer(context, {1.0F, 2.0F});
+  if (!qk_input.is_ok()) {
+    return qk_input.status();
+  }
+  if (!qk_weight.is_ok()) {
+    return qk_weight.status();
+  }
+  auto qk_output = context.make_buffer(sizeof(float) * 4U);
+  if (!qk_output.is_ok()) {
+    return qk_output.status();
+  }
+  auto qk_buffer = std::move(qk_output.value());
+  status = context.qk_norm_f32(qk_input.value(), qk_weight.value(), 2, 2, 0.0F,
+                               qk_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, qk_buffer, 4);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 3.0F / std::sqrt(12.5F), "qk_norm[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 8.0F / std::sqrt(12.5F), "qk_norm[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[2], 0.0F, "qk_norm[2]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[3], 4.0F / std::sqrt(2.0F), "qk_norm[3]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto rope_input = make_f32_buffer(context, {1.0F, 2.0F});
+  if (!rope_input.is_ok()) {
+    return rope_input.status();
+  }
+  auto rope_output = context.make_buffer(sizeof(float) * 2U);
+  if (!rope_output.is_ok()) {
+    return rope_output.status();
+  }
+  auto rope_buffer = std::move(rope_output.value());
+  status = context.rope_f32(rope_input.value(), 1, 2, 0, 10000.0F, rope_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, rope_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 1.0F, "rope[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 2.0F, "rope[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
   auto matvec_weight = make_f32_buffer(context, {1.0F, 2.0F, 3.0F, 1.0F});
   auto matvec_input = make_f32_buffer(context, {3.0F, 4.0F});
   if (!matvec_weight.is_ok()) {
@@ -884,7 +1369,47 @@ Status run_operator_smoke_test() {
   if (!status.is_ok()) {
     return status;
   }
-  return check_close(output.value()[1], 6.0F, "add[1]");
+  status = check_close(output.value()[1], 6.0F, "add[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto query = make_f32_buffer(context, {1.0F, 0.0F});
+  auto key_cache = make_f32_buffer(context, {1.0F, 0.0F, 0.0F, 1.0F});
+  auto value_cache = make_f32_buffer(context, {5.0F, 6.0F, 7.0F, 8.0F});
+  if (!query.is_ok()) {
+    return query.status();
+  }
+  if (!key_cache.is_ok()) {
+    return key_cache.status();
+  }
+  if (!value_cache.is_ok()) {
+    return value_cache.status();
+  }
+  auto attention_output = context.make_buffer(sizeof(float) * 2U);
+  if (!attention_output.is_ok()) {
+    return attention_output.status();
+  }
+  auto attention_buffer = std::move(attention_output.value());
+  status = context.attention_f32(query.value(), key_cache.value(), value_cache.value(),
+                                 0, 1, 2, 1, 1, 2, attention_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, attention_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  const auto score0 = std::exp(1.0F / std::sqrt(2.0F));
+  const auto weight0 = score0 / (score0 + 1.0F);
+  const auto weight1 = 1.0F - weight0;
+  status = check_close(output.value()[0], weight0 * 5.0F + weight1 * 7.0F,
+                       "attention[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  return check_close(output.value()[1], weight0 * 6.0F + weight1 * 8.0F,
+                     "attention[1]");
 }
 
 }  // namespace toyllm::mpsgraph

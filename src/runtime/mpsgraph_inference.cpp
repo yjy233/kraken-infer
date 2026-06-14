@@ -1,6 +1,7 @@
 #include "toyllm/runtime/mpsgraph_inference.hpp"
 
 #include "toyllm/backends/mpsgraph/mpsgraph_backend.hpp"
+#include "toyllm/backends/mpsgraph/qwen_mpsgraph_model.hpp"
 
 namespace toyllm {
 
@@ -16,6 +17,11 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
   if (request.stream_token) {
     return Status::unavailable(
       "MPSGraph backend does not support streaming in strict no-readback mode yet");
+  }
+
+  auto model = mpsgraph::QwenMpsGraphModel::load_metadata(request.model_dir);
+  if (!model.is_ok()) {
+    return model.status();
   }
 
   return Status::unavailable("MPSGraph Qwen3 inference is not implemented yet");

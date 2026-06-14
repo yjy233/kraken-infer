@@ -61,6 +61,10 @@ class MpsGraphContext {
   [[nodiscard]] Result<MpsGraphBuffer> make_buffer(std::size_t byte_size) const;
   [[nodiscard]] Status copy_to_buffer(MpsGraphBuffer& buffer, const void* data,
                                       std::size_t byte_size) const;
+  [[nodiscard]] Status copy_to_buffer_at(MpsGraphBuffer& buffer,
+                                         std::size_t byte_offset,
+                                         const void* data,
+                                         std::size_t byte_size) const;
   [[nodiscard]] Status copy_from_buffer(const MpsGraphBuffer& buffer, void* data,
                                         std::size_t byte_size) const;
 
@@ -73,6 +77,15 @@ class MpsGraphContext {
                                     const MpsGraphBuffer& weight,
                                     std::size_t size, float eps,
                                     MpsGraphBuffer& output) const;
+  [[nodiscard]] Status qk_norm_f32(const MpsGraphBuffer& input,
+                                   const MpsGraphBuffer& weight,
+                                   std::size_t heads, std::size_t head_dim,
+                                   float eps,
+                                   MpsGraphBuffer& output) const;
+  [[nodiscard]] Status rope_f32(const MpsGraphBuffer& input,
+                                std::size_t heads, std::size_t head_dim,
+                                std::size_t position, float theta,
+                                MpsGraphBuffer& output) const;
   [[nodiscard]] Status matvec_f32(const MpsGraphBuffer& weight,
                                   std::size_t rows, std::size_t cols,
                                   const MpsGraphBuffer& input,
@@ -85,6 +98,14 @@ class MpsGraphContext {
                                const MpsGraphBuffer& rhs,
                                std::size_t size,
                                MpsGraphBuffer& output) const;
+  [[nodiscard]] Status attention_f32(const MpsGraphBuffer& query,
+                                     const MpsGraphBuffer& key_cache,
+                                     const MpsGraphBuffer& value_cache,
+                                     std::size_t layer, std::size_t position,
+                                     std::size_t capacity_tokens,
+                                     std::size_t heads, std::size_t kv_heads,
+                                     std::size_t head_dim,
+                                     MpsGraphBuffer& output) const;
 
  private:
   struct Impl;
