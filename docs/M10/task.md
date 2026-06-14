@@ -46,14 +46,14 @@ MPSGraph API 表达和执行。
 
 ## Hard Constraints
 
-- [ ] `mpsgraph` 代码不得 include `toyllm/backends/mps/mps_backend.hpp`
-- [ ] `mpsgraph` 代码不得调用 `toyllm::mps::*`
-- [ ] 不复用 `MpsContext`
-- [ ] 不复用 `MpsBuffer`
-- [ ] 不复用现有 `.metal` / Metal kernel
-- [ ] 不使用 `MPSMatrixMultiplication` 等直接 MPS primitive 路径
-- [ ] 不做 `mpsgraph -> mps` fallback
-- [ ] 不做 `mpsgraph -> cpu` fallback
+- [x] `mpsgraph` 代码不得 include `toyllm/backends/mps/mps_backend.hpp`
+- [x] `mpsgraph` 代码不得调用 `toyllm::mps::*`
+- [x] 不复用 `MpsContext`
+- [x] 不复用 `MpsBuffer`
+- [x] 不复用现有 `.metal` / Metal kernel
+- [x] 不使用 `MPSMatrixMultiplication` 等直接 MPS primitive 路径
+- [x] 不做 `mpsgraph -> mps` fallback
+- [x] 不做 `mpsgraph -> cpu` fallback
 - [ ] prefill 不读回 hidden / logits / KV cache
 - [ ] decode 每步不读回 logits
 - [ ] decode 每步不读回 next token
@@ -118,7 +118,7 @@ MPSGraph API 表达和执行。
 - [x] 校验 Qwen3 0.6B 权重 shape
 - [x] 建立 MPSGraph weight tensor store
 - [x] embedding weight device-resident smoke
-- [ ] lm_head weight device-resident
+- [x] lm_head weight device-resident
 - [x] 28 层 attention weights device-resident
 - [x] 28 层 MLP weights device-resident
 - [x] final norm weight device-resident smoke
@@ -143,13 +143,13 @@ MPSGraph API 表达和执行。
 - [x] Q/K per-head RMSNorm
 - [ ] BF16/FP16/FP32 matmul policy spike
 - [x] matvec f32 smoke
-- [ ] q_proj
-- [ ] k_proj
-- [ ] v_proj
-- [ ] o_proj
-- [ ] gate_proj
-- [ ] up_proj
-- [ ] down_proj
+- [x] q_proj
+- [x] k_proj
+- [x] v_proj
+- [x] o_proj
+- [x] gate_proj
+- [x] up_proj
+- [x] down_proj
 - [x] lm_head
 - [x] RoPE
 - [x] SiLU f32 smoke
@@ -212,7 +212,7 @@ MPSGraph API 表达和执行。
 - [ ] `run --device mpsgraph` 可运行
 - [ ] `chat --device mpsgraph` 可运行
 - [ ] `serve --device mpsgraph` 可运行
-- [ ] strict mode 下 `stream=true` 返回明确 unsupported
+- [x] strict mode 下 `stream=true` 返回明确 unsupported
 - [ ] 非 streaming chat completion 可返回文本
 - [ ] completion usage token 统计不依赖中间 readback
 
@@ -238,6 +238,7 @@ MPSGraph API 表达和执行。
 - [x] MPSGraph weight store metadata smoke
 - [x] QwenMpsGraphModel core weight load smoke
 - [x] MPSGraph KV cache layout smoke
+- [x] MPSGraph runtime initialization smoke
 - [x] layer 0 position 0 vs CPU
 - [x] attention output vs CPU
 - [x] MLP output vs CPU
@@ -259,7 +260,7 @@ MPSGraph API 表达和执行。
 - [ ] decode 内部不从 CPU feed next token
 - [ ] KV cache 不存在 CPU mirror
 - [x] 不使用旧 MPS backend 类型或函数
-- [ ] MPSGraph 不可用时返回明确 unavailable
+- [x] MPSGraph 不可用时返回明确 unavailable
 
 ## Known Risks
 

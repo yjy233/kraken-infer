@@ -91,10 +91,12 @@ void test_mpsgraph_generation_does_not_fallback() {
   request.compute_device = toyllm::Device::mpsgraph();
   request.prompt = "hello";
   request.max_new_tokens = 1;
+  request.stream_token = [](std::string_view) {};
 
   const auto result = toyllm::generate_cpu(request);
   assert(!result.is_ok());
   assert(result.status().code() == toyllm::StatusCode::unavailable);
+  assert(result.status().message().find("streaming") != std::string::npos);
 }
 
 void test_mpsgraph_kv_cache_layout() {
@@ -849,6 +851,30 @@ void test_qwen_mpsgraph_model_forward_token() {
   std::filesystem::remove_all(model_dir, ec);
 }
 
+void test_mpsgraph_generation_initializes_without_fallback() {
+  auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
+  if (!context_result.is_ok()) {
+    return;
+  }
+
+  auto model_dir = create_tiny_forward_model_dir("kraken-infer-mpsgraph-runtime-smoke");
+  write_tiny_qwen_mpsgraph_forward_safetensors(model_dir / "model.safetensors");
+
+  toyllm::CpuGenerationRequest request;
+  request.compute_device = toyllm::Device::mpsgraph();
+  request.model_dir = model_dir;
+  request.prompt = "hello";
+  request.max_new_tokens = 1;
+
+  const auto result = toyllm::generate_cpu(request);
+  assert(!result.is_ok());
+  assert(result.status().code() == toyllm::StatusCode::unavailable);
+  assert(result.status().message().find("prefill/decode") != std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove_all(model_dir, ec);
+}
+
 void test_weight_summary_regressions() {
   auto invalid_header_dir = create_tiny_model_dir("kraken-infer-invalid-header-smoke");
   write_fake_safetensors(invalid_header_dir / "model.safetensors", R"({})", 0);
@@ -900,6 +926,7 @@ int main() {
   test_qwen_mpsgraph_model_core_weight_load();
   test_qwen_mpsgraph_model_all_weight_load();
   test_qwen_mpsgraph_model_forward_token();
+  test_mpsgraph_generation_initializes_without_fallback();
 
   std::cout << "smoke tests passed\n";
   return 0;
