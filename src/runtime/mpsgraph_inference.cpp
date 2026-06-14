@@ -3,6 +3,8 @@
 #include "toyllm/backends/mpsgraph/mpsgraph_backend.hpp"
 #include "toyllm/backends/mpsgraph/qwen_mpsgraph_model.hpp"
 
+#include <limits>
+
 namespace toyllm {
 
 Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& request) {
@@ -19,12 +21,26 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
       "MPSGraph backend does not support streaming in strict no-readback mode yet");
   }
 
-  auto model = mpsgraph::QwenMpsGraphModel::load_metadata(request.model_dir);
+  auto context = mpsgraph::MpsGraphContext::create();
+  if (!context.is_ok()) {
+    return context.status();
+  }
+
+  auto model = mpsgraph::QwenMpsGraphModel::load_all_weights(request.model_dir,
+                                                            context.value());
   if (!model.is_ok()) {
     return model.status();
   }
 
-  return Status::unavailable("MPSGraph Qwen3 inference is not implemented yet");
+  if (request.max_new_tokens == std::numeric_limits<std::size_t>::max()) {
+    return Status::invalid_argument("MPSGraph max_new_tokens exceeds supported capacity");
+  }
+  auto state = model.value().create_run_state(context.value(), request.max_new_tokens + 1U);
+  if (!state.is_ok()) {
+    return state.status();
+  }
+
+  return Status::unavailable("MPSGraph Qwen3 prefill/decode loop is not implemented yet");
 }
 
 }  // namespace toyllm

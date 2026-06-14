@@ -271,6 +271,15 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   const auto weight1 = 1.0F - weight0;
   assert(std::abs(output[0] - (weight0 * 5.0F + weight1 * 7.0F)) < 1e-4F);
   assert(std::abs(output[1] - (weight0 * 6.0F + weight1 * 8.0F)) < 1e-4F);
+
+  auto argmax_input = make_mpsgraph_f32_buffer(context, {-1.0F, 2.0F, 5.0F, 3.0F});
+  auto argmax_output_result = context.make_buffer(sizeof(std::int32_t));
+  assert(argmax_output_result.is_ok());
+  auto argmax_output = std::move(argmax_output_result.value());
+  assert(context.argmax_i32(argmax_input, 4, argmax_output).is_ok());
+  std::int32_t argmax = -1;
+  assert(context.copy_from_buffer(argmax_output, &argmax, sizeof(argmax)).is_ok());
+  assert(argmax == 2);
 }
 
 void test_mps_matvec_workspace_reuse() {
@@ -831,6 +840,10 @@ void test_qwen_mpsgraph_model_forward_token() {
   assert(std::abs(key_cache[1] - qk_norm) < 1e-4F);
   assert(std::abs(value_cache[0] - one_norm) < 1e-4F);
   assert(std::abs(value_cache[1] - one_norm) < 1e-4F);
+
+  const auto next_token = model.value().debug_greedy_next_token(context, state.value());
+  assert(next_token.is_ok());
+  assert(next_token.value() == 0);
 
   std::error_code ec;
   std::filesystem::remove_all(model_dir, ec);

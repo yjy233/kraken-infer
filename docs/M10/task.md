@@ -119,8 +119,8 @@ MPSGraph API 表达和执行。
 - [x] 建立 MPSGraph weight tensor store
 - [x] embedding weight device-resident smoke
 - [ ] lm_head weight device-resident
-- [ ] 28 层 attention weights device-resident
-- [ ] 28 层 MLP weights device-resident
+- [x] 28 层 attention weights device-resident
+- [x] 28 层 MLP weights device-resident
 - [x] final norm weight device-resident smoke
 - [ ] 权重跨请求复用
 - [ ] 模型卸载时释放 weight store
@@ -150,7 +150,7 @@ MPSGraph API 表达和执行。
 - [ ] gate_proj
 - [ ] up_proj
 - [ ] down_proj
-- [ ] lm_head
+- [x] lm_head
 - [x] RoPE
 - [x] SiLU f32 smoke
 - [x] residual add f32 smoke
@@ -162,7 +162,7 @@ MPSGraph API 表达和执行。
 - [x] 设计 MPSGraph KV cache layout
 - [x] 分配 device-resident K cache
 - [x] 分配 device-resident V cache
-- [ ] prefill 写入 cache
+- [x] prefill 写入 cache
 - [ ] decode 追加 cache
 - [x] attention operator 读取 `0..position`
 - [ ] fixed-shape causal mask
@@ -198,7 +198,7 @@ MPSGraph API 表达和执行。
 
 ### Sampling
 
-- [ ] 第一版 greedy argmax
+- [x] 第一版 greedy argmax
 - [ ] eos token ids 支持多值
 - [ ] generated count 正确
 - [ ] finish reason 区分 stop / length
@@ -238,9 +238,9 @@ MPSGraph API 表达和执行。
 - [x] MPSGraph weight store metadata smoke
 - [x] QwenMpsGraphModel core weight load smoke
 - [x] MPSGraph KV cache layout smoke
-- [ ] layer 0 position 0 vs CPU
+- [x] layer 0 position 0 vs CPU
 - [x] attention output vs CPU
-- [ ] MLP output vs CPU
+- [x] MLP output vs CPU
 - [ ] full model `hello`, 1 token greedy vs CPU
 - [ ] full model `hello`, 2 tokens greedy vs CPU
 - [x] no fallback test
