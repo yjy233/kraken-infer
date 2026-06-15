@@ -390,6 +390,50 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   output = read_mpsgraph_f32_buffer(context, v_output, 1);
   assert_close(output[0], 38.0F);
 
+  auto fused_hidden = make_mpsgraph_f32_buffer(context, {2.0F, 3.0F});
+  auto fused_input_norm_weight = make_mpsgraph_f32_buffer(context, {1.0F, 1.0F});
+  auto fused_q_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F,
+                                                           0.0F, 1.0F});
+  auto fused_k_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F,
+                                                           0.0F, 1.0F});
+  auto fused_v_weight = make_mpsgraph_f32_buffer(context, {2.0F, 0.0F,
+                                                           0.0F, 3.0F});
+  auto fused_q_norm_weight = make_mpsgraph_f32_buffer(context, {1.0F, 1.0F});
+  auto fused_k_norm_weight = make_mpsgraph_f32_buffer(context, {1.0F, 1.0F});
+  auto fused_normed_result = context.make_buffer(2U * sizeof(float));
+  auto fused_q_result = context.make_buffer(2U * sizeof(float));
+  auto fused_k_result = context.make_buffer(2U * sizeof(float));
+  auto fused_v_result = context.make_buffer(2U * sizeof(float));
+  assert(fused_normed_result.is_ok());
+  assert(fused_q_result.is_ok());
+  assert(fused_k_result.is_ok());
+  assert(fused_v_result.is_ok());
+  auto fused_normed = std::move(fused_normed_result.value());
+  auto fused_q = std::move(fused_q_result.value());
+  auto fused_k = std::move(fused_k_result.value());
+  auto fused_v = std::move(fused_v_result.value());
+  assert(context.input_norm_qkv_qk_rope_f32(
+           fused_hidden, fused_input_norm_weight, fused_q_weight, fused_k_weight,
+           fused_v_weight, fused_q_norm_weight, fused_k_norm_weight, 2, 1, 1,
+           2, 0, 0.0F, 10000.0F, fused_normed, fused_q, fused_k, fused_v)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, fused_normed, 2);
+  const auto fused_norm_scale = 1.0F / std::sqrt(6.5F);
+  assert_close(output[0], 2.0F * fused_norm_scale);
+  assert_close(output[1], 3.0F * fused_norm_scale);
+  output = read_mpsgraph_f32_buffer(context, fused_q, 2);
+  const auto fused_q_norm = 1.0F /
+                            std::sqrt((4.0F + 9.0F) * fused_norm_scale *
+                                       fused_norm_scale / 2.0F);
+  assert_close(output[0], 2.0F * fused_norm_scale * fused_q_norm);
+  assert_close(output[1], 3.0F * fused_norm_scale * fused_q_norm);
+  output = read_mpsgraph_f32_buffer(context, fused_k, 2);
+  assert_close(output[0], 2.0F * fused_norm_scale * fused_q_norm);
+  assert_close(output[1], 3.0F * fused_norm_scale * fused_q_norm);
+  output = read_mpsgraph_f32_buffer(context, fused_v, 2);
+  assert_close(output[0], 4.0F * fused_norm_scale);
+  assert_close(output[1], 9.0F * fused_norm_scale);
+
   auto gate_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F, 0.0F, 1.0F});
   auto up_weight = make_mpsgraph_f32_buffer(context, {2.0F, 0.0F, 0.0F, 3.0F});
   auto gate_up_input = make_mpsgraph_f32_buffer(context, {4.0F, 5.0F});
@@ -1278,8 +1322,7 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(summary_json.find("mpsgraph.decode.argmax") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.update_generation_status") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.attention") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.qkv_proj") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.qk_norm_rope") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.input_qkv_qk_rope") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.attn_project_residual_norm") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.gate_up_proj") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.swiglu_down_residual") != std::string::npos);

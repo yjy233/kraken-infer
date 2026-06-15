@@ -407,8 +407,17 @@ ProfileArtifacts RequestProfiler::write_artifacts() {
     }
     return 0U;
   }();
+  const auto tokenize_ns = [&]() -> std::uint64_t {
+    for (const auto& span : impl_->spans) {
+      if (span.name == "request.tokenize") {
+        return span.end_ns > span.start_ns ? span.end_ns - span.start_ns : 0U;
+      }
+    }
+    return 0U;
+  }();
   const auto decode_ms = static_cast<double>(decode_ns) / 1'000'000.0;
   const auto prefill_ms = static_cast<double>(prefill_ns) / 1'000'000.0;
+  const auto tokenize_ms = static_cast<double>(tokenize_ns) / 1'000'000.0;
   const auto tok_s =
     decode_ns == 0U ? 0.0 : static_cast<double>(gen_tokens_value) /
       (static_cast<double>(decode_ns) / 1'000'000'000.0);
@@ -423,6 +432,7 @@ ProfileArtifacts RequestProfiler::write_artifacts() {
   summary_text << "prompt_tokens: " << prompt_tokens << '\n';
   summary_text << "generated_tokens: " << generated_tokens << '\n';
   summary_text << "total_ms: " << total_ms << '\n';
+  summary_text << "tokenize_ms: " << tokenize_ms << '\n';
   summary_text << "prefill_ms: " << prefill_ms << '\n';
   summary_text << "decode_ms: " << decode_ms << '\n';
   summary_text << "tok_s: " << tok_s << '\n';
@@ -486,6 +496,7 @@ ProfileArtifacts RequestProfiler::write_artifacts() {
     summary_json << "\"prompt_tokens\":" << prompt_tokens << ',';
     summary_json << "\"generated_tokens\":" << generated_tokens << ',';
     summary_json << "\"total_ms\":" << total_ms << ',';
+    summary_json << "\"tokenize_ms\":" << tokenize_ms << ',';
     summary_json << "\"prefill_ms\":" << prefill_ms << ',';
     summary_json << "\"decode_ms\":" << decode_ms << ',';
     summary_json << "\"tok_s\":" << tok_s << ',';

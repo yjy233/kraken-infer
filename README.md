@@ -379,3 +379,18 @@ source ~/.zshrc
   --port 8080 \
   --profile summary
 ```
+
+```
+cd /Users/bill/code/kraken-infer
+source ~/.zshrc
+
+./build/debug/kraken-infer serve \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --model models/qwen3-0.6b \
+  --model-id qwen3-0.6b \
+  --device mpsgraph \
+  --max-new-tokens 128 \
+  --profile summary \
+  --profile-dir build/profiles
+```

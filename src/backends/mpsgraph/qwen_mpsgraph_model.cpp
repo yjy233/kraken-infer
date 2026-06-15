@@ -628,27 +628,12 @@ Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
     return status;
   };
 
-  auto status = run("mpsgraph.layer.input_rms_norm", [&] {
-    return context.rms_norm_f32(state.hidden, layer.input_layernorm.buffer, hidden_size, eps,
-                                state.normed);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.qkv_proj", [&] {
-    return context.qkv_matvec_f32(layer.q_proj.buffer, layer.k_proj.buffer,
-                                  layer.v_proj.buffer, attn_dim, kv_dim,
-                                  hidden_size, state.normed, state.q, state.k,
-                                  state.v);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.qk_norm_rope", [&] {
-    return context.qk_norm_rope_f32(state.q, state.k, layer.q_norm.buffer,
-                                    layer.k_norm.buffer, heads, kv_heads, head_dim,
-                                    position, eps, theta, state.q_scratch,
-                                    state.k_scratch);
+  auto status = run("mpsgraph.layer.input_qkv_qk_rope", [&] {
+    return context.input_norm_qkv_qk_rope_f32(
+      state.hidden, layer.input_layernorm.buffer, layer.q_proj.buffer,
+      layer.k_proj.buffer, layer.v_proj.buffer, layer.q_norm.buffer,
+      layer.k_norm.buffer, hidden_size, heads, kv_heads, head_dim, position,
+      eps, theta, state.normed, state.q_scratch, state.k_scratch, state.v);
   });
   if (!status.is_ok()) {
     return status;

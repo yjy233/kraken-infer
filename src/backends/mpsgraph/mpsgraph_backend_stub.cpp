@@ -207,6 +207,36 @@ Status MpsGraphContext::qkv_matvec_f32(const MpsGraphBuffer& q_weight,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::input_norm_qkv_qk_rope_f32(
+  const MpsGraphBuffer& hidden, const MpsGraphBuffer& input_norm_weight,
+  const MpsGraphBuffer& q_weight, const MpsGraphBuffer& k_weight,
+  const MpsGraphBuffer& v_weight, const MpsGraphBuffer& q_norm_weight,
+  const MpsGraphBuffer& k_norm_weight, std::size_t hidden_size,
+  std::size_t q_heads, std::size_t kv_heads, std::size_t head_dim,
+  std::size_t position, float eps, float theta, MpsGraphBuffer& normed_output,
+  MpsGraphBuffer& q_output, MpsGraphBuffer& k_output,
+  MpsGraphBuffer& v_output) const {
+  (void)hidden;
+  (void)input_norm_weight;
+  (void)q_weight;
+  (void)k_weight;
+  (void)v_weight;
+  (void)q_norm_weight;
+  (void)k_norm_weight;
+  (void)hidden_size;
+  (void)q_heads;
+  (void)kv_heads;
+  (void)head_dim;
+  (void)position;
+  (void)eps;
+  (void)theta;
+  (void)normed_output;
+  (void)q_output;
+  (void)k_output;
+  (void)v_output;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::gate_up_matvec_f32(const MpsGraphBuffer& gate_weight,
                                            const MpsGraphBuffer& up_weight,
                                            std::size_t rows, std::size_t cols,

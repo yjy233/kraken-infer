@@ -124,8 +124,16 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     std::vector<std::int64_t> prompt_tokens;
     {
       auto span = profiler.scoped("request.tokenize");
-      tokenizer = QwenTokenizer::load(request.model_dir);
-      prompt_tokens = tokenizer.encode_chat_messages(messages, request.enable_thinking);
+      {
+        auto load_span = profiler.scoped("request.tokenize.load");
+        tokenizer = QwenTokenizer::load(request.model_dir);
+        (void)load_span;
+      }
+      {
+        auto encode_span = profiler.scoped("request.tokenize.encode");
+        prompt_tokens = tokenizer.encode_chat_messages(messages, request.enable_thinking);
+        (void)encode_span;
+      }
       (void)span;
     }
     if (prompt_tokens.empty()) {
@@ -214,6 +222,8 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     bool generation_status_available = false;
     bool decode_stopped_early = false;
     std::size_t decode_steps = 0;
+    std::size_t decode_forward_steps = 0;
+    std::size_t eos_stop_step = std::numeric_limits<std::size_t>::max();
     std::size_t status_readbacks = 0;
     {
       auto decode_span = profiler.scoped("request.decode");
@@ -261,6 +271,7 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
         decode_steps = step + 1U;
         if (generation_status[2] != 0) {
           decode_stopped_early = step + 1U < request.max_new_tokens;
+          eos_stop_step = step;
           break;
         }
         if (step + 1U == request.max_new_tokens) {
@@ -275,6 +286,7 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
           (void)span;
         }
         ++position;
+        ++decode_forward_steps;
         (void)step_span;
       }
       const auto transfer_after = context.transfer_stats();
@@ -332,9 +344,19 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
     profiler.set_metadata("generated_tokens", generated.size());
     profiler.set_metadata("mpsgraph_finish_reason", result.finish_reason);
     profiler.set_metadata("mpsgraph_decode_steps", decode_steps);
+    profiler.set_metadata("mpsgraph_decode_forward_steps", decode_forward_steps);
     profiler.set_metadata("mpsgraph_status_readbacks", status_readbacks);
     profiler.set_metadata("mpsgraph_early_break", decode_stopped_early ? "true" : "false");
     profiler.set_metadata("mpsgraph_early_break_mode", "host_status_poll");
+    profiler.set_metadata("mpsgraph_generation_status_count",
+                          static_cast<std::size_t>(generation_status[0]));
+    profiler.set_metadata("mpsgraph_generation_status_reason",
+                          static_cast<std::size_t>(generation_status[1]));
+    profiler.set_metadata("mpsgraph_generation_status_finished",
+                          static_cast<std::size_t>(generation_status[2]));
+    if (eos_stop_step != std::numeric_limits<std::size_t>::max()) {
+      profiler.set_metadata("mpsgraph_eos_stop_step", eos_stop_step);
+    }
     const auto transfers = context.transfer_stats();
     profiler.set_metadata("mpsgraph_h2d_calls",
                           static_cast<std::size_t>(

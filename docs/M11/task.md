@@ -136,6 +136,7 @@
 ### Cached Matvec And Attention Ops
 
 - [ ] `matvec_f32` 支持 fixed shape cache
+- [x] input RMSNorm + q/k/v projection + q/k norm + RoPE 合并为一次 MPSGraph run
 - [x] q/k/v projection 合并为一次 MPSGraph run
 - [x] q/k norm + RoPE 合并为一次 MPSGraph run
 - [x] attention output projection + residual + post RMSNorm 合并为一次 MPSGraph run
@@ -191,7 +192,9 @@
 - [x] EOS 后不再改变 generated output
 - [x] host status poll 模式可跳过 EOS 后续 forward
 - [x] 能跳过 EOS 后续 forward 时记录 `mpsgraph_early_break=true`
-- [ ] 不能物理跳过时记录 `mpsgraph_early_break=false`
+- [x] 不能物理跳过时记录 `mpsgraph_early_break=false`
+- [x] profile metadata 记录 `mpsgraph_decode_forward_steps`
+- [x] profile summary 固定输出 `tokenize_ms`
 
 ### Run-State Buffer Pool
 
