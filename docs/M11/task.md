@@ -161,8 +161,13 @@
 - [x] 实现 single-layer MLP graph smoke
 - [x] 设计 full transformer block graph
 - [x] 实现 tiny full block graph smoke
+- [x] spike grouped transformer stack graph
+- [x] grouped stack graph smoke
+- [x] profile grouped stack graph；4 层/组 execute 次数降到 225，但总耗时退化到 41.6s
+- [x] 默认路径回退并保留 single-layer full graph
+- [ ] 设计 fixed-shape executable cache，优先减少 graph build / executable miss
 - [ ] 设计 single-token full forward graph
-- [ ] 对比 op-by-op path 和 coarse graph path 首 token 输出
+- [x] 对比 op-by-op path 和 coarse graph path 首 token输出
 - [x] profile 中区分 coarse graph path 和 op graph path
 - [ ] 支持通过内部 flag 回退到 op graph path 做 correctness 对照
 

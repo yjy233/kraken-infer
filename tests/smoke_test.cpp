@@ -1508,8 +1508,10 @@ void test_mpsgraph_generation_device_side_eos_status() {
   assert(summary_json.find("\"mpsgraph_finish_reason\":\"stop\"") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_d2h_calls\":\"1\"") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_decode_steps\":\"1\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_decode_forward_steps\":\"0\"") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_status_readbacks\":\"1\"") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_early_break\":\"true\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_eos_stop_step\":\"0\"") != std::string::npos);
   assert(summary_json.find("mpsgraph.final_readback.generated_ids") == std::string::npos);
 
   std::filesystem::remove_all(profile_root, ec);
