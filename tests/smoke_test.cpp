@@ -261,6 +261,42 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   assert(std::abs(output[0] - (std::cos(1.0F) - 2.0F * std::sin(1.0F))) < 1e-4F);
   assert(std::abs(output[1] - (2.0F * std::cos(1.0F) + std::sin(1.0F))) < 1e-4F);
 
+  auto q_norm_rope_input = make_mpsgraph_f32_buffer(context, {3.0F, 4.0F, 0.0F, 2.0F});
+  auto k_norm_rope_input = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F});
+  auto q_norm_rope_weight = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F});
+  auto k_norm_rope_weight = make_mpsgraph_f32_buffer(context, {3.0F, 4.0F});
+  auto q_rope_output_result = context.make_buffer(4U * sizeof(float));
+  auto k_rope_output_result = context.make_buffer(2U * sizeof(float));
+  assert(q_rope_output_result.is_ok());
+  assert(k_rope_output_result.is_ok());
+  auto q_rope_output = std::move(q_rope_output_result.value());
+  auto k_rope_output = std::move(k_rope_output_result.value());
+  assert(context.qk_norm_rope_f32(q_norm_rope_input, k_norm_rope_input,
+                                  q_norm_rope_weight, k_norm_rope_weight, 2, 1, 2,
+                                  1, 0.0F, 10000.0F, q_rope_output,
+                                  k_rope_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, q_rope_output, 4);
+  const auto q0_first = 3.0F / std::sqrt(12.5F);
+  const auto q0_second = 8.0F / std::sqrt(12.5F);
+  const auto q1_first = 0.0F;
+  const auto q1_second = 4.0F / std::sqrt(2.0F);
+  assert(std::abs(output[0] - (q0_first * std::cos(1.0F) -
+                               q0_second * std::sin(1.0F))) < 1e-4F);
+  assert(std::abs(output[1] - (q0_second * std::cos(1.0F) +
+                               q0_first * std::sin(1.0F))) < 1e-4F);
+  assert(std::abs(output[2] - (q1_first * std::cos(1.0F) -
+                               q1_second * std::sin(1.0F))) < 1e-4F);
+  assert(std::abs(output[3] - (q1_second * std::cos(1.0F) +
+                               q1_first * std::sin(1.0F))) < 1e-4F);
+  output = read_mpsgraph_f32_buffer(context, k_rope_output, 2);
+  const auto k_first = 3.0F / std::sqrt(2.5F);
+  const auto k_second = 8.0F / std::sqrt(2.5F);
+  assert(std::abs(output[0] - (k_first * std::cos(1.0F) -
+                               k_second * std::sin(1.0F))) < 1e-4F);
+  assert(std::abs(output[1] - (k_second * std::cos(1.0F) +
+                               k_first * std::sin(1.0F))) < 1e-4F);
+
   auto query = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F});
   auto key_cache = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F, 0.0F, 1.0F});
   auto value_cache = make_mpsgraph_f32_buffer(context, {5.0F, 6.0F, 7.0F, 8.0F});
@@ -353,6 +389,69 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   assert_close(output[0], 28.0F);
   output = read_mpsgraph_f32_buffer(context, v_output, 1);
   assert_close(output[0], 38.0F);
+
+  auto gate_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F, 0.0F, 1.0F});
+  auto up_weight = make_mpsgraph_f32_buffer(context, {2.0F, 0.0F, 0.0F, 3.0F});
+  auto gate_up_input = make_mpsgraph_f32_buffer(context, {4.0F, 5.0F});
+  auto gate_output_result = context.make_buffer(2U * sizeof(float));
+  auto up_output_result = context.make_buffer(2U * sizeof(float));
+  assert(gate_output_result.is_ok());
+  assert(up_output_result.is_ok());
+  auto gate_output = std::move(gate_output_result.value());
+  auto up_output = std::move(up_output_result.value());
+  assert(context.gate_up_matvec_f32(gate_weight, up_weight, 2, 2, gate_up_input,
+                                    gate_output, up_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, gate_output, 2);
+  assert_close(output[0], 4.0F);
+  assert_close(output[1], 5.0F);
+  output = read_mpsgraph_f32_buffer(context, up_output, 2);
+  assert_close(output[0], 8.0F);
+  assert_close(output[1], 15.0F);
+
+  auto attn_o_weight = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F,
+                                                          3.0F, 4.0F});
+  auto attn_project_input = make_mpsgraph_f32_buffer(context, {2.0F, 3.0F});
+  auto attn_residual = make_mpsgraph_f32_buffer(context, {10.0F, 20.0F});
+  auto attn_norm_weight = make_mpsgraph_f32_buffer(context, {2.0F, 3.0F});
+  auto attn_residual_output_result = context.make_buffer(2U * sizeof(float));
+  auto attn_norm_output_result = context.make_buffer(2U * sizeof(float));
+  assert(attn_residual_output_result.is_ok());
+  assert(attn_norm_output_result.is_ok());
+  auto attn_residual_output = std::move(attn_residual_output_result.value());
+  auto attn_norm_output = std::move(attn_norm_output_result.value());
+  assert(context.attn_project_residual_norm_f32(
+           attn_o_weight, attn_project_input, attn_residual, attn_norm_weight,
+           2, 2, 0.0F, attn_residual_output, attn_norm_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, attn_residual_output, 2);
+  const auto attn_res0 = 10.0F + 8.0F;
+  const auto attn_res1 = 20.0F + 18.0F;
+  assert_close(output[0], attn_res0);
+  assert_close(output[1], attn_res1);
+  output = read_mpsgraph_f32_buffer(context, attn_norm_output, 2);
+  const auto attn_norm_scale =
+    1.0F / std::sqrt((attn_res0 * attn_res0 + attn_res1 * attn_res1) / 2.0F);
+  assert_close(output[0], attn_res0 * attn_norm_scale * 2.0F);
+  assert_close(output[1], attn_res1 * attn_norm_scale * 3.0F);
+
+  auto swiglu_gate = make_mpsgraph_f32_buffer(context, {0.0F, 1.0F});
+  auto swiglu_up = make_mpsgraph_f32_buffer(context, {5.0F, 6.0F});
+  auto swiglu_down_weight = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F,
+                                                               3.0F, 4.0F});
+  auto swiglu_residual = make_mpsgraph_f32_buffer(context, {10.0F, 20.0F});
+  auto swiglu_output_result = context.make_buffer(2U * sizeof(float));
+  assert(swiglu_output_result.is_ok());
+  auto swiglu_output = std::move(swiglu_output_result.value());
+  assert(context.swiglu_down_residual_f32(swiglu_gate, swiglu_up,
+                                          swiglu_down_weight, swiglu_residual,
+                                          2, 2, swiglu_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, swiglu_output, 2);
+  const auto swiglu_0 = 0.0F;
+  const auto swiglu_1 = 6.0F / (1.0F + std::exp(-1.0F));
+  assert_close(output[0], 10.0F + swiglu_0 + 2.0F * swiglu_1);
+  assert_close(output[1], 20.0F + 3.0F * swiglu_0 + 4.0F * swiglu_1);
 }
 
 void test_mps_matvec_workspace_reuse() {
@@ -1180,7 +1279,10 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(summary_json.find("mpsgraph.decode.update_generation_status") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.attention") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.qkv_proj") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.gate_proj") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.qk_norm_rope") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.attn_project_residual_norm") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.gate_up_proj") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.swiglu_down_residual") != std::string::npos);
   assert(summary_json.find("mpsgraph.logits.lm_head") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.read_generation_status") != std::string::npos);
   assert(summary_json.find("mpsgraph.final_readback.generated_ids") != std::string::npos);

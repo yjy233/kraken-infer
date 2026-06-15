@@ -644,95 +644,51 @@ Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
   if (!status.is_ok()) {
     return status;
   }
-  status = run("mpsgraph.layer.q_norm", [&] {
-    return context.qk_norm_f32(state.q, layer.q_norm.buffer, heads, head_dim, eps,
-                               state.q_scratch);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.q_rope", [&] {
-    return context.rope_f32(state.q_scratch, heads, head_dim, position, theta, state.q);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.k_norm", [&] {
-    return context.qk_norm_f32(state.k, layer.k_norm.buffer, kv_heads, head_dim, eps,
-                               state.k_scratch);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.k_rope", [&] {
-    return context.rope_f32(state.k_scratch, kv_heads, head_dim, position, theta, state.k);
+  status = run("mpsgraph.layer.qk_norm_rope", [&] {
+    return context.qk_norm_rope_f32(state.q, state.k, layer.q_norm.buffer,
+                                    layer.k_norm.buffer, heads, kv_heads, head_dim,
+                                    position, eps, theta, state.q_scratch,
+                                    state.k_scratch);
   });
   if (!status.is_ok()) {
     return status;
   }
   status = run("mpsgraph.layer.kv_store", [&] {
-    return state.kv_cache.store(context, layer_index, position, state.k, state.v);
+    return state.kv_cache.store(context, layer_index, position, state.k_scratch, state.v);
   });
   if (!status.is_ok()) {
     return status;
   }
   status = run("mpsgraph.layer.attention", [&] {
     return context.attention_f32(
-      state.q, state.kv_cache.key_buffer(), state.kv_cache.value_buffer(), layer_index,
-      position, state.capacity_tokens, heads, kv_heads, head_dim, state.attn_out);
+      state.q_scratch, state.kv_cache.key_buffer(), state.kv_cache.value_buffer(),
+      layer_index, position, state.capacity_tokens, heads, kv_heads, head_dim,
+      state.attn_out);
   });
   if (!status.is_ok()) {
     return status;
   }
-  status = run("mpsgraph.layer.o_proj", [&] {
-    return context.matvec_f32(layer.o_proj.buffer, hidden_size, attn_dim,
-                              state.attn_out, state.projected);
+  status = run("mpsgraph.layer.attn_project_residual_norm", [&] {
+    return context.attn_project_residual_norm_f32(
+      layer.o_proj.buffer, state.attn_out, state.hidden,
+      layer.post_attention_layernorm.buffer, hidden_size, attn_dim, eps,
+      state.normed, state.hidden);
   });
   if (!status.is_ok()) {
     return status;
   }
-  status = run("mpsgraph.layer.attn_residual", [&] {
-    return context.add_f32(state.hidden, state.projected, hidden_size, state.normed);
+  status = run("mpsgraph.layer.gate_up_proj", [&] {
+    return context.gate_up_matvec_f32(layer.gate_proj.buffer, layer.up_proj.buffer,
+                                      intermediate, hidden_size, state.hidden,
+                                      state.gate, state.up);
   });
   if (!status.is_ok()) {
     return status;
   }
-  status = run("mpsgraph.layer.post_attention_rms_norm", [&] {
-    return context.rms_norm_f32(state.normed, layer.post_attention_layernorm.buffer,
-                                hidden_size, eps, state.hidden);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.gate_proj", [&] {
-    return context.matvec_f32(layer.gate_proj.buffer, intermediate, hidden_size,
-                              state.hidden, state.gate);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.up_proj", [&] {
-    return context.matvec_f32(layer.up_proj.buffer, intermediate, hidden_size,
-                              state.hidden, state.up);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.silu_mul", [&] {
-    return context.silu_mul_f32(state.gate, state.up, intermediate, state.mlp);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.down_proj", [&] {
-    return context.matvec_f32(layer.down_proj.buffer, hidden_size, intermediate,
-                              state.mlp, state.down);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.mlp_residual", [&] {
-    return context.add_f32(state.normed, state.down, hidden_size, state.hidden);
+  status = run("mpsgraph.layer.swiglu_down_residual", [&] {
+    return context.swiglu_down_residual_f32(state.gate, state.up,
+                                            layer.down_proj.buffer, state.normed,
+                                            hidden_size, intermediate, state.hidden);
   });
   (void)layer_span;
   return status;

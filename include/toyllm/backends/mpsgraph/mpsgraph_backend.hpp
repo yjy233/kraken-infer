@@ -111,6 +111,17 @@ class MpsGraphContext {
                                 std::size_t heads, std::size_t head_dim,
                                 std::size_t position, float theta,
                                 MpsGraphBuffer& output) const;
+  [[nodiscard]] Status qk_norm_rope_f32(const MpsGraphBuffer& q_input,
+                                        const MpsGraphBuffer& k_input,
+                                        const MpsGraphBuffer& q_weight,
+                                        const MpsGraphBuffer& k_weight,
+                                        std::size_t q_heads,
+                                        std::size_t kv_heads,
+                                        std::size_t head_dim,
+                                        std::size_t position,
+                                        float eps, float theta,
+                                        MpsGraphBuffer& q_output,
+                                        MpsGraphBuffer& k_output) const;
   [[nodiscard]] Status matvec_f32(const MpsGraphBuffer& weight,
                                   std::size_t rows, std::size_t cols,
                                   const MpsGraphBuffer& input,
@@ -130,10 +141,27 @@ class MpsGraphContext {
                                           const MpsGraphBuffer& input,
                                           MpsGraphBuffer& gate_output,
                                           MpsGraphBuffer& up_output) const;
+  [[nodiscard]] Status attn_project_residual_norm_f32(
+    const MpsGraphBuffer& o_weight,
+    const MpsGraphBuffer& attn_output,
+    const MpsGraphBuffer& residual,
+    const MpsGraphBuffer& norm_weight,
+    std::size_t hidden_size,
+    std::size_t attn_dim,
+    float eps,
+    MpsGraphBuffer& residual_output,
+    MpsGraphBuffer& norm_output) const;
   [[nodiscard]] Status silu_mul_f32(const MpsGraphBuffer& gate,
                                     const MpsGraphBuffer& up,
                                     std::size_t size,
                                     MpsGraphBuffer& output) const;
+  [[nodiscard]] Status swiglu_down_residual_f32(const MpsGraphBuffer& gate,
+                                                const MpsGraphBuffer& up,
+                                                const MpsGraphBuffer& down_weight,
+                                                const MpsGraphBuffer& residual,
+                                                std::size_t hidden_size,
+                                                std::size_t intermediate_size,
+                                                MpsGraphBuffer& output) const;
   [[nodiscard]] Status add_f32(const MpsGraphBuffer& lhs,
                                const MpsGraphBuffer& rhs,
                                std::size_t size,

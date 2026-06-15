@@ -147,6 +147,32 @@ Status MpsGraphContext::rope_f32(const MpsGraphBuffer& input,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::qk_norm_rope_f32(const MpsGraphBuffer& q_input,
+                                         const MpsGraphBuffer& k_input,
+                                         const MpsGraphBuffer& q_weight,
+                                         const MpsGraphBuffer& k_weight,
+                                         std::size_t q_heads,
+                                         std::size_t kv_heads,
+                                         std::size_t head_dim,
+                                         std::size_t position,
+                                         float eps, float theta,
+                                         MpsGraphBuffer& q_output,
+                                         MpsGraphBuffer& k_output) const {
+  (void)q_input;
+  (void)k_input;
+  (void)q_weight;
+  (void)k_weight;
+  (void)q_heads;
+  (void)kv_heads;
+  (void)head_dim;
+  (void)position;
+  (void)eps;
+  (void)theta;
+  (void)q_output;
+  (void)k_output;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::matvec_f32(const MpsGraphBuffer& weight,
                                    std::size_t rows, std::size_t cols,
                                    const MpsGraphBuffer& input,
@@ -181,6 +207,39 @@ Status MpsGraphContext::qkv_matvec_f32(const MpsGraphBuffer& q_weight,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::gate_up_matvec_f32(const MpsGraphBuffer& gate_weight,
+                                           const MpsGraphBuffer& up_weight,
+                                           std::size_t rows, std::size_t cols,
+                                           const MpsGraphBuffer& input,
+                                           MpsGraphBuffer& gate_output,
+                                           MpsGraphBuffer& up_output) const {
+  (void)gate_weight;
+  (void)up_weight;
+  (void)rows;
+  (void)cols;
+  (void)input;
+  (void)gate_output;
+  (void)up_output;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::attn_project_residual_norm_f32(
+  const MpsGraphBuffer& o_weight, const MpsGraphBuffer& attn_output,
+  const MpsGraphBuffer& residual, const MpsGraphBuffer& norm_weight,
+  std::size_t hidden_size, std::size_t attn_dim, float eps,
+  MpsGraphBuffer& residual_output, MpsGraphBuffer& norm_output) const {
+  (void)o_weight;
+  (void)attn_output;
+  (void)residual;
+  (void)norm_weight;
+  (void)hidden_size;
+  (void)attn_dim;
+  (void)eps;
+  (void)residual_output;
+  (void)norm_output;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
                                      const MpsGraphBuffer& up,
                                      std::size_t size,
@@ -188,6 +247,23 @@ Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
   (void)gate;
   (void)up;
   (void)size;
+  (void)output;
+  return Status::unavailable(kUnavailable);
+}
+
+Status MpsGraphContext::swiglu_down_residual_f32(const MpsGraphBuffer& gate,
+                                                 const MpsGraphBuffer& up,
+                                                 const MpsGraphBuffer& down_weight,
+                                                 const MpsGraphBuffer& residual,
+                                                 std::size_t hidden_size,
+                                                 std::size_t intermediate_size,
+                                                 MpsGraphBuffer& output) const {
+  (void)gate;
+  (void)up;
+  (void)down_weight;
+  (void)residual;
+  (void)hidden_size;
+  (void)intermediate_size;
   (void)output;
   return Status::unavailable(kUnavailable);
 }

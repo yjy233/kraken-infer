@@ -178,6 +178,82 @@ Status check_close(float actual, float expected, const char* name) {
   return Status::ok();
 }
 
+MPSGraphTensor* build_qk_norm(MPSGraph* graph, MPSGraphTensor* input_tensor,
+                              MPSGraphTensor* weight_tensor, std::size_t heads,
+                              std::size_t head_dim, float eps) {
+  MPSShape* matrix_shape = make_shape({heads, head_dim});
+  MPSShape* head_scale_shape = make_shape({heads, 1});
+  MPSGraphTensor* squared = [graph squareWithTensor:input_tensor name:nil];
+  MPSGraphTensor* sum = [graph reductionSumWithTensor:squared axis:1 name:nil];
+  MPSGraphTensor* denom =
+    [graph constantWithScalar:static_cast<double>(head_dim)
+                        shape:@[ @1 ]
+                     dataType:MPSDataTypeFloat32];
+  MPSGraphTensor* mean =
+    [graph divisionWithPrimaryTensor:sum secondaryTensor:denom name:nil];
+  MPSGraphTensor* eps_tensor =
+    [graph constantWithScalar:static_cast<double>(eps)
+                        shape:@[ @1 ]
+                     dataType:MPSDataTypeFloat32];
+  MPSGraphTensor* variance =
+    [graph additionWithPrimaryTensor:mean secondaryTensor:eps_tensor name:nil];
+  MPSGraphTensor* scale = [graph reciprocalSquareRootWithTensor:variance name:nil];
+  MPSGraphTensor* scale_column =
+    [graph reshapeTensor:scale withShape:head_scale_shape name:nil];
+  MPSGraphTensor* scale_matrix =
+    [graph broadcastTensor:scale_column toShape:matrix_shape name:nil];
+  MPSGraphTensor* weight_row =
+    [graph reshapeTensor:weight_tensor withShape:make_shape({1, head_dim}) name:nil];
+  MPSGraphTensor* weight_matrix =
+    [graph broadcastTensor:weight_row toShape:matrix_shape name:nil];
+  MPSGraphTensor* normalized =
+    [graph multiplicationWithPrimaryTensor:input_tensor secondaryTensor:scale_matrix name:nil];
+  return [graph multiplicationWithPrimaryTensor:normalized secondaryTensor:weight_matrix
+                                           name:nil];
+}
+
+MPSGraphTensor* build_rope(MPSGraph* graph, MPSGraphTensor* input_tensor,
+                           std::size_t heads, std::size_t head_dim,
+                           const std::vector<float>& cos_values,
+                           const std::vector<float>& sin_values,
+                           std::size_t trig_bytes) {
+  const auto half_dim = head_dim / 2U;
+  MPSShape* half_shape = make_shape({heads, half_dim});
+  MPSShape* trig_shape = make_shape({1, half_dim});
+  MPSGraphTensor* first_half =
+    [graph sliceTensor:input_tensor dimension:1 start:0
+                length:static_cast<NSInteger>(half_dim) name:nil];
+  MPSGraphTensor* second_half =
+    [graph sliceTensor:input_tensor dimension:1
+                 start:static_cast<NSInteger>(half_dim)
+                length:static_cast<NSInteger>(half_dim) name:nil];
+
+  NSData* cos_data = [NSData dataWithBytes:cos_values.data() length:trig_bytes];
+  NSData* sin_data = [NSData dataWithBytes:sin_values.data() length:trig_bytes];
+  MPSGraphTensor* cos_row =
+    [graph constantWithData:cos_data shape:trig_shape dataType:MPSDataTypeFloat32];
+  MPSGraphTensor* sin_row =
+    [graph constantWithData:sin_data shape:trig_shape dataType:MPSDataTypeFloat32];
+  MPSGraphTensor* cos_matrix =
+    [graph broadcastTensor:cos_row toShape:half_shape name:nil];
+  MPSGraphTensor* sin_matrix =
+    [graph broadcastTensor:sin_row toShape:half_shape name:nil];
+
+  MPSGraphTensor* first_cos =
+    [graph multiplicationWithPrimaryTensor:first_half secondaryTensor:cos_matrix name:nil];
+  MPSGraphTensor* second_sin =
+    [graph multiplicationWithPrimaryTensor:second_half secondaryTensor:sin_matrix name:nil];
+  MPSGraphTensor* rotated_first =
+    [graph subtractionWithPrimaryTensor:first_cos secondaryTensor:second_sin name:nil];
+  MPSGraphTensor* second_cos =
+    [graph multiplicationWithPrimaryTensor:second_half secondaryTensor:cos_matrix name:nil];
+  MPSGraphTensor* first_sin =
+    [graph multiplicationWithPrimaryTensor:first_half secondaryTensor:sin_matrix name:nil];
+  MPSGraphTensor* rotated_second =
+    [graph additionWithPrimaryTensor:second_cos secondaryTensor:first_sin name:nil];
+  return [graph concatTensor:rotated_first withTensor:rotated_second dimension:1 name:nil];
+}
+
 Result<MpsGraphBuffer> make_f32_buffer(const MpsGraphContext& context,
                                        const std::vector<float>& values) {
   auto buffer_result = context.make_buffer(values.size() * sizeof(float));
@@ -696,39 +772,12 @@ Status MpsGraphContext::qk_norm_f32(const MpsGraphBuffer& input,
 
     MPSShape* matrix_shape = make_shape({heads, head_dim});
     MPSShape* vector_shape = make_shape({head_dim});
-    MPSShape* head_scale_shape = make_shape({heads, 1});
     MPSGraphTensor* input_tensor =
       [graph placeholderWithShape:matrix_shape dataType:MPSDataTypeFloat32 name:nil];
     MPSGraphTensor* weight_tensor =
       [graph placeholderWithShape:vector_shape dataType:MPSDataTypeFloat32 name:nil];
-
-    MPSGraphTensor* squared = [graph squareWithTensor:input_tensor name:nil];
-    MPSGraphTensor* sum = [graph reductionSumWithTensor:squared axis:1 name:nil];
-    MPSGraphTensor* denom =
-      [graph constantWithScalar:static_cast<double>(head_dim)
-                          shape:@[ @1 ]
-                       dataType:MPSDataTypeFloat32];
-    MPSGraphTensor* mean =
-      [graph divisionWithPrimaryTensor:sum secondaryTensor:denom name:nil];
-    MPSGraphTensor* eps_tensor =
-      [graph constantWithScalar:static_cast<double>(eps)
-                          shape:@[ @1 ]
-                       dataType:MPSDataTypeFloat32];
-    MPSGraphTensor* variance =
-      [graph additionWithPrimaryTensor:mean secondaryTensor:eps_tensor name:nil];
-    MPSGraphTensor* scale = [graph reciprocalSquareRootWithTensor:variance name:nil];
-    MPSGraphTensor* scale_column =
-      [graph reshapeTensor:scale withShape:head_scale_shape name:nil];
-    MPSGraphTensor* scale_matrix =
-      [graph broadcastTensor:scale_column toShape:matrix_shape name:nil];
-    MPSGraphTensor* weight_row =
-      [graph reshapeTensor:weight_tensor withShape:make_shape({1, head_dim}) name:nil];
-    MPSGraphTensor* weight_matrix =
-      [graph broadcastTensor:weight_row toShape:matrix_shape name:nil];
-    MPSGraphTensor* normalized =
-      [graph multiplicationWithPrimaryTensor:input_tensor secondaryTensor:scale_matrix name:nil];
     MPSGraphTensor* result =
-      [graph multiplicationWithPrimaryTensor:normalized secondaryTensor:weight_matrix name:nil];
+      build_qk_norm(graph, input_tensor, weight_tensor, heads, head_dim, eps);
 
     MPSGraphTensorData* input_data =
       [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
@@ -813,45 +862,11 @@ Status MpsGraphContext::rope_f32(const MpsGraphBuffer& input,
     }
 
     MPSShape* matrix_shape = make_shape({heads, head_dim});
-    MPSShape* half_shape = make_shape({heads, half_dim});
-    MPSShape* trig_shape = make_shape({1, half_dim});
     MPSGraphTensor* input_tensor =
       [graph placeholderWithShape:matrix_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* first_half =
-      [graph sliceTensor:input_tensor dimension:1 start:0
-                  length:static_cast<NSInteger>(half_dim) name:nil];
-    MPSGraphTensor* second_half =
-      [graph sliceTensor:input_tensor dimension:1
-                   start:static_cast<NSInteger>(half_dim)
-                  length:static_cast<NSInteger>(half_dim) name:nil];
-
-    NSData* cos_data =
-      [NSData dataWithBytes:cos_values.data() length:trig_bytes.value()];
-    NSData* sin_data =
-      [NSData dataWithBytes:sin_values.data() length:trig_bytes.value()];
-    MPSGraphTensor* cos_row =
-      [graph constantWithData:cos_data shape:trig_shape dataType:MPSDataTypeFloat32];
-    MPSGraphTensor* sin_row =
-      [graph constantWithData:sin_data shape:trig_shape dataType:MPSDataTypeFloat32];
-    MPSGraphTensor* cos_matrix =
-      [graph broadcastTensor:cos_row toShape:half_shape name:nil];
-    MPSGraphTensor* sin_matrix =
-      [graph broadcastTensor:sin_row toShape:half_shape name:nil];
-
-    MPSGraphTensor* first_cos =
-      [graph multiplicationWithPrimaryTensor:first_half secondaryTensor:cos_matrix name:nil];
-    MPSGraphTensor* second_sin =
-      [graph multiplicationWithPrimaryTensor:second_half secondaryTensor:sin_matrix name:nil];
-    MPSGraphTensor* rotated_first =
-      [graph subtractionWithPrimaryTensor:first_cos secondaryTensor:second_sin name:nil];
-    MPSGraphTensor* second_cos =
-      [graph multiplicationWithPrimaryTensor:second_half secondaryTensor:cos_matrix name:nil];
-    MPSGraphTensor* first_sin =
-      [graph multiplicationWithPrimaryTensor:first_half secondaryTensor:sin_matrix name:nil];
-    MPSGraphTensor* rotated_second =
-      [graph additionWithPrimaryTensor:second_cos secondaryTensor:first_sin name:nil];
     MPSGraphTensor* result =
-      [graph concatTensor:rotated_first withTensor:rotated_second dimension:1 name:nil];
+      build_rope(graph, input_tensor, heads, head_dim, cos_values, sin_values,
+                 trig_bytes.value());
 
     MPSGraphTensorData* input_data =
       [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
@@ -868,6 +883,170 @@ Status MpsGraphContext::rope_f32(const MpsGraphBuffer& input,
       run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [input_data release];
     [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::qk_norm_rope_f32(const MpsGraphBuffer& q_input,
+                                         const MpsGraphBuffer& k_input,
+                                         const MpsGraphBuffer& q_weight,
+                                         const MpsGraphBuffer& k_weight,
+                                         std::size_t q_heads,
+                                         std::size_t kv_heads,
+                                         std::size_t head_dim,
+                                         std::size_t position,
+                                         float eps, float theta,
+                                         MpsGraphBuffer& q_output,
+                                         MpsGraphBuffer& k_output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto q_heads_status = validate_positive_dim(q_heads, "qk norm rope q_heads");
+  if (!q_heads_status.is_ok()) {
+    return q_heads_status;
+  }
+  auto kv_heads_status = validate_positive_dim(kv_heads, "qk norm rope kv_heads");
+  if (!kv_heads_status.is_ok()) {
+    return kv_heads_status;
+  }
+  auto head_dim_status = validate_positive_dim(head_dim, "qk norm rope head_dim");
+  if (!head_dim_status.is_ok()) {
+    return head_dim_status;
+  }
+  if (head_dim % 2U != 0) {
+    return Status::invalid_argument("MPSGraph qk norm rope head_dim must be even");
+  }
+  if (!std::isfinite(eps)) {
+    return Status::invalid_argument("MPSGraph qk norm rope eps must be finite");
+  }
+  if (!std::isfinite(theta) || theta <= 0.0F) {
+    return Status::invalid_argument("MPSGraph qk norm rope theta must be positive and finite");
+  }
+  std::size_t q_values = 0;
+  if (!checked_mul(q_heads, head_dim, q_values)) {
+    return Status::invalid_argument("MPSGraph qk norm rope q element count overflow");
+  }
+  std::size_t k_values = 0;
+  if (!checked_mul(kv_heads, head_dim, k_values)) {
+    return Status::invalid_argument("MPSGraph qk norm rope k element count overflow");
+  }
+  auto q_input_status = validate_f32_buffer(q_input, q_values, "qk norm rope q input");
+  if (!q_input_status.is_ok()) {
+    return q_input_status;
+  }
+  auto k_input_status = validate_f32_buffer(k_input, k_values, "qk norm rope k input");
+  if (!k_input_status.is_ok()) {
+    return k_input_status;
+  }
+  auto q_weight_status = validate_f32_buffer(q_weight, head_dim,
+                                             "qk norm rope q weight");
+  if (!q_weight_status.is_ok()) {
+    return q_weight_status;
+  }
+  auto k_weight_status = validate_f32_buffer(k_weight, head_dim,
+                                             "qk norm rope k weight");
+  if (!k_weight_status.is_ok()) {
+    return k_weight_status;
+  }
+  auto q_output_status = validate_f32_buffer(q_output, q_values,
+                                             "qk norm rope q output");
+  if (!q_output_status.is_ok()) {
+    return q_output_status;
+  }
+  auto k_output_status = validate_f32_buffer(k_output, k_values,
+                                             "qk norm rope k output");
+  if (!k_output_status.is_ok()) {
+    return k_output_status;
+  }
+
+  const auto half_dim = head_dim / 2U;
+  auto trig_bytes = f32_bytes(half_dim, "qk norm rope trig constants");
+  if (!trig_bytes.is_ok()) {
+    return trig_bytes.status();
+  }
+  std::vector<float> cos_values(half_dim);
+  std::vector<float> sin_values(half_dim);
+  for (std::size_t dim = 0; dim < half_dim; ++dim) {
+    const auto exponent =
+      static_cast<double>(2U * dim) / static_cast<double>(head_dim);
+    const auto frequency = 1.0 / std::pow(static_cast<double>(theta), exponent);
+    const auto angle = static_cast<double>(position) * frequency;
+    cos_values[dim] = static_cast<float>(std::cos(angle));
+    sin_values[dim] = static_cast<float>(std::sin(angle));
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* q_shape = make_shape({q_heads, head_dim});
+    MPSShape* k_shape = make_shape({kv_heads, head_dim});
+    MPSShape* weight_shape = make_shape({head_dim});
+    MPSGraphTensor* q_input_tensor =
+      [graph placeholderWithShape:q_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* k_input_tensor =
+      [graph placeholderWithShape:k_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* q_weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* k_weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+
+    MPSGraphTensor* q_normed =
+      build_qk_norm(graph, q_input_tensor, q_weight_tensor, q_heads, head_dim, eps);
+    MPSGraphTensor* k_normed =
+      build_qk_norm(graph, k_input_tensor, k_weight_tensor, kv_heads, head_dim, eps);
+    MPSGraphTensor* q_result =
+      build_rope(graph, q_normed, q_heads, head_dim, cos_values, sin_values,
+                 trig_bytes.value());
+    MPSGraphTensor* k_result =
+      build_rope(graph, k_normed, kv_heads, head_dim, cos_values, sin_values,
+                 trig_bytes.value());
+
+    MPSGraphTensorData* q_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:q_input.impl_->buffer
+                                             shape:q_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* k_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:k_input.impl_->buffer
+                                             shape:k_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* q_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:q_weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* k_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:k_weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* q_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:q_output.impl_->buffer
+                                             shape:q_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* k_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:k_output.impl_->buffer
+                                             shape:k_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      q_input_tensor : q_input_data,
+      k_input_tensor : k_input_data,
+      q_weight_tensor : q_weight_data,
+      k_weight_tensor : k_weight_data,
+    };
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = @{
+      q_result : q_output_data,
+      k_result : k_output_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, results, &impl_->graph_stats);
+    [q_input_data release];
+    [k_input_data release];
+    [q_weight_data release];
+    [k_weight_data release];
+    [q_output_data release];
+    [k_output_data release];
     [graph release];
     return status;
   }
@@ -1106,6 +1285,277 @@ Status MpsGraphContext::qkv_matvec_f32(const MpsGraphBuffer& q_weight,
   }
 }
 
+Status MpsGraphContext::gate_up_matvec_f32(const MpsGraphBuffer& gate_weight,
+                                           const MpsGraphBuffer& up_weight,
+                                           std::size_t rows, std::size_t cols,
+                                           const MpsGraphBuffer& input,
+                                           MpsGraphBuffer& gate_output,
+                                           MpsGraphBuffer& up_output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto rows_status = validate_positive_dim(rows, "gate/up matvec rows");
+  if (!rows_status.is_ok()) {
+    return rows_status;
+  }
+  auto cols_status = validate_positive_dim(cols, "gate/up matvec cols");
+  if (!cols_status.is_ok()) {
+    return cols_status;
+  }
+  std::size_t weight_values = 0;
+  if (!checked_mul(rows, cols, weight_values)) {
+    return Status::invalid_argument("MPSGraph gate/up matvec weight element count overflow");
+  }
+  auto gate_weight_status = validate_f32_buffer(gate_weight, weight_values,
+                                                "gate/up matvec gate weight");
+  if (!gate_weight_status.is_ok()) {
+    return gate_weight_status;
+  }
+  auto up_weight_status = validate_f32_buffer(up_weight, weight_values,
+                                              "gate/up matvec up weight");
+  if (!up_weight_status.is_ok()) {
+    return up_weight_status;
+  }
+  auto input_status = validate_f32_buffer(input, cols, "gate/up matvec input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto gate_output_status = validate_f32_buffer(gate_output, rows,
+                                                "gate/up matvec gate output");
+  if (!gate_output_status.is_ok()) {
+    return gate_output_status;
+  }
+  auto up_output_status = validate_f32_buffer(up_output, rows,
+                                              "gate/up matvec up output");
+  if (!up_output_status.is_ok()) {
+    return up_output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* weight_shape = make_shape({rows, cols});
+    MPSShape* input_shape = make_shape({cols, 1});
+    MPSShape* output_shape = make_shape({rows});
+    MPSGraphTensor* gate_weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* up_weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* input_tensor =
+      [graph placeholderWithShape:input_shape dataType:MPSDataTypeFloat32 name:nil];
+
+    MPSGraphTensor* gate_product =
+      [graph matrixMultiplicationWithPrimaryTensor:gate_weight_tensor
+                                   secondaryTensor:input_tensor
+                                              name:nil];
+    MPSGraphTensor* up_product =
+      [graph matrixMultiplicationWithPrimaryTensor:up_weight_tensor
+                                   secondaryTensor:input_tensor
+                                              name:nil];
+    MPSGraphTensor* gate_result =
+      [graph reshapeTensor:gate_product withShape:output_shape name:nil];
+    MPSGraphTensor* up_result =
+      [graph reshapeTensor:up_product withShape:output_shape name:nil];
+
+    MPSGraphTensorData* gate_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:gate_weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* up_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:up_weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:input.impl_->buffer
+                                             shape:input_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* gate_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:gate_output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* up_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:up_output.impl_->buffer
+                                             shape:output_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      gate_weight_tensor : gate_weight_data,
+      up_weight_tensor : up_weight_data,
+      input_tensor : input_data,
+    };
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = @{
+      gate_result : gate_output_data,
+      up_result : up_output_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, results, &impl_->graph_stats);
+    [gate_weight_data release];
+    [up_weight_data release];
+    [input_data release];
+    [gate_output_data release];
+    [up_output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::attn_project_residual_norm_f32(
+  const MpsGraphBuffer& o_weight, const MpsGraphBuffer& attn_output,
+  const MpsGraphBuffer& residual, const MpsGraphBuffer& norm_weight,
+  std::size_t hidden_size, std::size_t attn_dim, float eps,
+  MpsGraphBuffer& residual_output, MpsGraphBuffer& norm_output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto hidden_status =
+    validate_positive_dim(hidden_size, "attention projection hidden_size");
+  if (!hidden_status.is_ok()) {
+    return hidden_status;
+  }
+  auto attn_status = validate_positive_dim(attn_dim, "attention projection attn_dim");
+  if (!attn_status.is_ok()) {
+    return attn_status;
+  }
+  if (!std::isfinite(eps)) {
+    return Status::invalid_argument("MPSGraph attention projection norm eps must be finite");
+  }
+  std::size_t weight_values = 0;
+  if (!checked_mul(hidden_size, attn_dim, weight_values)) {
+    return Status::invalid_argument("MPSGraph attention projection weight count overflow");
+  }
+  auto weight_status = validate_f32_buffer(o_weight, weight_values,
+                                           "attention projection weight");
+  if (!weight_status.is_ok()) {
+    return weight_status;
+  }
+  auto attn_output_status = validate_f32_buffer(attn_output, attn_dim,
+                                                "attention projection input");
+  if (!attn_output_status.is_ok()) {
+    return attn_output_status;
+  }
+  auto residual_status = validate_f32_buffer(residual, hidden_size,
+                                             "attention projection residual");
+  if (!residual_status.is_ok()) {
+    return residual_status;
+  }
+  auto norm_weight_status = validate_f32_buffer(norm_weight, hidden_size,
+                                                "attention projection norm weight");
+  if (!norm_weight_status.is_ok()) {
+    return norm_weight_status;
+  }
+  auto residual_output_status = validate_f32_buffer(
+    residual_output, hidden_size, "attention projection residual output");
+  if (!residual_output_status.is_ok()) {
+    return residual_output_status;
+  }
+  auto norm_output_status = validate_f32_buffer(
+    norm_output, hidden_size, "attention projection norm output");
+  if (!norm_output_status.is_ok()) {
+    return norm_output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* weight_shape = make_shape({hidden_size, attn_dim});
+    MPSShape* attn_shape = make_shape({attn_dim});
+    MPSShape* attn_column_shape = make_shape({attn_dim, 1});
+    MPSShape* hidden_shape = make_shape({hidden_size});
+    MPSGraphTensor* weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* attn_tensor =
+      [graph placeholderWithShape:attn_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* residual_tensor =
+      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* norm_weight_tensor =
+      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+
+    MPSGraphTensor* attn_column =
+      [graph reshapeTensor:attn_tensor withShape:attn_column_shape name:nil];
+    MPSGraphTensor* projected =
+      [graph matrixMultiplicationWithPrimaryTensor:weight_tensor
+                                   secondaryTensor:attn_column
+                                              name:nil];
+    MPSGraphTensor* projected_vector =
+      [graph reshapeTensor:projected withShape:hidden_shape name:nil];
+    MPSGraphTensor* residual_result =
+      [graph additionWithPrimaryTensor:residual_tensor
+                        secondaryTensor:projected_vector
+                                   name:nil];
+
+    MPSGraphTensor* squared = [graph squareWithTensor:residual_result name:nil];
+    MPSGraphTensor* sum = [graph reductionSumWithTensor:squared axis:0 name:nil];
+    MPSGraphTensor* denom =
+      [graph constantWithScalar:static_cast<double>(hidden_size)
+                          shape:@[ @1 ]
+                       dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* mean =
+      [graph divisionWithPrimaryTensor:sum secondaryTensor:denom name:nil];
+    MPSGraphTensor* eps_tensor =
+      [graph constantWithScalar:static_cast<double>(eps)
+                          shape:@[ @1 ]
+                       dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* variance =
+      [graph additionWithPrimaryTensor:mean secondaryTensor:eps_tensor name:nil];
+    MPSGraphTensor* scale = [graph reciprocalSquareRootWithTensor:variance name:nil];
+    MPSGraphTensor* normalized =
+      [graph multiplicationWithPrimaryTensor:residual_result secondaryTensor:scale name:nil];
+    MPSGraphTensor* norm_result =
+      [graph multiplicationWithPrimaryTensor:normalized secondaryTensor:norm_weight_tensor
+                                        name:nil];
+
+    MPSGraphTensorData* weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:o_weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* attn_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:attn_output.impl_->buffer
+                                             shape:attn_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* residual_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:residual.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* norm_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:norm_weight.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* residual_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:residual_output.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* norm_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:norm_output.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      weight_tensor : weight_data,
+      attn_tensor : attn_data,
+      residual_tensor : residual_data,
+      norm_weight_tensor : norm_weight_data,
+    };
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = @{
+      residual_result : residual_output_data,
+      norm_result : norm_output_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, results, &impl_->graph_stats);
+    [weight_data release];
+    [attn_data release];
+    [residual_data release];
+    [norm_weight_data release];
+    [residual_output_data release];
+    [norm_output_data release];
+    [graph release];
+    return status;
+  }
+}
+
 Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
                                      const MpsGraphBuffer& up,
                                      std::size_t size,
@@ -1167,6 +1617,127 @@ Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
       run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
     [gate_data release];
     [up_data release];
+    [output_data release];
+    [graph release];
+    return status;
+  }
+}
+
+Status MpsGraphContext::swiglu_down_residual_f32(const MpsGraphBuffer& gate,
+                                                 const MpsGraphBuffer& up,
+                                                 const MpsGraphBuffer& down_weight,
+                                                 const MpsGraphBuffer& residual,
+                                                 std::size_t hidden_size,
+                                                 std::size_t intermediate_size,
+                                                 MpsGraphBuffer& output) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto hidden_status = validate_positive_dim(hidden_size, "SwiGLU hidden_size");
+  if (!hidden_status.is_ok()) {
+    return hidden_status;
+  }
+  auto intermediate_status =
+    validate_positive_dim(intermediate_size, "SwiGLU intermediate_size");
+  if (!intermediate_status.is_ok()) {
+    return intermediate_status;
+  }
+  std::size_t weight_values = 0;
+  if (!checked_mul(hidden_size, intermediate_size, weight_values)) {
+    return Status::invalid_argument("MPSGraph SwiGLU down weight element count overflow");
+  }
+  auto gate_status = validate_f32_buffer(gate, intermediate_size, "SwiGLU gate");
+  if (!gate_status.is_ok()) {
+    return gate_status;
+  }
+  auto up_status = validate_f32_buffer(up, intermediate_size, "SwiGLU up");
+  if (!up_status.is_ok()) {
+    return up_status;
+  }
+  auto weight_status = validate_f32_buffer(down_weight, weight_values,
+                                           "SwiGLU down weight");
+  if (!weight_status.is_ok()) {
+    return weight_status;
+  }
+  auto residual_status = validate_f32_buffer(residual, hidden_size,
+                                             "SwiGLU residual");
+  if (!residual_status.is_ok()) {
+    return residual_status;
+  }
+  auto output_status = validate_f32_buffer(output, hidden_size, "SwiGLU output");
+  if (!output_status.is_ok()) {
+    return output_status;
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* intermediate_shape = make_shape({intermediate_size});
+    MPSShape* intermediate_column_shape = make_shape({intermediate_size, 1});
+    MPSShape* weight_shape = make_shape({hidden_size, intermediate_size});
+    MPSShape* hidden_shape = make_shape({hidden_size});
+    MPSGraphTensor* gate_tensor =
+      [graph placeholderWithShape:intermediate_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* up_tensor =
+      [graph placeholderWithShape:intermediate_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* weight_tensor =
+      [graph placeholderWithShape:weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* residual_tensor =
+      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+
+    MPSGraphTensor* sigmoid = [graph sigmoidWithTensor:gate_tensor name:nil];
+    MPSGraphTensor* silu =
+      [graph multiplicationWithPrimaryTensor:gate_tensor secondaryTensor:sigmoid name:nil];
+    MPSGraphTensor* gated =
+      [graph multiplicationWithPrimaryTensor:silu secondaryTensor:up_tensor name:nil];
+    MPSGraphTensor* gated_column =
+      [graph reshapeTensor:gated withShape:intermediate_column_shape name:nil];
+    MPSGraphTensor* projected =
+      [graph matrixMultiplicationWithPrimaryTensor:weight_tensor
+                                   secondaryTensor:gated_column
+                                              name:nil];
+    MPSGraphTensor* projected_vector =
+      [graph reshapeTensor:projected withShape:hidden_shape name:nil];
+    MPSGraphTensor* result =
+      [graph additionWithPrimaryTensor:residual_tensor
+                        secondaryTensor:projected_vector
+                                   name:nil];
+
+    MPSGraphTensorData* gate_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:gate.impl_->buffer
+                                             shape:intermediate_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* up_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:up.impl_->buffer
+                                             shape:intermediate_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:down_weight.impl_->buffer
+                                             shape:weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* residual_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:residual.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:output.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      gate_tensor : gate_data,
+      up_tensor : up_data,
+      weight_tensor : weight_data,
+      residual_tensor : residual_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, result, output_data, &impl_->graph_stats);
+    [gate_data release];
+    [up_data release];
+    [weight_data release];
+    [residual_data release];
     [output_data release];
     [graph release];
     return status;
@@ -2300,6 +2871,92 @@ Status run_operator_smoke_test() {
     return status;
   }
 
+  auto q_norm_rope_input = make_f32_buffer(context, {3.0F, 4.0F, 0.0F, 2.0F});
+  auto k_norm_rope_input = make_f32_buffer(context, {1.0F, 2.0F});
+  auto q_norm_rope_weight = make_f32_buffer(context, {1.0F, 2.0F});
+  auto k_norm_rope_weight = make_f32_buffer(context, {3.0F, 4.0F});
+  if (!q_norm_rope_input.is_ok()) {
+    return q_norm_rope_input.status();
+  }
+  if (!k_norm_rope_input.is_ok()) {
+    return k_norm_rope_input.status();
+  }
+  if (!q_norm_rope_weight.is_ok()) {
+    return q_norm_rope_weight.status();
+  }
+  if (!k_norm_rope_weight.is_ok()) {
+    return k_norm_rope_weight.status();
+  }
+  auto q_norm_rope_output = context.make_buffer(sizeof(float) * 4U);
+  auto k_norm_rope_output = context.make_buffer(sizeof(float) * 2U);
+  if (!q_norm_rope_output.is_ok()) {
+    return q_norm_rope_output.status();
+  }
+  if (!k_norm_rope_output.is_ok()) {
+    return k_norm_rope_output.status();
+  }
+  auto q_norm_rope_buffer = std::move(q_norm_rope_output.value());
+  auto k_norm_rope_buffer = std::move(k_norm_rope_output.value());
+  status = context.qk_norm_rope_f32(q_norm_rope_input.value(),
+                                    k_norm_rope_input.value(),
+                                    q_norm_rope_weight.value(),
+                                    k_norm_rope_weight.value(), 2, 1, 2, 1,
+                                    0.0F, 10000.0F, q_norm_rope_buffer,
+                                    k_norm_rope_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, q_norm_rope_buffer, 4);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  const auto q0_first = 3.0F / std::sqrt(12.5F);
+  const auto q0_second = 8.0F / std::sqrt(12.5F);
+  const auto q1_first = 0.0F;
+  const auto q1_second = 4.0F / std::sqrt(2.0F);
+  status = check_close(output.value()[0],
+                       q0_first * std::cos(1.0F) - q0_second * std::sin(1.0F),
+                       "qk_norm_rope.q[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1],
+                       q0_second * std::cos(1.0F) + q0_first * std::sin(1.0F),
+                       "qk_norm_rope.q[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[2],
+                       q1_first * std::cos(1.0F) - q1_second * std::sin(1.0F),
+                       "qk_norm_rope.q[2]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[3],
+                       q1_second * std::cos(1.0F) + q1_first * std::sin(1.0F),
+                       "qk_norm_rope.q[3]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, k_norm_rope_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  const auto k_first = 3.0F / std::sqrt(2.5F);
+  const auto k_second = 8.0F / std::sqrt(2.5F);
+  status = check_close(output.value()[0],
+                       k_first * std::cos(1.0F) - k_second * std::sin(1.0F),
+                       "qk_norm_rope.k[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1],
+                       k_second * std::cos(1.0F) + k_first * std::sin(1.0F),
+                       "qk_norm_rope.k[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
   auto matvec_weight = make_f32_buffer(context, {1.0F, 2.0F, 3.0F, 1.0F});
   auto matvec_input = make_f32_buffer(context, {3.0F, 4.0F});
   if (!matvec_weight.is_ok()) {
@@ -2397,6 +3054,125 @@ Status run_operator_smoke_test() {
     return status;
   }
 
+  auto gate_weight = make_f32_buffer(context, {1.0F, 0.0F, 0.0F, 1.0F});
+  auto up_weight = make_f32_buffer(context, {2.0F, 0.0F, 0.0F, 3.0F});
+  auto gate_up_input = make_f32_buffer(context, {4.0F, 5.0F});
+  if (!gate_weight.is_ok()) {
+    return gate_weight.status();
+  }
+  if (!up_weight.is_ok()) {
+    return up_weight.status();
+  }
+  if (!gate_up_input.is_ok()) {
+    return gate_up_input.status();
+  }
+  auto gate_output = context.make_buffer(sizeof(float) * 2U);
+  auto up_output = context.make_buffer(sizeof(float) * 2U);
+  if (!gate_output.is_ok()) {
+    return gate_output.status();
+  }
+  if (!up_output.is_ok()) {
+    return up_output.status();
+  }
+  auto gate_buffer = std::move(gate_output.value());
+  auto up_buffer = std::move(up_output.value());
+  status = context.gate_up_matvec_f32(gate_weight.value(), up_weight.value(), 2, 2,
+                                      gate_up_input.value(), gate_buffer, up_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, gate_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 4.0F, "gate_up_matvec.gate[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 5.0F, "gate_up_matvec.gate[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, up_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  status = check_close(output.value()[0], 8.0F, "gate_up_matvec.up[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], 15.0F, "gate_up_matvec.up[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto attn_o_weight =
+    make_f32_buffer(context, {1.0F, 2.0F, 3.0F, 4.0F});
+  auto attn_project_input = make_f32_buffer(context, {2.0F, 3.0F});
+  auto attn_residual = make_f32_buffer(context, {10.0F, 20.0F});
+  auto attn_norm_weight = make_f32_buffer(context, {2.0F, 3.0F});
+  if (!attn_o_weight.is_ok()) {
+    return attn_o_weight.status();
+  }
+  if (!attn_project_input.is_ok()) {
+    return attn_project_input.status();
+  }
+  if (!attn_residual.is_ok()) {
+    return attn_residual.status();
+  }
+  if (!attn_norm_weight.is_ok()) {
+    return attn_norm_weight.status();
+  }
+  auto attn_residual_output = context.make_buffer(sizeof(float) * 2U);
+  auto attn_norm_output = context.make_buffer(sizeof(float) * 2U);
+  if (!attn_residual_output.is_ok()) {
+    return attn_residual_output.status();
+  }
+  if (!attn_norm_output.is_ok()) {
+    return attn_norm_output.status();
+  }
+  auto attn_residual_buffer = std::move(attn_residual_output.value());
+  auto attn_norm_buffer = std::move(attn_norm_output.value());
+  status = context.attn_project_residual_norm_f32(
+    attn_o_weight.value(), attn_project_input.value(), attn_residual.value(),
+    attn_norm_weight.value(), 2, 2, 0.0F, attn_residual_buffer,
+    attn_norm_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, attn_residual_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  const auto attn_res0 = 18.0F;
+  const auto attn_res1 = 38.0F;
+  status = check_close(output.value()[0], attn_res0,
+                       "attn_project_residual_norm.residual[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], attn_res1,
+                       "attn_project_residual_norm.residual[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, attn_norm_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  const auto attn_norm_scale =
+    1.0F / std::sqrt((attn_res0 * attn_res0 + attn_res1 * attn_res1) / 2.0F);
+  status = check_close(output.value()[0], attn_res0 * attn_norm_scale * 2.0F,
+                       "attn_project_residual_norm.norm[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1], attn_res1 * attn_norm_scale * 3.0F,
+                       "attn_project_residual_norm.norm[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
   auto gate = make_f32_buffer(context, {0.0F, 1.0F});
   auto up = make_f32_buffer(context, {5.0F, 6.0F});
   if (!gate.is_ok()) {
@@ -2423,6 +3199,52 @@ Status run_operator_smoke_test() {
     return status;
   }
   status = check_close(output.value()[1], 6.0F / (1.0F + std::exp(-1.0F)), "silu[1]");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto swiglu_gate = make_f32_buffer(context, {0.0F, 1.0F});
+  auto swiglu_up = make_f32_buffer(context, {5.0F, 6.0F});
+  auto swiglu_down_weight =
+    make_f32_buffer(context, {1.0F, 2.0F, 3.0F, 4.0F});
+  auto swiglu_residual = make_f32_buffer(context, {10.0F, 20.0F});
+  if (!swiglu_gate.is_ok()) {
+    return swiglu_gate.status();
+  }
+  if (!swiglu_up.is_ok()) {
+    return swiglu_up.status();
+  }
+  if (!swiglu_down_weight.is_ok()) {
+    return swiglu_down_weight.status();
+  }
+  if (!swiglu_residual.is_ok()) {
+    return swiglu_residual.status();
+  }
+  auto swiglu_output = context.make_buffer(sizeof(float) * 2U);
+  if (!swiglu_output.is_ok()) {
+    return swiglu_output.status();
+  }
+  auto swiglu_buffer = std::move(swiglu_output.value());
+  status = context.swiglu_down_residual_f32(
+    swiglu_gate.value(), swiglu_up.value(), swiglu_down_weight.value(),
+    swiglu_residual.value(), 2, 2, swiglu_buffer);
+  if (!status.is_ok()) {
+    return status;
+  }
+  output = read_f32_buffer(context, swiglu_buffer, 2);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  const auto swiglu_0 = 0.0F;
+  const auto swiglu_1 = 6.0F / (1.0F + std::exp(-1.0F));
+  status = check_close(output.value()[0], 10.0F + swiglu_0 + 2.0F * swiglu_1,
+                       "swiglu_down_residual[0]");
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = check_close(output.value()[1],
+                       20.0F + 3.0F * swiglu_0 + 4.0F * swiglu_1,
+                       "swiglu_down_residual[1]");
   if (!status.is_ok()) {
     return status;
   }

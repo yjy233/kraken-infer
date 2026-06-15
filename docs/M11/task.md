@@ -137,6 +137,10 @@
 
 - [ ] `matvec_f32` 支持 fixed shape cache
 - [x] q/k/v projection 合并为一次 MPSGraph run
+- [x] q/k norm + RoPE 合并为一次 MPSGraph run
+- [x] attention output projection + residual + post RMSNorm 合并为一次 MPSGraph run
+- [x] gate/up projection 合并为一次 MPSGraph run
+- [x] SwiGLU + down projection + MLP residual 合并为一次 MPSGraph run
 - [ ] q/k/v/o projection 复用 matvec executable
 - [ ] gate/up/down projection 复用 matvec executable
 - [ ] lm_head matvec 使用专用 cache key
