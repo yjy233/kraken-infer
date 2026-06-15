@@ -150,20 +150,20 @@
 - [ ] `attention_f32` 支持 fixed capacity bucket cache
 - [ ] attention causal mask 支持 fixed shape
 - [ ] attention cache key 包含 layer/capacity/head layout
-- [ ] attention 输出继续与 CPU/tiny reference 对齐
+- [x] attention 输出继续与 CPU/tiny reference 对齐
 
 ### Coarse Graph Stages
 
 - [x] profile 中细分 MPSGraph layer / operator 耗时
-- [ ] 设计 single-layer attention graph
-- [ ] 实现 single-layer attention graph smoke
-- [ ] 设计 single-layer MLP graph
-- [ ] 实现 single-layer MLP graph smoke
-- [ ] 设计 full transformer block graph
-- [ ] 实现 tiny full block graph smoke
+- [x] 设计 single-layer attention graph
+- [x] 实现 single-layer attention graph smoke
+- [x] 设计 single-layer MLP graph
+- [x] 实现 single-layer MLP graph smoke
+- [x] 设计 full transformer block graph
+- [x] 实现 tiny full block graph smoke
 - [ ] 设计 single-token full forward graph
 - [ ] 对比 op-by-op path 和 coarse graph path 首 token 输出
-- [ ] profile 中区分 coarse graph path 和 op graph path
+- [x] profile 中区分 coarse graph path 和 op graph path
 - [ ] 支持通过内部 flag 回退到 op graph path 做 correctness 对照
 
 ### Prefill Optimization

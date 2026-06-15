@@ -121,6 +121,14 @@ bool MpsGraphKvCache::allocated() const {
   return key_cache_.valid() && value_cache_.valid();
 }
 
+MpsGraphBuffer& MpsGraphKvCache::key_buffer() {
+  return key_cache_;
+}
+
+MpsGraphBuffer& MpsGraphKvCache::value_buffer() {
+  return value_cache_;
+}
+
 const MpsGraphBuffer& MpsGraphKvCache::key_buffer() const {
   return key_cache_;
 }

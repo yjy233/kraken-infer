@@ -298,6 +298,60 @@ Status MpsGraphContext::swiglu_down_residual_f32(const MpsGraphBuffer& gate,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::transformer_layer_f32(
+  const MpsGraphBuffer& input_layernorm_weight,
+  const MpsGraphBuffer& q_weight,
+  const MpsGraphBuffer& k_weight,
+  const MpsGraphBuffer& v_weight,
+  const MpsGraphBuffer& o_weight,
+  const MpsGraphBuffer& q_norm_weight,
+  const MpsGraphBuffer& k_norm_weight,
+  const MpsGraphBuffer& post_attention_layernorm_weight,
+  const MpsGraphBuffer& gate_weight,
+  const MpsGraphBuffer& up_weight,
+  const MpsGraphBuffer& down_weight,
+  std::size_t layer,
+  std::size_t layers,
+  std::size_t position,
+  std::size_t capacity_tokens,
+  std::size_t hidden_size,
+  std::size_t intermediate_size,
+  std::size_t heads,
+  std::size_t kv_heads,
+  std::size_t head_dim,
+  float eps,
+  float theta,
+  MpsGraphBuffer& hidden,
+  MpsGraphBuffer& key_cache,
+  MpsGraphBuffer& value_cache) const {
+  (void)input_layernorm_weight;
+  (void)q_weight;
+  (void)k_weight;
+  (void)v_weight;
+  (void)o_weight;
+  (void)q_norm_weight;
+  (void)k_norm_weight;
+  (void)post_attention_layernorm_weight;
+  (void)gate_weight;
+  (void)up_weight;
+  (void)down_weight;
+  (void)layer;
+  (void)layers;
+  (void)position;
+  (void)capacity_tokens;
+  (void)hidden_size;
+  (void)intermediate_size;
+  (void)heads;
+  (void)kv_heads;
+  (void)head_dim;
+  (void)eps;
+  (void)theta;
+  (void)hidden;
+  (void)key_cache;
+  (void)value_cache;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
                                 const MpsGraphBuffer& rhs,
                                 std::size_t size,

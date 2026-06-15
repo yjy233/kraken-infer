@@ -44,6 +44,8 @@ class MpsGraphKvCache {
   [[nodiscard]] Status mark_position_used(std::size_t position);
 
   [[nodiscard]] bool allocated() const;
+  [[nodiscard]] MpsGraphBuffer& key_buffer();
+  [[nodiscard]] MpsGraphBuffer& value_buffer();
   [[nodiscard]] const MpsGraphBuffer& key_buffer() const;
   [[nodiscard]] const MpsGraphBuffer& value_buffer() const;
   [[nodiscard]] std::size_t value_offset(std::size_t layer, std::size_t position) const;

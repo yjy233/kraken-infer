@@ -496,6 +496,44 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   const auto swiglu_1 = 6.0F / (1.0F + std::exp(-1.0F));
   assert_close(output[0], 10.0F + swiglu_0 + 2.0F * swiglu_1);
   assert_close(output[1], 20.0F + 3.0F * swiglu_0 + 4.0F * swiglu_1);
+
+  auto layer_hidden = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F});
+  auto layer_norm_weight = make_mpsgraph_f32_buffer(context, {1.0F, 1.0F});
+  auto layer_q_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F,
+                                                           0.0F, 1.0F});
+  auto layer_k_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F,
+                                                           0.0F, 1.0F});
+  auto layer_v_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F,
+                                                           0.0F, 1.0F});
+  auto layer_o_weight = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F,
+                                                           0.0F, 1.0F});
+  auto layer_q_norm_weight = make_mpsgraph_f32_buffer(context, {1.0F, 1.0F});
+  auto layer_k_norm_weight = make_mpsgraph_f32_buffer(context, {1.0F, 1.0F});
+  auto layer_gate_weight = make_mpsgraph_f32_buffer(context, {0.0F, 0.0F,
+                                                              0.0F, 0.0F});
+  auto layer_up_weight = make_mpsgraph_f32_buffer(context, {0.0F, 0.0F,
+                                                            0.0F, 0.0F});
+  auto layer_down_weight = make_mpsgraph_f32_buffer(context, {0.0F, 0.0F,
+                                                              0.0F, 0.0F});
+  auto layer_key_cache = make_mpsgraph_f32_buffer(context, {0.0F, 0.0F});
+  auto layer_value_cache = make_mpsgraph_f32_buffer(context, {0.0F, 0.0F});
+  assert(context.transformer_layer_f32(
+           layer_norm_weight, layer_q_weight, layer_k_weight, layer_v_weight,
+           layer_o_weight, layer_q_norm_weight, layer_k_norm_weight,
+           layer_norm_weight, layer_gate_weight, layer_up_weight, layer_down_weight,
+           0, 1, 0, 1, 2, 2, 1, 1, 2, 0.0F, 10000.0F, layer_hidden,
+           layer_key_cache, layer_value_cache)
+           .is_ok());
+  const auto layer_norm = std::sqrt(2.0F);
+  output = read_mpsgraph_f32_buffer(context, layer_hidden, 2);
+  assert_close(output[0], 1.0F + layer_norm);
+  assert_close(output[1], 0.0F);
+  output = read_mpsgraph_f32_buffer(context, layer_key_cache, 2);
+  assert_close(output[0], layer_norm);
+  assert_close(output[1], 0.0F);
+  output = read_mpsgraph_f32_buffer(context, layer_value_cache, 2);
+  assert_close(output[0], layer_norm);
+  assert_close(output[1], 0.0F);
 }
 
 void test_mps_matvec_workspace_reuse() {
@@ -1321,11 +1359,7 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(summary_json.find("mpsgraph.load_weights") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.argmax") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.update_generation_status") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.attention") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.input_qkv_qk_rope") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.attn_project_residual_norm") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.gate_up_proj") != std::string::npos);
-  assert(summary_json.find("mpsgraph.layer.swiglu_down_residual") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.full") != std::string::npos);
   assert(summary_json.find("mpsgraph.logits.lm_head") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.read_generation_status") != std::string::npos);
   assert(summary_json.find("mpsgraph.final_readback.generated_ids") != std::string::npos);

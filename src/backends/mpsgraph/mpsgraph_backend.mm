@@ -278,6 +278,83 @@ MPSGraphTensor* build_rope(MPSGraph* graph, MPSGraphTensor* input_tensor,
   return [graph concatTensor:rotated_first withTensor:rotated_second dimension:1 name:nil];
 }
 
+MPSGraphTensor* build_grouped_attention_from_cache(
+  MPSGraph* graph, MPSGraphTensor* query_tensor, MPSGraphTensor* key_cache_tensor,
+  MPSGraphTensor* value_cache_tensor, std::size_t layer, std::size_t position,
+  std::size_t capacity_tokens, std::size_t heads, std::size_t kv_heads,
+  std::size_t head_dim) {
+  const auto seq_len = position + 1U;
+  const auto kv_group = heads / kv_heads;
+
+  MPSGraphTensor* layer_keys =
+    [graph sliceTensor:key_cache_tensor dimension:0
+                 start:static_cast<NSInteger>(layer) length:1 name:nil];
+  MPSGraphTensor* layer_values =
+    [graph sliceTensor:value_cache_tensor dimension:0
+                 start:static_cast<NSInteger>(layer) length:1 name:nil];
+  layer_keys =
+    [graph reshapeTensor:layer_keys
+               withShape:make_shape({capacity_tokens, kv_heads, head_dim})
+                    name:nil];
+  layer_values =
+    [graph reshapeTensor:layer_values
+               withShape:make_shape({capacity_tokens, kv_heads, head_dim})
+                    name:nil];
+  MPSGraphTensor* visible_keys =
+    [graph sliceTensor:layer_keys dimension:0 start:0
+                length:static_cast<NSInteger>(seq_len) name:nil];
+  MPSGraphTensor* visible_values =
+    [graph sliceTensor:layer_values dimension:0 start:0
+                length:static_cast<NSInteger>(seq_len) name:nil];
+
+  NSMutableArray<MPSGraphTensor*>* group_outputs =
+    [NSMutableArray arrayWithCapacity:static_cast<NSUInteger>(kv_heads)];
+  MPSGraphTensor* scale_tensor =
+    [graph constantWithScalar:1.0 / std::sqrt(static_cast<double>(head_dim))
+                        shape:@[ @1 ]
+                     dataType:MPSDataTypeFloat32];
+  for (std::size_t kv_head = 0; kv_head < kv_heads; ++kv_head) {
+    const auto query_head_start = kv_head * kv_group;
+    MPSGraphTensor* query_group =
+      [graph sliceTensor:query_tensor dimension:0
+                   start:static_cast<NSInteger>(query_head_start)
+                  length:static_cast<NSInteger>(kv_group)
+                    name:nil];
+    MPSGraphTensor* query_group_t =
+      [graph transposeTensor:query_group dimension:0 withDimension:1 name:nil];
+
+    MPSGraphTensor* key_head =
+      [graph sliceTensor:visible_keys dimension:1
+                   start:static_cast<NSInteger>(kv_head) length:1 name:nil];
+    key_head =
+      [graph reshapeTensor:key_head withShape:make_shape({seq_len, head_dim}) name:nil];
+    MPSGraphTensor* scores =
+      [graph matrixMultiplicationWithPrimaryTensor:key_head
+                                   secondaryTensor:query_group_t
+                                              name:nil];
+    scores =
+      [graph multiplicationWithPrimaryTensor:scores secondaryTensor:scale_tensor name:nil];
+    MPSGraphTensor* probabilities = [graph softMaxWithTensor:scores axis:0 name:nil];
+    probabilities =
+      [graph transposeTensor:probabilities dimension:0 withDimension:1 name:nil];
+
+    MPSGraphTensor* value_head =
+      [graph sliceTensor:visible_values dimension:1
+                   start:static_cast<NSInteger>(kv_head) length:1 name:nil];
+    value_head =
+      [graph reshapeTensor:value_head withShape:make_shape({seq_len, head_dim}) name:nil];
+    MPSGraphTensor* group_output =
+      [graph matrixMultiplicationWithPrimaryTensor:probabilities
+                                   secondaryTensor:value_head
+                                              name:nil];
+    [group_outputs addObject:group_output];
+  }
+
+  return kv_heads == 1U
+           ? [group_outputs objectAtIndex:0]
+           : [graph concatTensors:group_outputs dimension:0 name:nil];
+}
+
 Result<MpsGraphBuffer> make_f32_buffer(const MpsGraphContext& context,
                                        const std::vector<float>& values) {
   auto buffer_result = context.make_buffer(values.size() * sizeof(float));
@@ -2015,6 +2092,500 @@ Status MpsGraphContext::swiglu_down_residual_f32(const MpsGraphBuffer& gate,
   }
 }
 
+Status MpsGraphContext::transformer_layer_f32(
+  const MpsGraphBuffer& input_layernorm_weight,
+  const MpsGraphBuffer& q_weight,
+  const MpsGraphBuffer& k_weight,
+  const MpsGraphBuffer& v_weight,
+  const MpsGraphBuffer& o_weight,
+  const MpsGraphBuffer& q_norm_weight,
+  const MpsGraphBuffer& k_norm_weight,
+  const MpsGraphBuffer& post_attention_layernorm_weight,
+  const MpsGraphBuffer& gate_weight,
+  const MpsGraphBuffer& up_weight,
+  const MpsGraphBuffer& down_weight,
+  std::size_t layer,
+  std::size_t layers,
+  std::size_t position,
+  std::size_t capacity_tokens,
+  std::size_t hidden_size,
+  std::size_t intermediate_size,
+  std::size_t heads,
+  std::size_t kv_heads,
+  std::size_t head_dim,
+  float eps,
+  float theta,
+  MpsGraphBuffer& hidden,
+  MpsGraphBuffer& key_cache,
+  MpsGraphBuffer& value_cache) const {
+  if (!valid()) {
+    return Status::unavailable(kNotReady);
+  }
+  auto layers_status = validate_positive_dim(layers, "transformer layer layer count");
+  if (!layers_status.is_ok()) {
+    return layers_status;
+  }
+  auto capacity_status = validate_positive_dim(capacity_tokens, "transformer layer capacity");
+  if (!capacity_status.is_ok()) {
+    return capacity_status;
+  }
+  auto hidden_status = validate_positive_dim(hidden_size, "transformer layer hidden_size");
+  if (!hidden_status.is_ok()) {
+    return hidden_status;
+  }
+  auto intermediate_status =
+    validate_positive_dim(intermediate_size, "transformer layer intermediate_size");
+  if (!intermediate_status.is_ok()) {
+    return intermediate_status;
+  }
+  auto heads_status = validate_positive_dim(heads, "transformer layer heads");
+  if (!heads_status.is_ok()) {
+    return heads_status;
+  }
+  auto kv_heads_status = validate_positive_dim(kv_heads, "transformer layer kv_heads");
+  if (!kv_heads_status.is_ok()) {
+    return kv_heads_status;
+  }
+  auto head_dim_status = validate_positive_dim(head_dim, "transformer layer head_dim");
+  if (!head_dim_status.is_ok()) {
+    return head_dim_status;
+  }
+  if (head_dim % 2U != 0) {
+    return Status::invalid_argument("MPSGraph transformer layer head_dim must be even");
+  }
+  if (heads % kv_heads != 0) {
+    return Status::invalid_argument(
+      "MPSGraph transformer layer heads must be divisible by kv_heads");
+  }
+  if (layer >= layers) {
+    return Status::invalid_argument("MPSGraph transformer layer index exceeds layer count");
+  }
+  if (position >= capacity_tokens) {
+    return Status::invalid_argument(
+      "MPSGraph transformer layer position exceeds KV cache capacity");
+  }
+  if (!std::isfinite(eps)) {
+    return Status::invalid_argument("MPSGraph transformer layer eps must be finite");
+  }
+  if (!std::isfinite(theta) || theta <= 0.0F) {
+    return Status::invalid_argument(
+      "MPSGraph transformer layer theta must be positive and finite");
+  }
+
+  std::size_t attn_dim = 0;
+  if (!checked_mul(heads, head_dim, attn_dim)) {
+    return Status::invalid_argument("MPSGraph transformer layer attention dim overflow");
+  }
+  std::size_t kv_dim = 0;
+  if (!checked_mul(kv_heads, head_dim, kv_dim)) {
+    return Status::invalid_argument("MPSGraph transformer layer KV dim overflow");
+  }
+  std::size_t q_weight_values = 0;
+  if (!checked_mul(attn_dim, hidden_size, q_weight_values)) {
+    return Status::invalid_argument("MPSGraph transformer layer q weight count overflow");
+  }
+  std::size_t kv_weight_values = 0;
+  if (!checked_mul(kv_dim, hidden_size, kv_weight_values)) {
+    return Status::invalid_argument("MPSGraph transformer layer KV weight count overflow");
+  }
+  std::size_t o_weight_values = 0;
+  if (!checked_mul(hidden_size, attn_dim, o_weight_values)) {
+    return Status::invalid_argument("MPSGraph transformer layer o weight count overflow");
+  }
+  std::size_t mlp_weight_values = 0;
+  if (!checked_mul(intermediate_size, hidden_size, mlp_weight_values)) {
+    return Status::invalid_argument("MPSGraph transformer layer MLP weight count overflow");
+  }
+  std::size_t down_weight_values = 0;
+  if (!checked_mul(hidden_size, intermediate_size, down_weight_values)) {
+    return Status::invalid_argument("MPSGraph transformer layer down weight count overflow");
+  }
+  std::size_t cache_token_values = 0;
+  if (!checked_mul(capacity_tokens, kv_dim, cache_token_values)) {
+    return Status::invalid_argument("MPSGraph transformer layer cache token count overflow");
+  }
+  std::size_t cache_values = 0;
+  if (!checked_mul(layers, cache_token_values, cache_values)) {
+    return Status::invalid_argument("MPSGraph transformer layer cache count overflow");
+  }
+
+  auto hidden_buffer_status =
+    validate_f32_buffer(hidden, hidden_size, "transformer layer hidden");
+  if (!hidden_buffer_status.is_ok()) {
+    return hidden_buffer_status;
+  }
+  auto input_norm_status = validate_f32_buffer(
+    input_layernorm_weight, hidden_size, "transformer layer input norm weight");
+  if (!input_norm_status.is_ok()) {
+    return input_norm_status;
+  }
+  auto q_weight_status =
+    validate_f32_buffer(q_weight, q_weight_values, "transformer layer q weight");
+  if (!q_weight_status.is_ok()) {
+    return q_weight_status;
+  }
+  auto k_weight_status =
+    validate_f32_buffer(k_weight, kv_weight_values, "transformer layer k weight");
+  if (!k_weight_status.is_ok()) {
+    return k_weight_status;
+  }
+  auto v_weight_status =
+    validate_f32_buffer(v_weight, kv_weight_values, "transformer layer v weight");
+  if (!v_weight_status.is_ok()) {
+    return v_weight_status;
+  }
+  auto o_weight_status =
+    validate_f32_buffer(o_weight, o_weight_values, "transformer layer o weight");
+  if (!o_weight_status.is_ok()) {
+    return o_weight_status;
+  }
+  auto q_norm_status =
+    validate_f32_buffer(q_norm_weight, head_dim, "transformer layer q norm weight");
+  if (!q_norm_status.is_ok()) {
+    return q_norm_status;
+  }
+  auto k_norm_status =
+    validate_f32_buffer(k_norm_weight, head_dim, "transformer layer k norm weight");
+  if (!k_norm_status.is_ok()) {
+    return k_norm_status;
+  }
+  auto post_norm_status = validate_f32_buffer(
+    post_attention_layernorm_weight, hidden_size,
+    "transformer layer post attention norm weight");
+  if (!post_norm_status.is_ok()) {
+    return post_norm_status;
+  }
+  auto gate_weight_status =
+    validate_f32_buffer(gate_weight, mlp_weight_values, "transformer layer gate weight");
+  if (!gate_weight_status.is_ok()) {
+    return gate_weight_status;
+  }
+  auto up_weight_status =
+    validate_f32_buffer(up_weight, mlp_weight_values, "transformer layer up weight");
+  if (!up_weight_status.is_ok()) {
+    return up_weight_status;
+  }
+  auto down_weight_status =
+    validate_f32_buffer(down_weight, down_weight_values, "transformer layer down weight");
+  if (!down_weight_status.is_ok()) {
+    return down_weight_status;
+  }
+  auto key_cache_status =
+    validate_f32_buffer(key_cache, cache_values, "transformer layer key cache");
+  if (!key_cache_status.is_ok()) {
+    return key_cache_status;
+  }
+  auto value_cache_status =
+    validate_f32_buffer(value_cache, cache_values, "transformer layer value cache");
+  if (!value_cache_status.is_ok()) {
+    return value_cache_status;
+  }
+
+  const auto half_dim = head_dim / 2U;
+  auto trig_bytes = f32_bytes(half_dim, "transformer layer trig constants");
+  if (!trig_bytes.is_ok()) {
+    return trig_bytes.status();
+  }
+  std::vector<float> cos_values(half_dim);
+  std::vector<float> sin_values(half_dim);
+  for (std::size_t dim = 0; dim < half_dim; ++dim) {
+    const auto exponent =
+      static_cast<double>(2U * dim) / static_cast<double>(head_dim);
+    const auto frequency = 1.0 / std::pow(static_cast<double>(theta), exponent);
+    const auto angle = static_cast<double>(position) * frequency;
+    cos_values[dim] = static_cast<float>(std::cos(angle));
+    sin_values[dim] = static_cast<float>(std::sin(angle));
+  }
+
+  @autoreleasepool {
+    MPSGraph* graph = make_graph(&impl_->graph_stats);
+    if (graph == nil) {
+      return Status::unavailable("failed to create MPSGraph");
+    }
+
+    MPSShape* hidden_shape = make_shape({hidden_size});
+    MPSShape* hidden_column_shape = make_shape({hidden_size, 1});
+    MPSShape* intermediate_shape = make_shape({intermediate_size});
+    MPSShape* intermediate_column_shape = make_shape({intermediate_size, 1});
+    MPSShape* q_weight_shape = make_shape({attn_dim, hidden_size});
+    MPSShape* kv_weight_shape = make_shape({kv_dim, hidden_size});
+    MPSShape* o_weight_shape = make_shape({hidden_size, attn_dim});
+    MPSShape* mlp_weight_shape = make_shape({intermediate_size, hidden_size});
+    MPSShape* down_weight_shape = make_shape({hidden_size, intermediate_size});
+    MPSShape* q_shape = make_shape({heads, head_dim});
+    MPSShape* k_shape = make_shape({kv_heads, head_dim});
+    MPSShape* kv_update_shape = make_shape({1, 1, kv_heads, head_dim});
+    MPSShape* cache_shape = make_shape({layers, capacity_tokens, kv_heads, head_dim});
+    MPSShape* q_norm_shape = make_shape({head_dim});
+
+    MPSGraphTensor* hidden_tensor =
+      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* input_norm_tensor =
+      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* q_weight_tensor =
+      [graph placeholderWithShape:q_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* k_weight_tensor =
+      [graph placeholderWithShape:kv_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* v_weight_tensor =
+      [graph placeholderWithShape:kv_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* o_weight_tensor =
+      [graph placeholderWithShape:o_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* q_norm_tensor =
+      [graph placeholderWithShape:q_norm_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* k_norm_tensor =
+      [graph placeholderWithShape:q_norm_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* post_norm_tensor =
+      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* gate_weight_tensor =
+      [graph placeholderWithShape:mlp_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* up_weight_tensor =
+      [graph placeholderWithShape:mlp_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* down_weight_tensor =
+      [graph placeholderWithShape:down_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* key_cache_tensor =
+      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* value_cache_tensor =
+      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+
+    MPSGraphTensor* normed =
+      build_rms_norm(graph, hidden_tensor, input_norm_tensor, hidden_size, eps);
+    MPSGraphTensor* normed_column =
+      [graph reshapeTensor:normed withShape:hidden_column_shape name:nil];
+    MPSGraphTensor* q_projected =
+      [graph matrixMultiplicationWithPrimaryTensor:q_weight_tensor
+                                   secondaryTensor:normed_column
+                                              name:nil];
+    MPSGraphTensor* k_projected =
+      [graph matrixMultiplicationWithPrimaryTensor:k_weight_tensor
+                                   secondaryTensor:normed_column
+                                              name:nil];
+    MPSGraphTensor* v_projected =
+      [graph matrixMultiplicationWithPrimaryTensor:v_weight_tensor
+                                   secondaryTensor:normed_column
+                                              name:nil];
+    MPSGraphTensor* q_matrix =
+      [graph reshapeTensor:q_projected withShape:q_shape name:nil];
+    MPSGraphTensor* k_matrix =
+      [graph reshapeTensor:k_projected withShape:k_shape name:nil];
+    MPSGraphTensor* v_matrix =
+      [graph reshapeTensor:v_projected withShape:k_shape name:nil];
+    MPSGraphTensor* q_normed =
+      build_qk_norm(graph, q_matrix, q_norm_tensor, heads, head_dim, eps);
+    MPSGraphTensor* k_normed =
+      build_qk_norm(graph, k_matrix, k_norm_tensor, kv_heads, head_dim, eps);
+    MPSGraphTensor* q_rope =
+      build_rope(graph, q_normed, heads, head_dim, cos_values, sin_values,
+                 trig_bytes.value());
+    MPSGraphTensor* k_rope =
+      build_rope(graph, k_normed, kv_heads, head_dim, cos_values, sin_values,
+                 trig_bytes.value());
+
+    MPSGraphTensor* key_update =
+      [graph reshapeTensor:k_rope withShape:kv_update_shape name:nil];
+    MPSGraphTensor* value_update =
+      [graph reshapeTensor:v_matrix withShape:kv_update_shape name:nil];
+    NSArray<NSNumber*>* cache_starts = @[
+      @(static_cast<NSInteger>(layer)),
+      @(static_cast<NSInteger>(position)),
+      @0,
+      @0,
+    ];
+    NSArray<NSNumber*>* cache_ends = @[
+      @(static_cast<NSInteger>(layer + 1U)),
+      @(static_cast<NSInteger>(position + 1U)),
+      @(static_cast<NSInteger>(kv_heads)),
+      @(static_cast<NSInteger>(head_dim)),
+    ];
+    NSArray<NSNumber*>* cache_strides = @[ @1, @1, @1, @1 ];
+    MPSGraphTensor* key_cache_result =
+      [graph sliceUpdateDataTensor:key_cache_tensor
+                       updateTensor:key_update
+                             starts:cache_starts
+                               ends:cache_ends
+                            strides:cache_strides
+                          startMask:0
+                            endMask:0
+                        squeezeMask:0
+                               name:nil];
+    MPSGraphTensor* value_cache_result =
+      [graph sliceUpdateDataTensor:value_cache_tensor
+                       updateTensor:value_update
+                             starts:cache_starts
+                               ends:cache_ends
+                            strides:cache_strides
+                          startMask:0
+                            endMask:0
+                        squeezeMask:0
+                               name:nil];
+
+    MPSGraphTensor* attention =
+      build_grouped_attention_from_cache(graph, q_rope, key_cache_result,
+                                         value_cache_result, layer, position,
+                                         capacity_tokens, heads, kv_heads, head_dim);
+    MPSGraphTensor* attention_vector =
+      [graph reshapeTensor:attention withShape:make_shape({attn_dim}) name:nil];
+    MPSGraphTensor* attention_column =
+      [graph reshapeTensor:attention_vector withShape:make_shape({attn_dim, 1}) name:nil];
+    MPSGraphTensor* projected =
+      [graph matrixMultiplicationWithPrimaryTensor:o_weight_tensor
+                                   secondaryTensor:attention_column
+                                              name:nil];
+    MPSGraphTensor* projected_vector =
+      [graph reshapeTensor:projected withShape:hidden_shape name:nil];
+    MPSGraphTensor* attention_residual =
+      [graph additionWithPrimaryTensor:hidden_tensor
+                        secondaryTensor:projected_vector
+                                   name:nil];
+    MPSGraphTensor* post_norm =
+      build_rms_norm(graph, attention_residual, post_norm_tensor, hidden_size, eps);
+    MPSGraphTensor* post_norm_column =
+      [graph reshapeTensor:post_norm withShape:hidden_column_shape name:nil];
+
+    MPSGraphTensor* gate_product =
+      [graph matrixMultiplicationWithPrimaryTensor:gate_weight_tensor
+                                   secondaryTensor:post_norm_column
+                                              name:nil];
+    MPSGraphTensor* up_product =
+      [graph matrixMultiplicationWithPrimaryTensor:up_weight_tensor
+                                   secondaryTensor:post_norm_column
+                                              name:nil];
+    MPSGraphTensor* gate_vector =
+      [graph reshapeTensor:gate_product withShape:intermediate_shape name:nil];
+    MPSGraphTensor* up_vector =
+      [graph reshapeTensor:up_product withShape:intermediate_shape name:nil];
+    MPSGraphTensor* sigmoid = [graph sigmoidWithTensor:gate_vector name:nil];
+    MPSGraphTensor* silu =
+      [graph multiplicationWithPrimaryTensor:gate_vector secondaryTensor:sigmoid name:nil];
+    MPSGraphTensor* gated =
+      [graph multiplicationWithPrimaryTensor:silu secondaryTensor:up_vector name:nil];
+    MPSGraphTensor* gated_column =
+      [graph reshapeTensor:gated withShape:intermediate_column_shape name:nil];
+    MPSGraphTensor* down_projected =
+      [graph matrixMultiplicationWithPrimaryTensor:down_weight_tensor
+                                   secondaryTensor:gated_column
+                                              name:nil];
+    MPSGraphTensor* down_vector =
+      [graph reshapeTensor:down_projected withShape:hidden_shape name:nil];
+    MPSGraphTensor* hidden_result =
+      [graph additionWithPrimaryTensor:attention_residual
+                        secondaryTensor:down_vector
+                                   name:nil];
+
+    MPSGraphTensorData* hidden_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:hidden.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* input_norm_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:input_layernorm_weight.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* q_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:q_weight.impl_->buffer
+                                             shape:q_weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* k_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:k_weight.impl_->buffer
+                                             shape:kv_weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* v_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:v_weight.impl_->buffer
+                                             shape:kv_weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* o_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:o_weight.impl_->buffer
+                                             shape:o_weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* q_norm_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:q_norm_weight.impl_->buffer
+                                             shape:q_norm_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* k_norm_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:k_norm_weight.impl_->buffer
+                                             shape:q_norm_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* post_norm_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:post_attention_layernorm_weight.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* gate_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:gate_weight.impl_->buffer
+                                             shape:mlp_weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* up_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:up_weight.impl_->buffer
+                                             shape:mlp_weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* down_weight_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:down_weight.impl_->buffer
+                                             shape:down_weight_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* key_cache_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:key_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* value_cache_input_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:value_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* hidden_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:hidden.impl_->buffer
+                                             shape:hidden_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* key_cache_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:key_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* value_cache_output_data =
+      [[MPSGraphTensorData alloc] initWithMTLBuffer:value_cache.impl_->buffer
+                                             shape:cache_shape
+                                          dataType:MPSDataTypeFloat32];
+
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
+      hidden_tensor : hidden_data,
+      input_norm_tensor : input_norm_data,
+      q_weight_tensor : q_weight_data,
+      k_weight_tensor : k_weight_data,
+      v_weight_tensor : v_weight_data,
+      o_weight_tensor : o_weight_data,
+      q_norm_tensor : q_norm_data,
+      k_norm_tensor : k_norm_data,
+      post_norm_tensor : post_norm_data,
+      gate_weight_tensor : gate_weight_data,
+      up_weight_tensor : up_weight_data,
+      down_weight_tensor : down_weight_data,
+      key_cache_tensor : key_cache_input_data,
+      value_cache_tensor : value_cache_input_data,
+    };
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = @{
+      hidden_result : hidden_output_data,
+      key_cache_result : key_cache_output_data,
+      value_cache_result : value_cache_output_data,
+    };
+    const auto status =
+      run_graph_with_results(graph, impl_->queue, feeds, results, &impl_->graph_stats);
+
+    [hidden_data release];
+    [input_norm_data release];
+    [q_weight_data release];
+    [k_weight_data release];
+    [v_weight_data release];
+    [o_weight_data release];
+    [q_norm_data release];
+    [k_norm_data release];
+    [post_norm_data release];
+    [gate_weight_data release];
+    [up_weight_data release];
+    [down_weight_data release];
+    [key_cache_input_data release];
+    [value_cache_input_data release];
+    [hidden_output_data release];
+    [key_cache_output_data release];
+    [value_cache_output_data release];
+    [graph release];
+    return status;
+  }
+}
+
 Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
                                 const MpsGraphBuffer& rhs,
                                 std::size_t size,
@@ -2883,71 +3454,10 @@ Status MpsGraphContext::attention_f32(const MpsGraphBuffer& query,
     MPSGraphTensor* value_tensor =
       [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
 
-    MPSGraphTensor* layer_keys =
-      [graph sliceTensor:key_tensor dimension:0
-                   start:static_cast<NSInteger>(layer) length:1 name:nil];
-    MPSGraphTensor* layer_values =
-      [graph sliceTensor:value_tensor dimension:0
-                   start:static_cast<NSInteger>(layer) length:1 name:nil];
-    layer_keys =
-      [graph reshapeTensor:layer_keys withShape:make_shape({capacity_tokens, kv_heads, head_dim})
-                      name:nil];
-    layer_values =
-      [graph reshapeTensor:layer_values withShape:make_shape({capacity_tokens, kv_heads, head_dim})
-                      name:nil];
-    MPSGraphTensor* visible_keys =
-      [graph sliceTensor:layer_keys dimension:0 start:0
-                  length:static_cast<NSInteger>(seq_len) name:nil];
-    MPSGraphTensor* visible_values =
-      [graph sliceTensor:layer_values dimension:0 start:0
-                  length:static_cast<NSInteger>(seq_len) name:nil];
-
-    NSMutableArray<MPSGraphTensor*>* group_outputs =
-      [NSMutableArray arrayWithCapacity:static_cast<NSUInteger>(kv_heads)];
-    MPSGraphTensor* scale_tensor =
-      [graph constantWithScalar:1.0 / std::sqrt(static_cast<double>(head_dim))
-                          shape:@[ @1 ]
-                       dataType:MPSDataTypeFloat32];
-    for (std::size_t kv_head = 0; kv_head < kv_heads; ++kv_head) {
-      const auto query_head_start = kv_head * kv_group;
-      MPSGraphTensor* query_group =
-        [graph sliceTensor:query_tensor dimension:0
-                     start:static_cast<NSInteger>(query_head_start)
-                    length:static_cast<NSInteger>(kv_group)
-                      name:nil];
-      MPSGraphTensor* query_group_t =
-        [graph transposeTensor:query_group dimension:0 withDimension:1 name:nil];
-
-      MPSGraphTensor* key_head =
-        [graph sliceTensor:visible_keys dimension:1
-                     start:static_cast<NSInteger>(kv_head) length:1 name:nil];
-      key_head =
-        [graph reshapeTensor:key_head withShape:make_shape({seq_len, head_dim}) name:nil];
-      MPSGraphTensor* scores =
-        [graph matrixMultiplicationWithPrimaryTensor:key_head
-                                     secondaryTensor:query_group_t
-                                                name:nil];
-      scores =
-        [graph multiplicationWithPrimaryTensor:scores secondaryTensor:scale_tensor name:nil];
-      MPSGraphTensor* probabilities = [graph softMaxWithTensor:scores axis:0 name:nil];
-      probabilities =
-        [graph transposeTensor:probabilities dimension:0 withDimension:1 name:nil];
-
-      MPSGraphTensor* value_head =
-        [graph sliceTensor:visible_values dimension:1
-                     start:static_cast<NSInteger>(kv_head) length:1 name:nil];
-      value_head =
-        [graph reshapeTensor:value_head withShape:make_shape({seq_len, head_dim}) name:nil];
-      MPSGraphTensor* group_output =
-        [graph matrixMultiplicationWithPrimaryTensor:probabilities
-                                     secondaryTensor:value_head
-                                                name:nil];
-      [group_outputs addObject:group_output];
-    }
-
-    MPSGraphTensor* result = kv_heads == 1U
-                               ? [group_outputs objectAtIndex:0]
-                               : [graph concatTensors:group_outputs dimension:0 name:nil];
+    MPSGraphTensor* result =
+      build_grouped_attention_from_cache(graph, query_tensor, key_tensor, value_tensor,
+                                         layer, position, capacity_tokens, heads,
+                                         kv_heads, head_dim);
 
     MPSGraphTensorData* query_data =
       [[MPSGraphTensorData alloc] initWithMTLBuffer:query.impl_->buffer

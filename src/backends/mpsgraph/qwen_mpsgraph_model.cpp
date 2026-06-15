@@ -88,6 +88,13 @@ ScopedProfileSpan profile_layer_span(RequestProfiler* profiler, std::size_t laye
            : profiler->scoped("mpsgraph.layer", {ProfileField{"layer", std::to_string(layer)}});
 }
 
+ScopedProfileSpan profile_layer_op_span(RequestProfiler* profiler, std::string_view name,
+                                        std::size_t layer) {
+  return profiler == nullptr
+           ? ScopedProfileSpan{}
+           : profiler->scoped(name, {ProfileField{"layer", std::to_string(layer)}});
+}
+
 }  // namespace
 
 Result<QwenMpsGraphModel> QwenMpsGraphModel::load_metadata(
@@ -612,69 +619,20 @@ Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
   const auto intermediate = static_cast<std::size_t>(bundle_.model.intermediate_size);
   const auto eps = static_cast<float>(bundle_.model.rms_norm_eps);
   const auto theta = static_cast<float>(bundle_.model.rope_theta);
-  std::size_t attn_dim = 0;
-  if (!checked_mul_size(heads, head_dim, attn_dim)) {
-    return Status::invalid_argument("MPSGraph Qwen attention dimension overflow");
-  }
-  std::size_t kv_dim = 0;
-  if (!checked_mul_size(kv_heads, head_dim, kv_dim)) {
-    return Status::invalid_argument("MPSGraph Qwen KV dimension overflow");
-  }
 
-  auto run = [&](std::string_view name, auto&& fn) -> Status {
-    auto span = profile_span(profiler, name);
-    auto status = fn();
-    (void)span;
-    return status;
-  };
-
-  auto status = run("mpsgraph.layer.input_qkv_qk_rope", [&] {
-    return context.input_norm_qkv_qk_rope_f32(
-      state.hidden, layer.input_layernorm.buffer, layer.q_proj.buffer,
-      layer.k_proj.buffer, layer.v_proj.buffer, layer.q_norm.buffer,
-      layer.k_norm.buffer, hidden_size, heads, kv_heads, head_dim, position,
-      eps, theta, state.normed, state.q_scratch, state.k_scratch, state.v);
-  });
-  if (!status.is_ok()) {
-    return status;
+  auto span = profile_layer_op_span(profiler, "mpsgraph.layer.full", layer_index);
+  auto status = context.transformer_layer_f32(
+    layer.input_layernorm.buffer, layer.q_proj.buffer, layer.k_proj.buffer,
+    layer.v_proj.buffer, layer.o_proj.buffer, layer.q_norm.buffer,
+    layer.k_norm.buffer, layer.post_attention_layernorm.buffer,
+    layer.gate_proj.buffer, layer.up_proj.buffer, layer.down_proj.buffer,
+    layer_index, layers_.size(), position, state.capacity_tokens, hidden_size,
+    intermediate, heads, kv_heads, head_dim, eps, theta, state.hidden,
+    state.kv_cache.key_buffer(), state.kv_cache.value_buffer());
+  if (status.is_ok()) {
+    status = state.kv_cache.mark_position_used(position);
   }
-  status = run("mpsgraph.layer.kv_store", [&] {
-    return state.kv_cache.store(context, layer_index, position, state.k_scratch, state.v);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.attention", [&] {
-    return context.attention_f32(
-      state.q_scratch, state.kv_cache.key_buffer(), state.kv_cache.value_buffer(),
-      layer_index, position, state.capacity_tokens, heads, kv_heads, head_dim,
-      state.attn_out);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.attn_project_residual_norm", [&] {
-    return context.attn_project_residual_norm_f32(
-      layer.o_proj.buffer, state.attn_out, state.hidden,
-      layer.post_attention_layernorm.buffer, hidden_size, attn_dim, eps,
-      state.normed, state.hidden);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.gate_up_proj", [&] {
-    return context.gate_up_matvec_f32(layer.gate_proj.buffer, layer.up_proj.buffer,
-                                      intermediate, hidden_size, state.hidden,
-                                      state.gate, state.up);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.swiglu_down_residual", [&] {
-    return context.swiglu_down_residual_f32(state.gate, state.up,
-                                            layer.down_proj.buffer, state.normed,
-                                            hidden_size, intermediate, state.hidden);
-  });
+  (void)span;
   (void)layer_span;
   return status;
 }
