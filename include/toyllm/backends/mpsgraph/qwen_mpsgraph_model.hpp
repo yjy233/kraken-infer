@@ -131,6 +131,10 @@ class QwenMpsGraphModel {
                                    std::size_t layer_index, std::size_t position,
                                    QwenMpsGraphRunState& state,
                                    RequestProfiler* profiler) const;
+  [[nodiscard]] Status apply_stack(const MpsGraphContext& context,
+                                   std::size_t position,
+                                   QwenMpsGraphRunState& state,
+                                   RequestProfiler* profiler) const;
   [[nodiscard]] Status compute_logits(const MpsGraphContext& context,
                                       QwenMpsGraphRunState& state,
                                       RequestProfiler* profiler) const;

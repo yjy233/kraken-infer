@@ -351,24 +351,7 @@ Status QwenMpsGraphModel::forward_token(const MpsGraphContext& context, std::int
     }
     (void)span;
   }
-  for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
-    status = apply_layer(context, layers_[layer_index], layer_index, position, state,
-                         profiler);
-    if (!status.is_ok()) {
-      return status;
-    }
-  }
-  {
-    auto span = profile_span(profiler, "mpsgraph.forward.final_norm");
-    status = context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size,
-                                  static_cast<float>(bundle_.model.rms_norm_eps),
-                                  state.normed);
-    if (!status.is_ok()) {
-      return status;
-    }
-    (void)span;
-  }
-  return Status::ok();
+  return apply_stack(context, position, state, profiler);
 }
 
 Status QwenMpsGraphModel::forward_next_token(const MpsGraphContext& context,
@@ -397,19 +380,7 @@ Status QwenMpsGraphModel::forward_next_token(const MpsGraphContext& context,
     }
     (void)span;
   }
-  for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
-    status = apply_layer(context, layers_[layer_index], layer_index, position, state,
-                         profiler);
-    if (!status.is_ok()) {
-      return status;
-    }
-  }
-  auto span = profile_span(profiler, "mpsgraph.forward.final_norm");
-  status = context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size,
-                                static_cast<float>(bundle_.model.rms_norm_eps),
-                                state.normed);
-  (void)span;
-  return status;
+  return apply_stack(context, position, state, profiler);
 }
 
 Status QwenMpsGraphModel::greedy_next_token(const MpsGraphContext& context,
@@ -634,6 +605,29 @@ Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
   }
   (void)span;
   (void)layer_span;
+  return status;
+}
+
+Status QwenMpsGraphModel::apply_stack(const MpsGraphContext& context,
+                                      std::size_t position,
+                                      QwenMpsGraphRunState& state,
+                                      RequestProfiler* profiler) const {
+  const auto hidden_size = static_cast<std::size_t>(bundle_.model.hidden_size);
+  const auto eps = static_cast<float>(bundle_.model.rms_norm_eps);
+
+  Status status;
+  for (std::size_t layer_index = 0; layer_index < layers_.size(); ++layer_index) {
+    status = apply_layer(context, layers_[layer_index], layer_index, position, state,
+                         profiler);
+    if (!status.is_ok()) {
+      return status;
+    }
+  }
+
+  auto final_norm_span = profile_span(profiler, "mpsgraph.forward.final_norm");
+  status = context.rms_norm_f32(state.hidden, final_norm_.buffer, hidden_size, eps,
+                                state.normed);
+  (void)final_norm_span;
   return status;
 }
 

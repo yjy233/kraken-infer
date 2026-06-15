@@ -352,6 +352,40 @@ Status MpsGraphContext::transformer_layer_f32(
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::transformer_stack_f32(
+  const std::vector<MpsGraphTransformerLayerBuffers>& layers,
+  std::size_t layer_offset,
+  std::size_t total_layers,
+  std::size_t position,
+  std::size_t capacity_tokens,
+  std::size_t hidden_size,
+  std::size_t intermediate_size,
+  std::size_t heads,
+  std::size_t kv_heads,
+  std::size_t head_dim,
+  float eps,
+  float theta,
+  MpsGraphBuffer& hidden,
+  MpsGraphBuffer& key_cache,
+  MpsGraphBuffer& value_cache) const {
+  (void)layers;
+  (void)layer_offset;
+  (void)total_layers;
+  (void)position;
+  (void)capacity_tokens;
+  (void)hidden_size;
+  (void)intermediate_size;
+  (void)heads;
+  (void)kv_heads;
+  (void)head_dim;
+  (void)eps;
+  (void)theta;
+  (void)hidden;
+  (void)key_cache;
+  (void)value_cache;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::add_f32(const MpsGraphBuffer& lhs,
                                 const MpsGraphBuffer& rhs,
                                 std::size_t size,

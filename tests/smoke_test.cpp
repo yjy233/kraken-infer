@@ -534,6 +534,35 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   output = read_mpsgraph_f32_buffer(context, layer_value_cache, 2);
   assert_close(output[0], layer_norm);
   assert_close(output[1], 0.0F);
+
+  auto stack_hidden = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F});
+  auto stack_key_cache = make_mpsgraph_f32_buffer(context, {0.0F, 0.0F});
+  auto stack_value_cache = make_mpsgraph_f32_buffer(context, {0.0F, 0.0F});
+  const std::vector<toyllm::mpsgraph::MpsGraphTransformerLayerBuffers> stack_layers{
+    {
+      &layer_norm_weight,
+      &layer_q_weight,
+      &layer_k_weight,
+      &layer_v_weight,
+      &layer_o_weight,
+      &layer_q_norm_weight,
+      &layer_k_norm_weight,
+      &layer_norm_weight,
+      &layer_gate_weight,
+      &layer_up_weight,
+      &layer_down_weight,
+    },
+  };
+  assert(context.transformer_stack_f32(
+           stack_layers, 0, 1, 0, 1, 2, 2, 1, 1, 2, 0.0F, 10000.0F,
+           stack_hidden, stack_key_cache, stack_value_cache)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, stack_hidden, 2);
+  assert_close(output[0], 1.0F + layer_norm);
+  assert_close(output[1], 0.0F);
+  output = read_mpsgraph_f32_buffer(context, stack_key_cache, 2);
+  assert_close(output[0], layer_norm);
+  assert_close(output[1], 0.0F);
 }
 
 void test_mps_matvec_workspace_reuse() {

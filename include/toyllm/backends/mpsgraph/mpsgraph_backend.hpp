@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace toyllm::mpsgraph {
 
@@ -60,6 +61,20 @@ class MpsGraphBuffer {
   explicit MpsGraphBuffer(std::unique_ptr<Impl> impl);
 
   std::unique_ptr<Impl> impl_;
+};
+
+struct MpsGraphTransformerLayerBuffers {
+  const MpsGraphBuffer* input_layernorm_weight{nullptr};
+  const MpsGraphBuffer* q_weight{nullptr};
+  const MpsGraphBuffer* k_weight{nullptr};
+  const MpsGraphBuffer* v_weight{nullptr};
+  const MpsGraphBuffer* o_weight{nullptr};
+  const MpsGraphBuffer* q_norm_weight{nullptr};
+  const MpsGraphBuffer* k_norm_weight{nullptr};
+  const MpsGraphBuffer* post_attention_layernorm_weight{nullptr};
+  const MpsGraphBuffer* gate_weight{nullptr};
+  const MpsGraphBuffer* up_weight{nullptr};
+  const MpsGraphBuffer* down_weight{nullptr};
 };
 
 class MpsGraphContext {
@@ -195,6 +210,22 @@ class MpsGraphContext {
     const MpsGraphBuffer& down_weight,
     std::size_t layer,
     std::size_t layers,
+    std::size_t position,
+    std::size_t capacity_tokens,
+    std::size_t hidden_size,
+    std::size_t intermediate_size,
+    std::size_t heads,
+    std::size_t kv_heads,
+    std::size_t head_dim,
+    float eps,
+    float theta,
+    MpsGraphBuffer& hidden,
+    MpsGraphBuffer& key_cache,
+    MpsGraphBuffer& value_cache) const;
+  [[nodiscard]] Status transformer_stack_f32(
+    const std::vector<MpsGraphTransformerLayerBuffers>& layers,
+    std::size_t layer_offset,
+    std::size_t total_layers,
     std::size_t position,
     std::size_t capacity_tokens,
     std::size_t hidden_size,
