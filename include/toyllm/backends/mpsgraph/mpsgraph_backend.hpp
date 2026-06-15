@@ -124,6 +124,12 @@ class MpsGraphContext {
                                       MpsGraphBuffer& q_output,
                                       MpsGraphBuffer& k_output,
                                       MpsGraphBuffer& v_output) const;
+  [[nodiscard]] Status gate_up_matvec_f32(const MpsGraphBuffer& gate_weight,
+                                          const MpsGraphBuffer& up_weight,
+                                          std::size_t rows, std::size_t cols,
+                                          const MpsGraphBuffer& input,
+                                          MpsGraphBuffer& gate_output,
+                                          MpsGraphBuffer& up_output) const;
   [[nodiscard]] Status silu_mul_f32(const MpsGraphBuffer& gate,
                                     const MpsGraphBuffer& up,
                                     std::size_t size,
