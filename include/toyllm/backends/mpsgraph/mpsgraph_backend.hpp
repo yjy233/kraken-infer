@@ -115,6 +115,15 @@ class MpsGraphContext {
                                   std::size_t rows, std::size_t cols,
                                   const MpsGraphBuffer& input,
                                   MpsGraphBuffer& output) const;
+  [[nodiscard]] Status qkv_matvec_f32(const MpsGraphBuffer& q_weight,
+                                      const MpsGraphBuffer& k_weight,
+                                      const MpsGraphBuffer& v_weight,
+                                      std::size_t q_rows, std::size_t kv_rows,
+                                      std::size_t cols,
+                                      const MpsGraphBuffer& input,
+                                      MpsGraphBuffer& q_output,
+                                      MpsGraphBuffer& k_output,
+                                      MpsGraphBuffer& v_output) const;
   [[nodiscard]] Status silu_mul_f32(const MpsGraphBuffer& gate,
                                     const MpsGraphBuffer& up,
                                     std::size_t size,

@@ -277,6 +277,19 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   assert(std::abs(output[0] - (weight0 * 5.0F + weight1 * 7.0F)) < 1e-4F);
   assert(std::abs(output[1] - (weight0 * 6.0F + weight1 * 8.0F)) < 1e-4F);
 
+  auto gqa_query = make_mpsgraph_f32_buffer(context, {1.0F, 0.0F, 0.0F, 1.0F});
+  auto gqa_output_result = context.make_buffer(4U * sizeof(float));
+  assert(gqa_output_result.is_ok());
+  auto gqa_output = std::move(gqa_output_result.value());
+  assert(context.attention_f32(gqa_query, key_cache, value_cache, 0, 1, 2, 2, 1, 2,
+                               gqa_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, gqa_output, 4);
+  assert(std::abs(output[0] - (weight0 * 5.0F + weight1 * 7.0F)) < 1e-4F);
+  assert(std::abs(output[1] - (weight0 * 6.0F + weight1 * 8.0F)) < 1e-4F);
+  assert(std::abs(output[2] - (weight1 * 5.0F + weight0 * 7.0F)) < 1e-4F);
+  assert(std::abs(output[3] - (weight1 * 6.0F + weight0 * 8.0F)) < 1e-4F);
+
   auto argmax_input = make_mpsgraph_f32_buffer(context, {-1.0F, 2.0F, 5.0F, 3.0F});
   auto argmax_output_result = context.make_buffer(sizeof(std::int32_t));
   assert(argmax_output_result.is_ok());
@@ -316,6 +329,30 @@ void test_mpsgraph_qk_norm_rope_and_attention_ops() {
   assert(generated_values[0] == 0);
   assert(generated_values[1] == 1);
   assert(generated_values[2] == 0);
+
+  auto q_weight = make_mpsgraph_f32_buffer(context, {1.0F, 2.0F, 3.0F, 4.0F});
+  auto k_weight = make_mpsgraph_f32_buffer(context, {5.0F, 6.0F});
+  auto v_weight = make_mpsgraph_f32_buffer(context, {7.0F, 8.0F});
+  auto qkv_input = make_mpsgraph_f32_buffer(context, {2.0F, 3.0F});
+  auto q_output_result = context.make_buffer(2U * sizeof(float));
+  auto k_output_result = context.make_buffer(sizeof(float));
+  auto v_output_result = context.make_buffer(sizeof(float));
+  assert(q_output_result.is_ok());
+  assert(k_output_result.is_ok());
+  assert(v_output_result.is_ok());
+  auto q_output = std::move(q_output_result.value());
+  auto k_output = std::move(k_output_result.value());
+  auto v_output = std::move(v_output_result.value());
+  assert(context.qkv_matvec_f32(q_weight, k_weight, v_weight, 2, 1, 2, qkv_input,
+                                q_output, k_output, v_output)
+           .is_ok());
+  output = read_mpsgraph_f32_buffer(context, q_output, 2);
+  assert_close(output[0], 8.0F);
+  assert_close(output[1], 18.0F);
+  output = read_mpsgraph_f32_buffer(context, k_output, 1);
+  assert_close(output[0], 28.0F);
+  output = read_mpsgraph_f32_buffer(context, v_output, 1);
+  assert_close(output[0], 38.0F);
 }
 
 void test_mps_matvec_workspace_reuse() {
@@ -1142,6 +1179,7 @@ void test_mpsgraph_generation_initializes_without_fallback() {
   assert(summary_json.find("mpsgraph.decode.argmax") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.update_generation_status") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.attention") != std::string::npos);
+  assert(summary_json.find("mpsgraph.layer.qkv_proj") != std::string::npos);
   assert(summary_json.find("mpsgraph.layer.gate_proj") != std::string::npos);
   assert(summary_json.find("mpsgraph.logits.lm_head") != std::string::npos);
   assert(summary_json.find("mpsgraph.decode.read_generation_status") != std::string::npos);

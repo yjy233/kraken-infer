@@ -635,23 +635,11 @@ Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
   if (!status.is_ok()) {
     return status;
   }
-  status = run("mpsgraph.layer.q_proj", [&] {
-    return context.matvec_f32(layer.q_proj.buffer, attn_dim, hidden_size, state.normed,
-                              state.q);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.k_proj", [&] {
-    return context.matvec_f32(layer.k_proj.buffer, kv_dim, hidden_size, state.normed,
-                              state.k);
-  });
-  if (!status.is_ok()) {
-    return status;
-  }
-  status = run("mpsgraph.layer.v_proj", [&] {
-    return context.matvec_f32(layer.v_proj.buffer, kv_dim, hidden_size, state.normed,
-                              state.v);
+  status = run("mpsgraph.layer.qkv_proj", [&] {
+    return context.qkv_matvec_f32(layer.q_proj.buffer, layer.k_proj.buffer,
+                                  layer.v_proj.buffer, attn_dim, kv_dim,
+                                  hidden_size, state.normed, state.q, state.k,
+                                  state.v);
   });
   if (!status.is_ok()) {
     return status;

@@ -136,9 +136,12 @@
 ### Cached Matvec And Attention Ops
 
 - [ ] `matvec_f32` 支持 fixed shape cache
+- [x] q/k/v projection 合并为一次 MPSGraph run
 - [ ] q/k/v/o projection 复用 matvec executable
 - [ ] gate/up/down projection 复用 matvec executable
 - [ ] lm_head matvec 使用专用 cache key
+- [x] `attention_f32` 按 KV head 分组计算 GQA，减少 per-query-head 子图重复
+- [x] `attention_f32` 在 macOS 15+ 优先使用 MPSGraph SDPA fast path，失败后自动回退
 - [ ] `attention_f32` 支持 fixed capacity bucket cache
 - [ ] attention causal mask 支持 fixed shape
 - [ ] attention cache key 包含 layer/capacity/head layout

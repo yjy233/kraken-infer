@@ -159,6 +159,28 @@ Status MpsGraphContext::matvec_f32(const MpsGraphBuffer& weight,
   return Status::unavailable(kUnavailable);
 }
 
+Status MpsGraphContext::qkv_matvec_f32(const MpsGraphBuffer& q_weight,
+                                       const MpsGraphBuffer& k_weight,
+                                       const MpsGraphBuffer& v_weight,
+                                       std::size_t q_rows, std::size_t kv_rows,
+                                       std::size_t cols,
+                                       const MpsGraphBuffer& input,
+                                       MpsGraphBuffer& q_output,
+                                       MpsGraphBuffer& k_output,
+                                       MpsGraphBuffer& v_output) const {
+  (void)q_weight;
+  (void)k_weight;
+  (void)v_weight;
+  (void)q_rows;
+  (void)kv_rows;
+  (void)cols;
+  (void)input;
+  (void)q_output;
+  (void)k_output;
+  (void)v_output;
+  return Status::unavailable(kUnavailable);
+}
+
 Status MpsGraphContext::silu_mul_f32(const MpsGraphBuffer& gate,
                                      const MpsGraphBuffer& up,
                                      std::size_t size,
