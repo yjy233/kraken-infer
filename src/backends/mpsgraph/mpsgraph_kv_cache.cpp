@@ -59,18 +59,34 @@ Status MpsGraphKvCache::reset(const MpsGraphContext& context,
   if (!bytes.is_ok()) {
     return bytes.status();
   }
-
-  auto key = context.make_buffer(bytes.value());
-  if (!key.is_ok()) {
-    return key.status();
+  auto layer_values = cache_values(1, capacity_tokens, kv_heads, head_dim);
+  if (!layer_values.is_ok()) {
+    return layer_values.status();
   }
-  auto value = context.make_buffer(bytes.value());
-  if (!value.is_ok()) {
-    return value.status();
+  auto layer_bytes = f32_bytes(layer_values.value());
+  if (!layer_bytes.is_ok()) {
+    return layer_bytes.status();
   }
 
-  key_cache_ = std::move(key.value());
-  value_cache_ = std::move(value.value());
+  std::vector<MpsGraphBuffer> key_layers;
+  std::vector<MpsGraphBuffer> value_layers;
+  key_layers.reserve(layers);
+  value_layers.reserve(layers);
+  for (std::size_t layer = 0; layer < layers; ++layer) {
+    auto key = context.make_buffer(layer_bytes.value());
+    if (!key.is_ok()) {
+      return key.status();
+    }
+    auto value = context.make_buffer(layer_bytes.value());
+    if (!value.is_ok()) {
+      return value.status();
+    }
+    key_layers.push_back(std::move(key.value()));
+    value_layers.push_back(std::move(value.value()));
+  }
+
+  key_layers_ = std::move(key_layers);
+  value_layers_ = std::move(value_layers);
   layers_ = layers;
   capacity_tokens_ = capacity_tokens;
   kv_heads_ = kv_heads;
@@ -97,8 +113,9 @@ Status MpsGraphKvCache::store(const MpsGraphContext& context,
     return Status::invalid_argument("MPSGraph KV cache position exceeds capacity");
   }
 
-  auto status = context.write_kv_cache_pair_f32(key, value, key_cache_, value_cache_, layer,
-                                                position, layers_, capacity_tokens_,
+  auto status = context.write_kv_cache_pair_f32(key, value, key_layers_[layer],
+                                                value_layers_[layer], 0, position, 1,
+                                                capacity_tokens_,
                                                 kv_heads_, head_dim_);
   if (!status.is_ok()) {
     return status;
@@ -118,23 +135,47 @@ Status MpsGraphKvCache::mark_position_used(std::size_t position) {
 }
 
 bool MpsGraphKvCache::allocated() const {
-  return key_cache_.valid() && value_cache_.valid();
+  if (key_layers_.size() != layers_ || value_layers_.size() != layers_) {
+    return false;
+  }
+  for (std::size_t layer = 0; layer < layers_; ++layer) {
+    if (!key_layers_[layer].valid() || !value_layers_[layer].valid()) {
+      return false;
+    }
+  }
+  return layers_ != 0;
 }
 
 MpsGraphBuffer& MpsGraphKvCache::key_buffer() {
-  return key_cache_;
+  return key_layer_buffer(0);
 }
 
 MpsGraphBuffer& MpsGraphKvCache::value_buffer() {
-  return value_cache_;
+  return value_layer_buffer(0);
 }
 
 const MpsGraphBuffer& MpsGraphKvCache::key_buffer() const {
-  return key_cache_;
+  return key_layer_buffer(0);
 }
 
 const MpsGraphBuffer& MpsGraphKvCache::value_buffer() const {
-  return value_cache_;
+  return value_layer_buffer(0);
+}
+
+MpsGraphBuffer& MpsGraphKvCache::key_layer_buffer(std::size_t layer) {
+  return key_layers_.at(layer);
+}
+
+MpsGraphBuffer& MpsGraphKvCache::value_layer_buffer(std::size_t layer) {
+  return value_layers_.at(layer);
+}
+
+const MpsGraphBuffer& MpsGraphKvCache::key_layer_buffer(std::size_t layer) const {
+  return key_layers_.at(layer);
+}
+
+const MpsGraphBuffer& MpsGraphKvCache::value_layer_buffer(std::size_t layer) const {
+  return value_layers_.at(layer);
 }
 
 std::size_t MpsGraphKvCache::value_offset(std::size_t layer, std::size_t position) const {

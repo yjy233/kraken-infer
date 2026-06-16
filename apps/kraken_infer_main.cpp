@@ -54,7 +54,8 @@ void print_usage(std::string_view program) {
                " [--profile-min-us N]\n\n";
   std::cout << "  " << program
             << " serve [--host 127.0.0.1] [--port 8080] [--model <model_dir>]"
-               " [--model-id ID] [--device cpu|mps|mpsgraph] [--max-new-tokens N]\n\n";
+               " [--model-id ID] [--device cpu|mps|mpsgraph] [--max-new-tokens N]"
+               " [--mpsgraph-warmup]\n\n";
   std::cout << "       [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n\n";
   std::cout << "Compatibility flags:\n";
@@ -465,6 +466,10 @@ int main(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         config.default_max_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--mpsgraph-warmup")) {
+        config.mpsgraph_warmup = true;
         continue;
       }
       if (arg_equals(argv[index], "--profile") && index + 1 < argc) {

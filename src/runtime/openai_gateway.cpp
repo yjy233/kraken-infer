@@ -1,6 +1,7 @@
 #include "toyllm/runtime/openai_gateway.hpp"
 
 #include "toyllm/runtime/cpu_inference.hpp"
+#include "toyllm/runtime/mpsgraph_inference.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -1427,6 +1428,18 @@ Status errno_status(std::string_view operation) {
 Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
   if (config.port <= 0 || config.port > 65535) {
     return Status::invalid_argument("gateway port must be in 1..65535");
+  }
+  if (config.mpsgraph_warmup) {
+    if (config.compute_device.kind != DeviceKind::mpsgraph) {
+      return Status::invalid_argument("--mpsgraph-warmup requires --device mpsgraph");
+    }
+    std::cout << "warming up MPSGraph runtime cache..." << std::endl;
+    const auto warmup_status =
+      warmup_mpsgraph(config.model_dir, config.default_max_tokens);
+    if (!warmup_status.is_ok()) {
+      return Status::internal_error("MPSGraph warmup failed: " + warmup_status.message());
+    }
+    std::cout << "MPSGraph warmup complete" << std::endl;
   }
   (void)::signal(SIGPIPE, SIG_IGN);
 

@@ -16,6 +16,10 @@
 - [x] MPSGraph context 跨请求复用
 - [x] MPSGraph weights 跨请求复用
 - [x] graph build / compile / execute 分离统计
+- [x] tokenizer 随 MPSGraph runtime cache 复用
+- [x] layer KV cache 改为 per-layer buffer，减少每层 graph 的 KV 输入/输出体积
+- [x] fused layer attention 在 macOS 15+ 使用 MPSGraph SDPA
+- [x] gateway 支持显式 MPSGraph warmup
 - [ ] executable cache
 - [ ] 粗粒度 transformer block graph
 - [ ] graph-side decode loop 或 fixed bucket decode graph
@@ -85,6 +89,7 @@
 - [x] 新增 `MpsGraphRuntimeCache` 或等价类型
 - [x] cache 持有 `MpsGraphContext`
 - [x] cache 持有已上传完整权重的 `QwenMpsGraphModel`
+- [x] cache 持有 `QwenTokenizer`
 - [x] cache key 包含 canonical `model_dir`
 - [ ] cache key 包含 backend device 标识
 - [ ] cache key 包含 dtype policy
@@ -99,8 +104,10 @@
 ### Gateway Warmup And Lifecycle
 
 - [x] `serve --device mpsgraph` 支持 lazy load cache
-- [ ] 可选新增 `--mpsgraph-warmup` 或等价 warmup 开关
-- [ ] warmup 失败时返回明确错误
+- [x] 可选新增 `--mpsgraph-warmup` 或等价 warmup 开关
+- [x] warmup 失败时返回明确错误
+- [x] warmup 提前加载 tokenizer、context、weights
+- [x] warmup 使用 server 默认 max-new-tokens 执行 tiny decode，预热 decode 路径
 - [ ] 服务退出时释放 MPSGraph runtime cache
 - [ ] 未来多模型场景保留 cache map 扩展点
 - [ ] 文档说明当前第一版只支持单模型常驻 cache
@@ -185,6 +192,13 @@
 
 ### Decode Loop Optimization
 
+- [x] decode 已支持 EOS 后立即停止后续 forward
+- [x] decode warmup 可通过 gateway `--mpsgraph-warmup` 提前触发 1 token 路径
+- [x] profile metadata 输出 `mpsgraph_decode_cache=hit|miss`
+- [x] profile metadata 输出 warmed decode capacity / max-new-tokens
+- [ ] 新增 decode graph cache key：model / dtype / capacity / max-new-tokens / head layout
+- [ ] decode graph cache 记录 hit/miss/size 到 profile metadata
+- [ ] fixed-shape decode graph cache 优先覆盖 `lm_head -> argmax -> record -> status`
 - [ ] 设计 graph-side decode loop
 - [ ] spike MPSGraph control-flow API 可行性
 - [ ] 如果 control-flow 不合适，设计 fixed max-new-tokens bucket
@@ -249,6 +263,7 @@
 - [ ] `ctest --preset debug` 通过
 - [ ] `git diff --check` 通过
 - [ ] `infer --device mpsgraph --profile summary` 可运行
+- [ ] `serve --device mpsgraph --mpsgraph-warmup` 可启动并提前加载 weights
 - [ ] `serve --device mpsgraph` 连续两个非 streaming 请求可运行
 - [ ] warm request 复用 context 和 weights
 - [ ] warm request 的 H2D 调用次数明显低于 cold request
@@ -278,6 +293,7 @@ Warm gateway requests:
 ./build/debug/kraken-infer serve \
   --model models/qwen3-0.6b \
   --device mpsgraph \
+  --mpsgraph-warmup \
   --profile-dir profiles
 ```
 

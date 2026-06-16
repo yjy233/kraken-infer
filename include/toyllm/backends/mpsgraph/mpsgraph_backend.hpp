@@ -38,6 +38,7 @@ struct MpsGraphGraphStats {
   std::uint64_t graph_execute_ns{0};
   std::uint64_t executable_cache_hits{0};
   std::uint64_t executable_cache_misses{0};
+  std::uint64_t executable_cache_entries{0};
 };
 
 class MpsGraphBuffer {

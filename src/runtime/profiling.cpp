@@ -408,12 +408,16 @@ ProfileArtifacts RequestProfiler::write_artifacts() {
     return 0U;
   }();
   const auto tokenize_ns = [&]() -> std::uint64_t {
+    std::uint64_t total = 0;
     for (const auto& span : impl_->spans) {
       if (span.name == "request.tokenize") {
-        return span.end_ns > span.start_ns ? span.end_ns - span.start_ns : 0U;
+        total += span.end_ns > span.start_ns ? span.end_ns - span.start_ns : 0U;
+      }
+      if (span.name == "request.tokenize.load") {
+        total += span.end_ns > span.start_ns ? span.end_ns - span.start_ns : 0U;
       }
     }
-    return 0U;
+    return total;
   }();
   const auto decode_ms = static_cast<double>(decode_ns) / 1'000'000.0;
   const auto prefill_ms = static_cast<double>(prefill_ns) / 1'000'000.0;

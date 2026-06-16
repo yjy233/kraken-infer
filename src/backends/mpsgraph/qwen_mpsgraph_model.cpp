@@ -597,9 +597,10 @@ Status QwenMpsGraphModel::apply_layer(const MpsGraphContext& context,
     layer.v_proj.buffer, layer.o_proj.buffer, layer.q_norm.buffer,
     layer.k_norm.buffer, layer.post_attention_layernorm.buffer,
     layer.gate_proj.buffer, layer.up_proj.buffer, layer.down_proj.buffer,
-    layer_index, layers_.size(), position, state.capacity_tokens, hidden_size,
+    0, 1, position, state.capacity_tokens, hidden_size,
     intermediate, heads, kv_heads, head_dim, eps, theta, state.hidden,
-    state.kv_cache.key_buffer(), state.kv_cache.value_buffer());
+    state.kv_cache.key_layer_buffer(layer_index),
+    state.kv_cache.value_layer_buffer(layer_index));
   if (status.is_ok()) {
     status = state.kv_cache.mark_position_used(position);
   }

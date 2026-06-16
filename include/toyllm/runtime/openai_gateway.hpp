@@ -17,6 +17,7 @@ struct OpenAIGatewayConfig {
   std::string model_id{"kraken-infer-qwen3-0.6b"};
   Device compute_device{Device::cpu()};
   std::size_t default_max_tokens{16};
+  bool mpsgraph_warmup{false};
   ObservabilityConfig observability;
 };
 

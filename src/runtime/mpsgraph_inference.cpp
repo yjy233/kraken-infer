@@ -4,6 +4,7 @@
 #include "toyllm/backends/mpsgraph/qwen_mpsgraph_model.hpp"
 #include "toyllm/runtime/qwen_tokenizer.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -63,6 +64,9 @@ struct MpsGraphRuntimeCache {
   std::filesystem::path model_key;
   mpsgraph::MpsGraphContext context;
   mpsgraph::QwenMpsGraphModel model;
+  QwenTokenizer tokenizer;
+  std::size_t warmed_decode_capacity{0};
+  std::size_t warmed_max_new_tokens{0};
 };
 
 std::mutex& runtime_cache_mutex() {
@@ -120,32 +124,12 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
       return Status::invalid_argument("messages must not be empty");
     }
 
-    QwenTokenizer tokenizer;
-    std::vector<std::int64_t> prompt_tokens;
-    {
-      auto span = profiler.scoped("request.tokenize");
-      {
-        auto load_span = profiler.scoped("request.tokenize.load");
-        tokenizer = QwenTokenizer::load(request.model_dir);
-        (void)load_span;
-      }
-      {
-        auto encode_span = profiler.scoped("request.tokenize.encode");
-        prompt_tokens = tokenizer.encode_chat_messages(messages, request.enable_thinking);
-        (void)encode_span;
-      }
-      (void)span;
-    }
-    if (prompt_tokens.empty()) {
-      return Status::invalid_argument("tokenizer produced no prompt tokens");
-    }
-    profiler.set_metadata("prompt_tokens", prompt_tokens.size());
-
     std::unique_lock<std::mutex> cache_lock(runtime_cache_mutex());
     auto& cache = runtime_cache_slot();
     const auto model_key = canonical_model_key(request.model_dir);
     const auto cache_hit = cache != nullptr && cache->model_key == model_key;
     profiler.set_metadata("mpsgraph_model_cache", cache_hit ? "hit" : "miss");
+    profiler.set_metadata("mpsgraph_tokenizer_cache", cache_hit ? "hit" : "miss");
     mpsgraph::MpsGraphTransferStats request_transfer_before{};
     mpsgraph::MpsGraphGraphStats request_graph_before{};
     if (!cache_hit) {
@@ -163,6 +147,11 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
       request_transfer_before = new_cache->context.transfer_stats();
       request_graph_before = new_cache->context.graph_stats();
       {
+        auto span = profiler.scoped("request.tokenize.load");
+        new_cache->tokenizer = QwenTokenizer::load(request.model_dir);
+        (void)span;
+      }
+      {
         auto span = profiler.scoped("mpsgraph.load_weights");
         auto model_result = mpsgraph::QwenMpsGraphModel::load_all_weights(
           request.model_dir, new_cache->context);
@@ -179,6 +168,19 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
       request_transfer_before = context.transfer_stats();
       request_graph_before = context.graph_stats();
     }
+
+    std::vector<std::int64_t> prompt_tokens;
+    {
+      auto tokenize_span = profiler.scoped("request.tokenize");
+      auto encode_span = profiler.scoped("request.tokenize.encode");
+      prompt_tokens = cache->tokenizer.encode_chat_messages(messages, request.enable_thinking);
+      (void)encode_span;
+      (void)tokenize_span;
+    }
+    if (prompt_tokens.empty()) {
+      return Status::invalid_argument("tokenizer produced no prompt tokens");
+    }
+    profiler.set_metadata("prompt_tokens", prompt_tokens.size());
     const auto weight_info = cache->model.info();
     profiler.set_metadata("mpsgraph_device_weight_bytes",
                           static_cast<std::size_t>(weight_info.device_weight_bytes));
@@ -190,6 +192,13 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
       return Status::invalid_argument("MPSGraph token capacity exceeds supported range");
     }
     const auto total_capacity = prompt_tokens.size() + request.max_new_tokens + 1U;
+    const auto decode_cache_hit =
+      cache->warmed_decode_capacity >= total_capacity &&
+      cache->warmed_max_new_tokens >= request.max_new_tokens;
+    profiler.set_metadata("mpsgraph_decode_cache", decode_cache_hit ? "hit" : "miss");
+    profiler.set_metadata("mpsgraph_decode_cache_capacity", cache->warmed_decode_capacity);
+    profiler.set_metadata("mpsgraph_decode_cache_max_new_tokens",
+                          cache->warmed_max_new_tokens);
     mpsgraph::QwenMpsGraphRunState state;
     {
       auto span = profiler.scoped("mpsgraph.create_run_state");
@@ -334,7 +343,7 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
 
     CpuGenerationResult result{};
     result.implemented = true;
-    result.text = tokenizer.decode(generated);
+    result.text = cache->tokenizer.decode(generated);
     result.request_id = profiler.request_id();
     result.finish_reason = generation_status[1] == 1 ? "stop" : "length";
     result.prompt_tokens = prompt_tokens.size();
@@ -406,6 +415,33 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
   } catch (const std::exception& error) {
     return Status::internal_error(error.what());
   }
+}
+
+Status warmup_mpsgraph(const std::filesystem::path& model_dir,
+                       std::size_t max_new_tokens) {
+  if (max_new_tokens == 0) {
+    return Status::invalid_argument("MPSGraph warmup max_new_tokens must be positive");
+  }
+  CpuGenerationRequest request;
+  request.model_dir = model_dir;
+  request.prompt = "hello";
+  request.max_new_tokens = max_new_tokens;
+  request.compute_device = Device::mpsgraph();
+  request.observability.profile_mode = ProfileMode::off;
+  const auto result = generate_mpsgraph(request);
+  if (!result.is_ok()) {
+    return result.status();
+  }
+  std::unique_lock<std::mutex> cache_lock(runtime_cache_mutex());
+  auto& cache = runtime_cache_slot();
+  const auto model_key = canonical_model_key(model_dir);
+  if (cache != nullptr && cache->model_key == model_key) {
+    cache->warmed_decode_capacity = std::max(cache->warmed_decode_capacity,
+                                             result.value().kv_cache.capacity_tokens);
+    cache->warmed_max_new_tokens =
+      std::max(cache->warmed_max_new_tokens, max_new_tokens);
+  }
+  return Status::ok();
 }
 
 }  // namespace toyllm

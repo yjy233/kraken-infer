@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace toyllm::mpsgraph {
 
@@ -48,12 +49,16 @@ class MpsGraphKvCache {
   [[nodiscard]] MpsGraphBuffer& value_buffer();
   [[nodiscard]] const MpsGraphBuffer& key_buffer() const;
   [[nodiscard]] const MpsGraphBuffer& value_buffer() const;
+  [[nodiscard]] MpsGraphBuffer& key_layer_buffer(std::size_t layer);
+  [[nodiscard]] MpsGraphBuffer& value_layer_buffer(std::size_t layer);
+  [[nodiscard]] const MpsGraphBuffer& key_layer_buffer(std::size_t layer) const;
+  [[nodiscard]] const MpsGraphBuffer& value_layer_buffer(std::size_t layer) const;
   [[nodiscard]] std::size_t value_offset(std::size_t layer, std::size_t position) const;
   [[nodiscard]] MpsGraphKvCacheStats stats() const;
 
  private:
-  MpsGraphBuffer key_cache_;
-  MpsGraphBuffer value_cache_;
+  std::vector<MpsGraphBuffer> key_layers_;
+  std::vector<MpsGraphBuffer> value_layers_;
   std::size_t layers_{0};
   std::size_t capacity_tokens_{0};
   std::size_t kv_heads_{0};

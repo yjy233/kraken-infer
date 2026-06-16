@@ -11,6 +11,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -115,6 +116,7 @@ MPSShape* make_shape(std::initializer_list<std::size_t> dims) {
 MPSGraph* make_graph(MpsGraphGraphStats* stats) {
   const auto started = SteadyClock::now();
   MPSGraph* graph = [MPSGraph new];
+  graph.options = MPSGraphOptionsNone;
   const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
     SteadyClock::now() - started);
   if (stats != nullptr) {
@@ -148,6 +150,57 @@ Status run_graph_with_results(MPSGraph* graph, id<MTLCommandQueue> queue,
       ++stats->executable_cache_misses;
     }
     [mutable_results release];
+  } @catch (NSException* exception) {
+    return Status::internal_error(exception_to_string(exception));
+  }
+
+  return Status::ok();
+}
+
+Status run_executable_with_results(
+  MPSGraphExecutable* executable, id<MTLCommandQueue> queue,
+  NSArray<MPSGraphTensor*>* feed_tensors,
+  NSArray<MPSGraphTensor*>* target_tensors,
+  NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds,
+  NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results,
+  MpsGraphGraphStats* stats) {
+  if (executable == nil || queue == nil || feed_tensors == nil ||
+      target_tensors == nil || results == nil || results.count == 0) {
+    return Status::unavailable("failed to bind MPSGraph executable execution");
+  }
+
+  NSMutableArray<MPSGraphTensorData*>* input_array =
+    [NSMutableArray arrayWithCapacity:feed_tensors.count];
+  for (MPSGraphTensor* tensor in feed_tensors) {
+    MPSGraphTensorData* data = [feeds objectForKey:tensor];
+    if (data == nil) {
+      return Status::unavailable("failed to bind MPSGraph executable input");
+    }
+    [input_array addObject:data];
+  }
+
+  NSMutableArray<MPSGraphTensorData*>* result_array =
+    [NSMutableArray arrayWithCapacity:target_tensors.count];
+  for (MPSGraphTensor* tensor in target_tensors) {
+    MPSGraphTensorData* data = [results objectForKey:tensor];
+    if (data == nil) {
+      return Status::unavailable("failed to bind MPSGraph executable output");
+    }
+    [result_array addObject:data];
+  }
+
+  @try {
+    const auto started = SteadyClock::now();
+    [executable runWithMTLCommandQueue:queue
+                           inputsArray:input_array
+                          resultsArray:result_array
+                   executionDescriptor:nil];
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      SteadyClock::now() - started);
+    if (stats != nullptr) {
+      ++stats->graph_execute_calls;
+      stats->graph_execute_ns += static_cast<std::uint64_t>(elapsed.count());
+    }
   } @catch (NSException* exception) {
     return Status::internal_error(exception_to_string(exception));
   }
@@ -355,6 +408,84 @@ MPSGraphTensor* build_grouped_attention_from_cache(
            : [graph concatTensors:group_outputs dimension:0 name:nil];
 }
 
+MPSGraphTensor* build_attention_from_cache(
+  MPSGraph* graph, MPSGraphTensor* query_tensor, MPSGraphTensor* key_cache_tensor,
+  MPSGraphTensor* value_cache_tensor, std::size_t layer, std::size_t position,
+  std::size_t capacity_tokens, std::size_t heads, std::size_t kv_heads,
+  std::size_t head_dim, bool use_sdpa) {
+  const auto seq_len = position + 1U;
+  const auto kv_group = heads / kv_heads;
+
+  if (use_sdpa) {
+    if (@available(macOS 15.0, *)) {
+      MPSGraphTensor* layer_keys =
+        [graph sliceTensor:key_cache_tensor dimension:0
+                     start:static_cast<NSInteger>(layer) length:1 name:nil];
+      MPSGraphTensor* layer_values =
+        [graph sliceTensor:value_cache_tensor dimension:0
+                     start:static_cast<NSInteger>(layer) length:1 name:nil];
+      layer_keys =
+        [graph reshapeTensor:layer_keys
+                   withShape:make_shape({capacity_tokens, kv_heads, head_dim})
+                        name:nil];
+      layer_values =
+        [graph reshapeTensor:layer_values
+                   withShape:make_shape({capacity_tokens, kv_heads, head_dim})
+                        name:nil];
+      MPSGraphTensor* visible_keys =
+        [graph sliceTensor:layer_keys dimension:0 start:0
+                    length:static_cast<NSInteger>(seq_len) name:nil];
+      MPSGraphTensor* visible_values =
+        [graph sliceTensor:layer_values dimension:0 start:0
+                    length:static_cast<NSInteger>(seq_len) name:nil];
+
+      MPSGraphTensor* sdpa_query =
+        [graph reshapeTensor:query_tensor
+                   withShape:make_shape({1, heads, 1, head_dim})
+                        name:nil];
+      MPSGraphTensor* sdpa_keys =
+        [graph transposeTensor:visible_keys permutation:@[ @1, @0, @2 ] name:nil];
+      sdpa_keys = [graph reshapeTensor:sdpa_keys
+                              withShape:make_shape({kv_heads, 1, seq_len, head_dim})
+                                   name:nil];
+      sdpa_keys = [graph tileTensor:sdpa_keys
+                      withMultiplier:make_shape({1, kv_group, 1, 1})
+                                name:nil];
+      sdpa_keys = [graph reshapeTensor:sdpa_keys
+                              withShape:make_shape({1, heads, seq_len, head_dim})
+                                   name:nil];
+
+      MPSGraphTensor* sdpa_values =
+        [graph transposeTensor:visible_values permutation:@[ @1, @0, @2 ] name:nil];
+      sdpa_values = [graph reshapeTensor:sdpa_values
+                                withShape:make_shape({kv_heads, 1, seq_len, head_dim})
+                                     name:nil];
+      sdpa_values = [graph tileTensor:sdpa_values
+                        withMultiplier:make_shape({1, kv_group, 1, 1})
+                                  name:nil];
+      sdpa_values = [graph reshapeTensor:sdpa_values
+                                withShape:make_shape({1, heads, seq_len, head_dim})
+                                     name:nil];
+
+      const auto attention_scale =
+        static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim)));
+      MPSGraphTensor* sdpa_output =
+        [graph scaledDotProductAttentionWithQueryTensor:sdpa_query
+                                              keyTensor:sdpa_keys
+                                            valueTensor:sdpa_values
+                                                  scale:attention_scale
+                                                   name:nil];
+      return [graph reshapeTensor:sdpa_output
+                        withShape:make_shape({heads, head_dim})
+                             name:nil];
+    }
+  }
+
+  return build_grouped_attention_from_cache(
+    graph, query_tensor, key_cache_tensor, value_cache_tensor, layer, position,
+    capacity_tokens, heads, kv_heads, head_dim);
+}
+
 struct TransformerLayerGraphOutputs {
   MPSGraphTensor* hidden{nil};
   MPSGraphTensor* key_cache{nil};
@@ -388,7 +519,8 @@ TransformerLayerGraphOutputs build_transformer_layer_block(
   float eps,
   const std::vector<float>& cos_values,
   const std::vector<float>& sin_values,
-  std::size_t trig_bytes) {
+  std::size_t trig_bytes,
+  bool use_sdpa_attention) {
   const auto attn_dim = heads * head_dim;
   MPSShape* hidden_shape = make_shape({hidden_size});
   MPSShape* hidden_column_shape = make_shape({hidden_size, 1});
@@ -470,9 +602,9 @@ TransformerLayerGraphOutputs build_transformer_layer_block(
                              name:nil];
 
   MPSGraphTensor* attention =
-    build_grouped_attention_from_cache(graph, q_rope, key_cache_result,
-                                       value_cache_result, layer, position,
-                                       capacity_tokens, heads, kv_heads, head_dim);
+    build_attention_from_cache(graph, q_rope, key_cache_result, value_cache_result,
+                               layer, position, capacity_tokens, heads, kv_heads,
+                               head_dim, use_sdpa_attention);
   MPSGraphTensor* attention_vector =
     [graph reshapeTensor:attention withShape:make_shape({attn_dim}) name:nil];
   MPSGraphTensor* attention_column =
@@ -553,6 +685,36 @@ Result<std::vector<float>> read_f32_buffer(const MpsGraphContext& context,
   return output;
 }
 
+std::string transformer_layer_cache_key(std::size_t layer,
+                                        std::size_t layers,
+                                        std::size_t position,
+                                        std::size_t capacity_tokens,
+                                        std::size_t hidden_size,
+                                        std::size_t intermediate_size,
+                                        std::size_t heads,
+                                        std::size_t kv_heads,
+                                        std::size_t head_dim,
+                                        bool use_sdpa_attention) {
+  std::ostringstream key;
+  key << "qwen.layer.full.f32.v1"
+      << ":layer=" << layer
+      << ":layers=" << layers
+      << ":pos=" << position
+      << ":cap=" << capacity_tokens
+      << ":hidden=" << hidden_size
+      << ":inter=" << intermediate_size
+      << ":heads=" << heads
+      << ":kv_heads=" << kv_heads
+      << ":head_dim=" << head_dim
+      << ":attn=" << (use_sdpa_attention ? "sdpa" : "grouped");
+  return key.str();
+}
+
+MPSGraphShapedType* make_f32_shaped_type(MPSShape* shape) {
+  return [[[MPSGraphShapedType alloc] initWithShape:shape
+                                           dataType:MPSDataTypeFloat32] autorelease];
+}
+
 BackendInfo build_backend_info() {
   BackendInfo info{};
   info.compiled = true;
@@ -608,12 +770,44 @@ struct MpsGraphBuffer::Impl {
 };
 
 struct MpsGraphContext::Impl {
+  struct TransformerLayerExecutable {
+    MPSGraph* graph{nil};
+    MPSGraphExecutable* executable{nil};
+    NSArray<MPSGraphTensor*>* feed_tensors{nil};
+    NSArray<MPSGraphTensor*>* run_feed_tensors{nil};
+    NSArray<MPSGraphTensor*>* target_tensors{nil};
+    NSArray<MPSGraphTensor*>* run_target_tensors{nil};
+
+    ~TransformerLayerExecutable() {
+      if (run_target_tensors != nil) {
+        [run_target_tensors release];
+      }
+      if (target_tensors != nil) {
+        [target_tensors release];
+      }
+      if (run_feed_tensors != nil) {
+        [run_feed_tensors release];
+      }
+      if (feed_tensors != nil) {
+        [feed_tensors release];
+      }
+      if (executable != nil) {
+        [executable release];
+      }
+      if (graph != nil) {
+        [graph release];
+      }
+    }
+  };
+
   id<MTLDevice> device{nil};
   id<MTLCommandQueue> queue{nil};
   MPSGraphDevice* graph_device{nil};
   mutable MpsGraphTransferStats transfer_stats;
   mutable MpsGraphGraphStats graph_stats;
   mutable bool sdpa_attention_disabled{false};
+  mutable std::unordered_map<std::string, std::unique_ptr<TransformerLayerExecutable>>
+    transformer_layer_executables;
 
   ~Impl() {
     if (graph_device != nil) {
@@ -2518,7 +2712,7 @@ Status MpsGraphContext::transformer_layer_f32(
       gate_weight_tensor, up_weight_tensor, down_weight_tensor, key_cache_tensor,
       value_cache_tensor, layer, position, capacity_tokens, hidden_size,
       intermediate_size, heads, kv_heads, head_dim, eps, cos_values, sin_values,
-      trig_bytes.value());
+      trig_bytes.value(), !impl_->sdpa_attention_disabled);
 
     MPSGraphTensorData* hidden_data =
       [[MPSGraphTensorData alloc] initWithMTLBuffer:hidden.impl_->buffer
@@ -2935,7 +3129,7 @@ Status MpsGraphContext::transformer_stack_f32(
         post_norm_tensor, gate_weight_tensor, up_weight_tensor, down_weight_tensor,
         current_key_cache, current_value_cache, layer_offset + layer, position,
         capacity_tokens, hidden_size, intermediate_size, heads, kv_heads, head_dim,
-        eps, cos_values, sin_values, trig_bytes.value());
+        eps, cos_values, sin_values, trig_bytes.value(), !impl_->sdpa_attention_disabled);
       current_hidden = outputs.hidden;
       current_key_cache = outputs.key_cache;
       current_value_cache = outputs.value_cache;
