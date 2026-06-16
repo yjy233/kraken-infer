@@ -388,9 +388,9 @@ source ~/.zshrc
   --host 127.0.0.1 \
   --port 8080 \
   --model models/qwen3-0.6b \
-  --model-id qwen3-0.6b \
   --device mpsgraph \
-  --max-new-tokens 128 \
+  --mpsgraph-warmup \
+  --max-new-tokens 9 \
   --profile summary \
   --profile-dir build/profiles
 ```

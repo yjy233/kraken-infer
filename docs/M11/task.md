@@ -20,7 +20,8 @@
 - [x] layer KV cache 改为 per-layer buffer，减少每层 graph 的 KV 输入/输出体积
 - [x] fused layer attention 在 macOS 15+ 使用 MPSGraph SDPA
 - [x] gateway 支持显式 MPSGraph warmup
-- [ ] executable cache
+- [x] single-layer transformer executable cache
+- [x] warmup 预编译 decode capacity bucket 内的 layer executables
 - [ ] 粗粒度 transformer block graph
 - [ ] graph-side decode loop 或 fixed bucket decode graph
 - [ ] run-state buffer pool
@@ -114,17 +115,17 @@
 
 ### Executable Cache Foundation
 
-- [ ] 新增 `MpsGraphExecutableKey`
-- [ ] key 支持 graph name
-- [ ] key 支持 input/output shape
+- [x] 新增 transformer layer executable cache key
+- [x] key 支持 graph name
+- [x] key 支持 input/output shape
 - [ ] key 支持 dtype policy
-- [ ] key 支持 capacity bucket
+- [x] key 支持 capacity bucket
 - [ ] key 支持 prompt bucket
 - [ ] key 支持 max-new-tokens bucket
 - [x] 新增 executable cache hit/miss 统计
 - [x] 新增 graph build / compile / execute 统计
-- [ ] 编译失败时返回明确错误
-- [ ] cache size 可观测
+- [x] 编译失败时返回明确错误
+- [x] cache size 可观测
 - [ ] 不可用平台 stub 保持可编译
 
 ### Cached Small Ops
@@ -172,7 +173,9 @@
 - [x] grouped stack graph smoke
 - [x] profile grouped stack graph；4 层/组 execute 次数降到 225，但总耗时退化到 41.6s
 - [x] 默认路径回退并保留 single-layer full graph
-- [ ] 设计 fixed-shape executable cache，优先减少 graph build / executable miss
+- [x] 设计 fixed-shape executable cache，优先减少 graph build / executable miss
+- [x] single-layer full graph 使用 MPSGraphExecutable cache
+- [x] warmup 后同 capacity bucket 的 layer graph compile_calls 降为 0
 - [ ] 设计 single-token full forward graph
 - [x] 对比 op-by-op path 和 coarse graph path 首 token输出
 - [x] profile 中区分 coarse graph path 和 op graph path
@@ -196,8 +199,8 @@
 - [x] decode warmup 可通过 gateway `--mpsgraph-warmup` 提前触发 1 token 路径
 - [x] profile metadata 输出 `mpsgraph_decode_cache=hit|miss`
 - [x] profile metadata 输出 warmed decode capacity / max-new-tokens
-- [ ] 新增 decode graph cache key：model / dtype / capacity / max-new-tokens / head layout
-- [ ] decode graph cache 记录 hit/miss/size 到 profile metadata
+- [x] 新增 decode layer graph cache key：capacity / position / head layout
+- [x] decode graph cache 记录 hit/miss/size 到 profile metadata
 - [ ] fixed-shape decode graph cache 优先覆盖 `lm_head -> argmax -> record -> status`
 - [ ] 设计 graph-side decode loop
 - [ ] spike MPSGraph control-flow API 可行性
@@ -214,6 +217,8 @@
 - [x] 不能物理跳过时记录 `mpsgraph_early_break=false`
 - [x] profile metadata 记录 `mpsgraph_decode_forward_steps`
 - [x] profile summary 固定输出 `tokenize_ms`
+- [ ] 合并 `lm_head -> argmax -> record -> status` 为一次 MPSGraph run
+- [ ] cached embedding / final_norm / lm_head / argmax / status 小图，减少 remaining graph_build_calls
 
 ### Run-State Buffer Pool
 
@@ -273,6 +278,27 @@
 - [ ] decode 内部仍不读回 next token
 - [ ] strict streaming 请求仍返回明确 unsupported
 - [ ] 不引入 `mpsgraph` 到旧 `mps` backend 的依赖
+
+## Latest Measurement
+
+Hot gateway request after `--mpsgraph-warmup --max-new-tokens 9`:
+
+```text
+request_id: req-16062026-085504-mq08ss
+prompt_tokens: 13
+generated_tokens: 9
+total_ms: 2450.78
+prefill_ms: 1089.08
+decode_ms: 1360.37
+tok_s: 6.61583
+mpsgraph_model_cache: hit
+mpsgraph_decode_cache: hit
+mpsgraph_graph_compile_calls: 0
+mpsgraph_executable_cache_entry_count: 32
+```
+
+Remaining top items are `mpsgraph.layer.full`, `lm_head`, `embedding`,
+`final_norm`, and decode status small graphs.
 
 ## Benchmark Commands
 
