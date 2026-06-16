@@ -106,6 +106,9 @@ class QwenMpsGraphModel {
                                          const std::vector<std::int64_t>& tokens,
                                          QwenMpsGraphRunState& state,
                                          RequestProfiler* profiler = nullptr) const;
+  [[nodiscard]] Status warmup_forward_positions(const MpsGraphContext& context,
+                                                std::size_t capacity_tokens,
+                                                std::size_t max_position) const;
   [[nodiscard]] Status greedy_next_token(const MpsGraphContext& context,
                                          QwenMpsGraphRunState& state,
                                          RequestProfiler* profiler = nullptr) const;

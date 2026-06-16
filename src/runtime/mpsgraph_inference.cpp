@@ -50,6 +50,19 @@ std::uint64_t graph_stat_delta(std::uint64_t before, std::uint64_t after) {
   return after >= before ? after - before : 0U;
 }
 
+std::size_t mpsgraph_capacity_bucket(std::size_t requested) {
+  constexpr std::size_t kMinimumBucket = 32;
+  if (requested <= kMinimumBucket) {
+    return kMinimumBucket;
+  }
+  std::size_t bucket = kMinimumBucket;
+  while (bucket < requested &&
+         bucket <= std::numeric_limits<std::size_t>::max() / 2U) {
+    bucket *= 2U;
+  }
+  return bucket < requested ? requested : bucket;
+}
+
 std::filesystem::path canonical_model_key(const std::filesystem::path& model_dir) {
   std::error_code ec;
   auto canonical = std::filesystem::weakly_canonical(model_dir, ec);
@@ -191,11 +204,13 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
           request.max_new_tokens - 1U) {
       return Status::invalid_argument("MPSGraph token capacity exceeds supported range");
     }
-    const auto total_capacity = prompt_tokens.size() + request.max_new_tokens + 1U;
+    const auto requested_capacity = prompt_tokens.size() + request.max_new_tokens + 1U;
+    const auto total_capacity = mpsgraph_capacity_bucket(requested_capacity);
     const auto decode_cache_hit =
       cache->warmed_decode_capacity >= total_capacity &&
       cache->warmed_max_new_tokens >= request.max_new_tokens;
     profiler.set_metadata("mpsgraph_decode_cache", decode_cache_hit ? "hit" : "miss");
+    profiler.set_metadata("mpsgraph_requested_capacity", requested_capacity);
     profiler.set_metadata("mpsgraph_decode_cache_capacity", cache->warmed_decode_capacity);
     profiler.set_metadata("mpsgraph_decode_cache_max_new_tokens",
                           cache->warmed_max_new_tokens);
@@ -406,6 +421,8 @@ Result<CpuGenerationResult> generate_mpsgraph(const CpuGenerationRequest& reques
                           static_cast<std::size_t>(graph_stat_delta(
                             request_graph_before.executable_cache_misses,
                             graph_stats.executable_cache_misses)));
+    profiler.set_metadata("mpsgraph_executable_cache_entry_count",
+                          static_cast<std::size_t>(graph_stats.executable_cache_entries));
     profiler.set_status("ok");
     const auto artifacts = profiler.write_artifacts();
     if (!artifacts.output_dir.empty()) {
@@ -436,8 +453,19 @@ Status warmup_mpsgraph(const std::filesystem::path& model_dir,
   auto& cache = runtime_cache_slot();
   const auto model_key = canonical_model_key(model_dir);
   if (cache != nullptr && cache->model_key == model_key) {
-    cache->warmed_decode_capacity = std::max(cache->warmed_decode_capacity,
-                                             result.value().kv_cache.capacity_tokens);
+    const auto warmed_capacity =
+      std::max<std::size_t>(result.value().kv_cache.capacity_tokens,
+                            mpsgraph_capacity_bucket(max_new_tokens + 32U));
+    if (cache->warmed_decode_capacity < warmed_capacity) {
+      const auto warmup_status =
+        cache->model.warmup_forward_positions(cache->context, warmed_capacity,
+                                              warmed_capacity - 1U);
+      if (!warmup_status.is_ok()) {
+        return warmup_status;
+      }
+    }
+    cache->warmed_decode_capacity =
+      std::max(cache->warmed_decode_capacity, warmed_capacity);
     cache->warmed_max_new_tokens =
       std::max(cache->warmed_max_new_tokens, max_new_tokens);
   }

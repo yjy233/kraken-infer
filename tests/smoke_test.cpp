@@ -1401,10 +1401,12 @@ void test_mpsgraph_generation_initializes_without_fallback() {
          std::string::npos);
   assert(summary_json.find("\"mpsgraph_graph_build_calls\":\"") != std::string::npos);
   assert(summary_json.find("\"mpsgraph_graph_execute_calls\":\"") != std::string::npos);
-  assert(summary_json.find("\"mpsgraph_graph_compile_calls\":\"0\"") != std::string::npos);
-  assert(summary_json.find("\"mpsgraph_executable_cache_hit_count\":\"0\"") !=
+  assert(summary_json.find("\"mpsgraph_graph_compile_calls\":\"") != std::string::npos);
+  assert(summary_json.find("\"mpsgraph_executable_cache_hit_count\":\"") !=
          std::string::npos);
   assert(summary_json.find("\"mpsgraph_executable_cache_miss_count\":\"") !=
+         std::string::npos);
+  assert(summary_json.find("\"mpsgraph_executable_cache_entry_count\":\"") !=
          std::string::npos);
 
   auto cpu_request = request;

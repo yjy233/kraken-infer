@@ -450,6 +450,44 @@ Status QwenMpsGraphModel::prefill_token_ids(
   return Status::ok();
 }
 
+Status QwenMpsGraphModel::warmup_forward_positions(
+  const MpsGraphContext& context,
+  std::size_t capacity_tokens,
+  std::size_t max_position) const {
+  if (!forward_weights_uploaded()) {
+    return Status::invalid_argument("MPSGraph Qwen weights are not fully uploaded");
+  }
+  if (layers_.empty()) {
+    return Status::invalid_argument("MPSGraph Qwen layer weights are not uploaded");
+  }
+  if (capacity_tokens == 0) {
+    return Status::invalid_argument("MPSGraph warmup capacity must be positive");
+  }
+  if (max_position >= capacity_tokens) {
+    return Status::invalid_argument("MPSGraph warmup position exceeds capacity");
+  }
+
+  auto state_result = create_run_state(context, capacity_tokens);
+  if (!state_result.is_ok()) {
+    return state_result.status();
+  }
+  auto state = std::move(state_result.value());
+  const auto hidden_size = static_cast<std::size_t>(bundle_.model.hidden_size);
+  std::vector<float> zero_hidden(hidden_size, 0.0F);
+  auto status = context.copy_to_buffer(state.hidden, zero_hidden.data(),
+                                       zero_hidden.size() * sizeof(float));
+  if (!status.is_ok()) {
+    return status;
+  }
+  for (std::size_t position = 0; position <= max_position; ++position) {
+    status = apply_layer(context, layers_.front(), 0, position, state, nullptr);
+    if (!status.is_ok()) {
+      return status;
+    }
+  }
+  return Status::ok();
+}
+
 Result<std::vector<float>> QwenMpsGraphModel::debug_forward_token(
   const MpsGraphContext& context, std::int64_t token, std::size_t position,
   QwenMpsGraphRunState& state) const {

@@ -2662,12 +2662,12 @@ Status MpsGraphContext::transformer_layer_f32(
     sin_values[dim] = static_cast<float>(std::sin(angle));
   }
 
-  @autoreleasepool {
-    MPSGraph* graph = make_graph(&impl_->graph_stats);
-    if (graph == nil) {
-      return Status::unavailable("failed to create MPSGraph");
-    }
+  const auto use_sdpa_attention = !impl_->sdpa_attention_disabled;
+  const auto executable_key = transformer_layer_cache_key(
+    layer, layers, position, capacity_tokens, hidden_size, intermediate_size, heads,
+    kv_heads, head_dim, use_sdpa_attention);
 
+  @autoreleasepool {
     MPSShape* hidden_shape = make_shape({hidden_size});
     MPSShape* q_weight_shape = make_shape({attn_dim, hidden_size});
     MPSShape* kv_weight_shape = make_shape({kv_dim, hidden_size});
@@ -2677,42 +2677,132 @@ Status MpsGraphContext::transformer_layer_f32(
     MPSShape* cache_shape = make_shape({layers, capacity_tokens, kv_heads, head_dim});
     MPSShape* q_norm_shape = make_shape({head_dim});
 
-    MPSGraphTensor* hidden_tensor =
-      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* input_norm_tensor =
-      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* q_weight_tensor =
-      [graph placeholderWithShape:q_weight_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* k_weight_tensor =
-      [graph placeholderWithShape:kv_weight_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* v_weight_tensor =
-      [graph placeholderWithShape:kv_weight_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* o_weight_tensor =
-      [graph placeholderWithShape:o_weight_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* q_norm_tensor =
-      [graph placeholderWithShape:q_norm_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* k_norm_tensor =
-      [graph placeholderWithShape:q_norm_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* post_norm_tensor =
-      [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* gate_weight_tensor =
-      [graph placeholderWithShape:mlp_weight_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* up_weight_tensor =
-      [graph placeholderWithShape:mlp_weight_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* down_weight_tensor =
-      [graph placeholderWithShape:down_weight_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* key_cache_tensor =
-      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
-    MPSGraphTensor* value_cache_tensor =
-      [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+    auto executable_it = impl_->transformer_layer_executables.find(executable_key);
+    if (executable_it == impl_->transformer_layer_executables.end()) {
+      MPSGraph* graph = make_graph(&impl_->graph_stats);
+      if (graph == nil) {
+        return Status::unavailable("failed to create MPSGraph");
+      }
 
-    const auto layer_outputs = build_transformer_layer_block(
-      graph, hidden_tensor, input_norm_tensor, q_weight_tensor, k_weight_tensor,
-      v_weight_tensor, o_weight_tensor, q_norm_tensor, k_norm_tensor, post_norm_tensor,
-      gate_weight_tensor, up_weight_tensor, down_weight_tensor, key_cache_tensor,
-      value_cache_tensor, layer, position, capacity_tokens, hidden_size,
-      intermediate_size, heads, kv_heads, head_dim, eps, cos_values, sin_values,
-      trig_bytes.value(), !impl_->sdpa_attention_disabled);
+      MPSGraphTensor* hidden_tensor =
+        [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* input_norm_tensor =
+        [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* q_weight_tensor =
+        [graph placeholderWithShape:q_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* k_weight_tensor =
+        [graph placeholderWithShape:kv_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* v_weight_tensor =
+        [graph placeholderWithShape:kv_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* o_weight_tensor =
+        [graph placeholderWithShape:o_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* q_norm_tensor =
+        [graph placeholderWithShape:q_norm_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* k_norm_tensor =
+        [graph placeholderWithShape:q_norm_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* post_norm_tensor =
+        [graph placeholderWithShape:hidden_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* gate_weight_tensor =
+        [graph placeholderWithShape:mlp_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* up_weight_tensor =
+        [graph placeholderWithShape:mlp_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* down_weight_tensor =
+        [graph placeholderWithShape:down_weight_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* key_cache_tensor =
+        [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+      MPSGraphTensor* value_cache_tensor =
+        [graph placeholderWithShape:cache_shape dataType:MPSDataTypeFloat32 name:nil];
+
+      const auto layer_outputs = build_transformer_layer_block(
+        graph, hidden_tensor, input_norm_tensor, q_weight_tensor, k_weight_tensor,
+        v_weight_tensor, o_weight_tensor, q_norm_tensor, k_norm_tensor,
+        post_norm_tensor, gate_weight_tensor, up_weight_tensor, down_weight_tensor,
+        key_cache_tensor, value_cache_tensor, layer, position, capacity_tokens,
+        hidden_size, intermediate_size, heads, kv_heads, head_dim, eps, cos_values,
+        sin_values, trig_bytes.value(), use_sdpa_attention);
+
+      NSArray<MPSGraphTensor*>* feed_tensors = [[NSArray alloc] initWithObjects:
+        hidden_tensor, input_norm_tensor, q_weight_tensor, k_weight_tensor,
+        v_weight_tensor, o_weight_tensor, q_norm_tensor, k_norm_tensor,
+        post_norm_tensor, gate_weight_tensor, up_weight_tensor, down_weight_tensor,
+        key_cache_tensor, value_cache_tensor, nil];
+      NSArray<MPSGraphTensor*>* target_tensors = [[NSArray alloc] initWithObjects:
+        layer_outputs.hidden, layer_outputs.key_cache, layer_outputs.value_cache, nil];
+
+      NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feed_types =
+        [NSMutableDictionary dictionaryWithCapacity:14U];
+      [feed_types setObject:make_f32_shaped_type(hidden_shape) forKey:hidden_tensor];
+      [feed_types setObject:make_f32_shaped_type(hidden_shape) forKey:input_norm_tensor];
+      [feed_types setObject:make_f32_shaped_type(q_weight_shape) forKey:q_weight_tensor];
+      [feed_types setObject:make_f32_shaped_type(kv_weight_shape) forKey:k_weight_tensor];
+      [feed_types setObject:make_f32_shaped_type(kv_weight_shape) forKey:v_weight_tensor];
+      [feed_types setObject:make_f32_shaped_type(o_weight_shape) forKey:o_weight_tensor];
+      [feed_types setObject:make_f32_shaped_type(q_norm_shape) forKey:q_norm_tensor];
+      [feed_types setObject:make_f32_shaped_type(q_norm_shape) forKey:k_norm_tensor];
+      [feed_types setObject:make_f32_shaped_type(hidden_shape) forKey:post_norm_tensor];
+      [feed_types setObject:make_f32_shaped_type(mlp_weight_shape) forKey:gate_weight_tensor];
+      [feed_types setObject:make_f32_shaped_type(mlp_weight_shape) forKey:up_weight_tensor];
+      [feed_types setObject:make_f32_shaped_type(down_weight_shape) forKey:down_weight_tensor];
+      [feed_types setObject:make_f32_shaped_type(cache_shape) forKey:key_cache_tensor];
+      [feed_types setObject:make_f32_shaped_type(cache_shape) forKey:value_cache_tensor];
+
+      MPSGraphCompilationDescriptor* descriptor = [MPSGraphCompilationDescriptor new];
+      descriptor.optimizationLevel = MPSGraphOptimizationLevel1;
+      if (@available(macOS 13.0, *)) {
+        descriptor.waitForCompilationCompletion = YES;
+      }
+
+      MPSGraphExecutable* executable = nil;
+      @try {
+        const auto compile_started = SteadyClock::now();
+        executable =
+          [graph compileWithDevice:impl_->graph_device
+                              feeds:feed_types
+                      targetTensors:target_tensors
+                   targetOperations:nil
+              compilationDescriptor:descriptor];
+        const auto compile_elapsed =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+            SteadyClock::now() - compile_started);
+        ++impl_->graph_stats.graph_compile_calls;
+        impl_->graph_stats.graph_compile_ns +=
+          static_cast<std::uint64_t>(compile_elapsed.count());
+      } @catch (NSException* exception) {
+        [descriptor release];
+        [target_tensors release];
+        [feed_tensors release];
+        [graph release];
+        return Status::internal_error(exception_to_string(exception));
+      }
+      [descriptor release];
+      if (executable == nil) {
+        [target_tensors release];
+        [feed_tensors release];
+        [graph release];
+        return Status::unavailable("failed to compile MPSGraph transformer layer executable");
+      }
+      executable.options = MPSGraphOptionsNone;
+
+      auto cached = std::make_unique<Impl::TransformerLayerExecutable>();
+      cached->graph = graph;
+      cached->feed_tensors = feed_tensors;
+      cached->run_feed_tensors =
+        executable.feedTensors == nil ? [feed_tensors retain]
+                                      : [executable.feedTensors retain];
+      cached->target_tensors = target_tensors;
+      cached->run_target_tensors =
+        executable.targetTensors == nil ? [target_tensors retain]
+                                        : [executable.targetTensors retain];
+      cached->executable = [executable retain];
+      executable_it = impl_->transformer_layer_executables
+                        .emplace(executable_key, std::move(cached))
+                        .first;
+      ++impl_->graph_stats.executable_cache_misses;
+      impl_->graph_stats.executable_cache_entries =
+        impl_->transformer_layer_executables.size();
+    } else {
+      ++impl_->graph_stats.executable_cache_hits;
+    }
 
     MPSGraphTensorData* hidden_data =
       [[MPSGraphTensorData alloc] initWithMTLBuffer:hidden.impl_->buffer
@@ -2783,29 +2873,34 @@ Status MpsGraphContext::transformer_layer_f32(
                                              shape:cache_shape
                                           dataType:MPSDataTypeFloat32];
 
+    auto* cached_executable = executable_it->second.get();
+    NSArray<MPSGraphTensor*>* feed_tensors = cached_executable->feed_tensors;
+    NSArray<MPSGraphTensor*>* target_tensors = cached_executable->target_tensors;
+
     NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* feeds = @{
-      hidden_tensor : hidden_data,
-      input_norm_tensor : input_norm_data,
-      q_weight_tensor : q_weight_data,
-      k_weight_tensor : k_weight_data,
-      v_weight_tensor : v_weight_data,
-      o_weight_tensor : o_weight_data,
-      q_norm_tensor : q_norm_data,
-      k_norm_tensor : k_norm_data,
-      post_norm_tensor : post_norm_data,
-      gate_weight_tensor : gate_weight_data,
-      up_weight_tensor : up_weight_data,
-      down_weight_tensor : down_weight_data,
-      key_cache_tensor : key_cache_input_data,
-      value_cache_tensor : value_cache_input_data,
+      [feed_tensors objectAtIndex:0] : hidden_data,
+      [feed_tensors objectAtIndex:1] : input_norm_data,
+      [feed_tensors objectAtIndex:2] : q_weight_data,
+      [feed_tensors objectAtIndex:3] : k_weight_data,
+      [feed_tensors objectAtIndex:4] : v_weight_data,
+      [feed_tensors objectAtIndex:5] : o_weight_data,
+      [feed_tensors objectAtIndex:6] : q_norm_data,
+      [feed_tensors objectAtIndex:7] : k_norm_data,
+      [feed_tensors objectAtIndex:8] : post_norm_data,
+      [feed_tensors objectAtIndex:9] : gate_weight_data,
+      [feed_tensors objectAtIndex:10] : up_weight_data,
+      [feed_tensors objectAtIndex:11] : down_weight_data,
+      [feed_tensors objectAtIndex:12] : key_cache_input_data,
+      [feed_tensors objectAtIndex:13] : value_cache_input_data,
     };
     NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results = @{
-      layer_outputs.hidden : hidden_output_data,
-      layer_outputs.key_cache : key_cache_output_data,
-      layer_outputs.value_cache : value_cache_output_data,
+      [target_tensors objectAtIndex:0] : hidden_output_data,
+      [target_tensors objectAtIndex:1] : key_cache_output_data,
+      [target_tensors objectAtIndex:2] : value_cache_output_data,
     };
-    const auto status =
-      run_graph_with_results(graph, impl_->queue, feeds, results, &impl_->graph_stats);
+    const auto status = run_executable_with_results(
+      cached_executable->executable, impl_->queue, cached_executable->run_feed_tensors,
+      cached_executable->run_target_tensors, feeds, results, &impl_->graph_stats);
 
     [hidden_data release];
     [input_norm_data release];
@@ -2824,7 +2919,6 @@ Status MpsGraphContext::transformer_layer_f32(
     [hidden_output_data release];
     [key_cache_output_data release];
     [value_cache_output_data release];
-    [graph release];
     return status;
   }
 }
