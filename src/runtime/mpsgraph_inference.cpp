@@ -453,9 +453,7 @@ Status warmup_mpsgraph(const std::filesystem::path& model_dir,
   auto& cache = runtime_cache_slot();
   const auto model_key = canonical_model_key(model_dir);
   if (cache != nullptr && cache->model_key == model_key) {
-    const auto warmed_capacity =
-      std::max<std::size_t>(result.value().kv_cache.capacity_tokens,
-                            mpsgraph_capacity_bucket(max_new_tokens + 32U));
+    const auto warmed_capacity = result.value().kv_cache.capacity_tokens;
     if (cache->warmed_decode_capacity < warmed_capacity) {
       const auto warmup_status =
         cache->model.warmup_forward_positions(cache->context, warmed_capacity,
