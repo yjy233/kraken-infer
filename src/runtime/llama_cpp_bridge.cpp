@@ -3,6 +3,7 @@
 #include "toyllm/runtime/gguf_reader.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -265,8 +266,15 @@ std::vector<std::string> build_server_args(const LlamaCppServerOptions& options,
                                            const std::filesystem::path& executable,
                                            int port) {
   auto model_path = options.model_path;
+  bool has_mtp_layers = false;
   if (auto resolved = resolve_gguf_model_path(model_path); resolved.is_ok()) {
     model_path = resolved.value();
+    if (auto gguf = read_gguf_file(model_path); gguf.is_ok()) {
+      if (auto arch = gguf_get_string(gguf.value(), "general.architecture"); arch.is_ok()) {
+        auto mtp = gguf_get_i64(gguf.value(), arch.value() + ".nextn_predict_layers");
+        has_mtp_layers = mtp.is_ok() && mtp.value() > 0;
+      }
+    }
   }
   std::vector<std::string> args;
   args.push_back(executable.string());
@@ -303,7 +311,7 @@ std::vector<std::string> build_server_args(const LlamaCppServerOptions& options,
   if (!options.enable_continuous_batching) {
     args.push_back("--no-cont-batching");
   }
-  if (options.enable_mtp) {
+  if (options.enable_mtp && has_mtp_layers) {
     args.push_back("--spec-type");
     args.push_back("draft-mtp");
   }
@@ -327,6 +335,18 @@ Result<bool> start_server_process(const LlamaCppServerOptions& options,
   if (pid == 0) {
     (void)::setsid();
     ::signal(SIGPIPE, SIG_IGN);
+    const auto log_path =
+      std::filesystem::temp_directory_path() / ("kraken-infer-llama-server-" +
+                                                std::to_string(port) + ".log");
+    const int log_fd =
+      ::open(log_path.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (log_fd >= 0) {
+      (void)::dup2(log_fd, STDOUT_FILENO);
+      (void)::dup2(log_fd, STDERR_FILENO);
+      if (log_fd > STDERR_FILENO) {
+        (void)::close(log_fd);
+      }
+    }
 
     std::vector<std::string> owned = args;
     std::vector<char*> argv;
