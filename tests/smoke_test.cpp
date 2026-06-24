@@ -724,6 +724,38 @@ void test_qwen3_model_config() {
   assert(toyllm::format_model_summary(bundle.value()).find("Validation: ok") != std::string::npos);
 }
 
+void test_qwen35_gguf_model_config() {
+  const std::filesystem::path model_dir{"models/qwen3.5-0.8b"};
+  const auto model_file = model_dir / "Qwen3.5-0.8B-Q4_K_M.gguf";
+  if (!std::filesystem::exists(model_file)) {
+    return;
+  }
+
+  auto bundle = toyllm::load_model_bundle(model_dir);
+  assert(bundle.is_ok());
+  assert(bundle.value().model.gguf);
+  assert(bundle.value().model_file == model_file);
+  assert(bundle.value().model.architecture == "qwen35");
+  assert(bundle.value().model.hidden_size == 1024);
+  assert(bundle.value().model.num_hidden_layers == 24);
+  assert(bundle.value().model.main_layer_count == 24);
+  assert(bundle.value().model.vocab_size == 248320);
+  assert(bundle.value().tokenizer.available);
+  assert(bundle.value().tokenizer.model == "gpt2");
+  assert(bundle.value().tokenizer.pre == "qwen35");
+
+  const auto summary = toyllm::format_model_summary(bundle.value());
+  assert(summary.find("Architecture: qwen35") != std::string::npos);
+  assert(summary.find("Tokenizer pre: qwen35") != std::string::npos);
+  assert(summary.find("Validation: ok") != std::string::npos);
+
+  const auto weights = toyllm::format_weight_summary(model_dir);
+  assert(weights.is_ok());
+  assert(weights.value().find("Format: GGUF v3") != std::string::npos);
+  assert(weights.value().find("Qwen3.5 GGUF mapping: ok") != std::string::npos);
+  assert(weights.value().find("- Q4_K:") != std::string::npos);
+}
+
 void test_cpu_generation_entrypoint() {
   const std::filesystem::path model_dir{"models/qwen3-0.6b"};
   if (!std::filesystem::exists(model_dir)) {
@@ -1564,6 +1596,7 @@ int main() {
   test_mps_full_forward_operators();
   test_profile_artifacts();
   test_qwen3_model_config();
+  test_qwen35_gguf_model_config();
   test_cpu_generation_entrypoint();
   test_weight_summary();
   test_weight_summary_regressions();

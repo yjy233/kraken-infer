@@ -55,7 +55,9 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program
             << " serve [--host 127.0.0.1] [--port 8080] [--model <model_dir>]"
                " [--model-id ID] [--device cpu|mps|mpsgraph] [--max-new-tokens N]"
-               " [--mpsgraph-warmup]\n\n";
+               " [--mpsgraph-warmup]"
+               " [--llama-server PATH] [--llama-cpp-dir DIR] [--llama-server-port N]"
+               " [--mmproj PATH] [--ctx-size N] [--parallel N] [--no-mtp]\n\n";
   std::cout << "       [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n\n";
   std::cout << "Compatibility flags:\n";
@@ -470,6 +472,49 @@ int main(int argc, char** argv) {
       }
       if (arg_equals(argv[index], "--mpsgraph-warmup")) {
         config.mpsgraph_warmup = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--llama-server") && index + 1 < argc) {
+        config.llama_server_path = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--llama-cpp-dir") && index + 1 < argc) {
+        config.llama_cpp_dir = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--llama-server-port") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0 || *parsed > 65535U) {
+          std::cerr << "--llama-server-port must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.llama_server_port = static_cast<int>(*parsed);
+        continue;
+      }
+      if (arg_equals(argv[index], "--mmproj") && index + 1 < argc) {
+        config.mmproj_path = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--ctx-size") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--ctx-size must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.context_size = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--parallel") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--parallel must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.parallel_slots = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--no-mtp")) {
+        config.enable_mtp = false;
         continue;
       }
       if (arg_equals(argv[index], "--profile") && index + 1 < argc) {

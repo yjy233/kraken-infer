@@ -2,6 +2,7 @@
 
 #include "toyllm/runtime/mpsgraph_inference.hpp"
 #include "toyllm/backends/mps/mps_backend.hpp"
+#include "toyllm/runtime/llama_cpp_bridge.hpp"
 #include "cpu/qwen_cpu_model.hpp"
 
 #include <sstream>
@@ -30,6 +31,43 @@ CpuKvCacheReport to_public_report(const cpu::KvCacheStats& stats) {
 }  // namespace
 
 Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
+  if (is_gguf_model_path(request.model_dir)) {
+    if (request.max_new_tokens == 0) {
+      return Status::invalid_argument("max_new_tokens must be greater than zero");
+    }
+    LlamaCppGenerationRequest llama_request;
+    llama_request.server.model_path = request.model_dir;
+    llama_request.server.model_alias = "kraken-infer-gguf";
+    llama_request.server.compute_device = request.compute_device;
+    llama_request.prompt = request.prompt;
+    llama_request.messages = request.messages;
+    llama_request.max_new_tokens = request.max_new_tokens;
+    llama_request.stream = static_cast<bool>(request.stream_token);
+    llama_request.stream_token = request.stream_token;
+    llama_request.observability = request.observability;
+    if (request.sampling.temperature_set) {
+      llama_request.temperature = request.sampling.temperature;
+    }
+    if (request.sampling.top_p_set) {
+      llama_request.top_p = request.sampling.top_p;
+    }
+    if (request.sampling.seed_set) {
+      llama_request.seed = request.sampling.seed;
+      llama_request.seed_set = true;
+    }
+
+    auto generated = generate_with_llama_cpp(llama_request);
+    if (!generated.is_ok()) {
+      return generated.status();
+    }
+    CpuGenerationResult result{};
+    result.implemented = true;
+    result.text = generated.value().text;
+    result.finish_reason = generated.value().finish_reason;
+    result.prompt_tokens = generated.value().prompt_tokens;
+    result.generated_tokens = generated.value().generated_tokens;
+    return result;
+  }
   if (request.prompt.empty() && request.messages.empty()) {
     return Status::invalid_argument("prompt must not be empty");
   }

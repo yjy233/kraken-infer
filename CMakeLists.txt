@@ -47,6 +47,8 @@ target_sources(
     src/runtime/cpu/qwen_cpu_model.cpp
     src/runtime/cpu/safetensors.cpp
     src/runtime/cpu/tokenizer.cpp
+    src/runtime/gguf_reader.cpp
+    src/runtime/llama_cpp_bridge.cpp
     src/runtime/cpu_inference.cpp
     src/runtime/mpsgraph_inference.cpp
     src/runtime/openai_gateway.cpp

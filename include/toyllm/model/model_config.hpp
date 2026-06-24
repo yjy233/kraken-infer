@@ -37,6 +37,24 @@ struct ModelConfig {
   std::int64_t num_hidden_layers{0};
   std::int64_t num_key_value_heads{0};
   std::int64_t vocab_size{0};
+
+  bool gguf{false};
+  std::int64_t total_layer_count{0};
+  std::int64_t main_layer_count{0};
+  std::int64_t full_attention_interval{4};
+  std::int64_t linear_conv_kernel_dim{0};
+  std::int64_t linear_key_head_dim{0};
+  std::int64_t linear_value_head_dim{0};
+  std::int64_t linear_num_key_heads{0};
+  std::int64_t linear_num_value_heads{0};
+  std::int64_t linear_inner_size{0};
+  std::int64_t mtp_num_hidden_layers{0};
+  std::int64_t expert_count{0};
+  std::int64_t expert_used_count{0};
+  std::int64_t expert_feed_forward_length{0};
+  std::int64_t expert_shared_feed_forward_length{0};
+  std::vector<std::int64_t> rope_dimension_sections;
+  std::vector<std::int64_t> attention_recurrent_layers;
 };
 
 struct GenerationConfig {
@@ -52,6 +70,8 @@ struct GenerationConfig {
 
 struct TokenizerInfo {
   bool available{false};
+  std::string model;
+  std::string pre;
   std::uint64_t base_vocab_size{0};
   std::uint64_t added_tokens{0};
   std::uint64_t tokenizer_config_added_tokens{0};
@@ -61,9 +81,14 @@ struct TokenizerInfo {
 
 struct ModelBundle {
   std::filesystem::path model_dir;
+  std::filesystem::path model_file;
   ModelConfig model;
   GenerationConfig generation;
   TokenizerInfo tokenizer;
+  std::uint64_t gguf_version{0};
+  std::uint64_t gguf_tensor_count{0};
+  std::uint64_t gguf_metadata_count{0};
+  std::uint64_t gguf_file_size{0};
 };
 
 [[nodiscard]] Result<ModelBundle> load_model_bundle(const std::filesystem::path& model_dir);
