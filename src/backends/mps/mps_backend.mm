@@ -202,13 +202,6 @@ struct CopyRowsParams {
   uint total;
 };
 
-struct FlashAttentionTailPadParams {
-  uint tail_tokens;
-  uint kv_dim;
-  uint source_offset;
-  uint total;
-};
-
 struct AttentionParams {
   uint layer;
   uint position;
@@ -2247,29 +2240,6 @@ kernel void copy_f16_rows(const device half* source [[buffer(0)]],
     source[params.source_offset + row * params.source_stride + column];
 }
 
-kernel void flash_attention_f16_tail_pad(
-                          const device half* key_cache [[buffer(0)]],
-                          const device half* value_cache [[buffer(1)]],
-                          device half* key_tail [[buffer(2)]],
-                          device half* value_tail [[buffer(3)]],
-                          constant FlashAttentionTailPadParams& params [[buffer(4)]],
-                          uint index [[thread_position_in_grid]]) {
-  if (index >= params.total) {
-    return;
-  }
-  const uint row = index / params.kv_dim;
-  const uint column = index % params.kv_dim;
-  if (row < params.tail_tokens) {
-    const uint source_index =
-      params.source_offset + row * params.kv_dim + column;
-    key_tail[index] = key_cache[source_index];
-    value_tail[index] = value_cache[source_index];
-  } else {
-    key_tail[index] = half(0.0h);
-    value_tail[index] = half(0.0h);
-  }
-}
-
 kernel void argmax_f32_i32(const device float* values [[buffer(0)]],
                            device int* output [[buffer(1)]],
                            constant SizeParams& params [[buffer(2)]],
@@ -3461,13 +3431,6 @@ struct CopyRowsParams {
   std::uint32_t total{0};
 };
 
-struct FlashAttentionTailPadParams {
-  std::uint32_t tail_tokens{0};
-  std::uint32_t kv_dim{0};
-  std::uint32_t source_offset{0};
-  std::uint32_t total{0};
-};
-
 struct AttentionParams {
   std::uint32_t layer{0};
   std::uint32_t position{0};
@@ -3881,7 +3844,6 @@ struct MpsContext::Impl {
   id<MTLComputePipelineState> copy_rows_pipeline{nil};
   id<MTLComputePipelineState> copy_rows_to_f16_pipeline{nil};
   id<MTLComputePipelineState> copy_f16_rows_pipeline{nil};
-  id<MTLComputePipelineState> flash_f16_tail_pad_pipeline{nil};
   id<MTLComputePipelineState> argmax_pipeline{nil};
   id<MTLComputePipelineState> attention_pipeline{nil};
   id<MTLComputePipelineState> attention_f16_kv_pipeline{nil};
@@ -3998,9 +3960,6 @@ struct MpsContext::Impl {
     }
     if (copy_f16_rows_pipeline != nil) {
       [copy_f16_rows_pipeline release];
-    }
-    if (flash_f16_tail_pad_pipeline != nil) {
-      [flash_f16_tail_pad_pipeline release];
     }
     if (silu_mul_pipeline != nil) {
       [silu_mul_pipeline release];
@@ -4783,14 +4742,6 @@ Result<MpsContext> MpsContext::create() {
     }
     impl->copy_f16_rows_pipeline = copy_f16_rows_pipeline.value();
 
-    auto flash_f16_tail_pad_pipeline =
-      make_pipeline("flash_attention_f16_tail_pad");
-    if (!flash_f16_tail_pad_pipeline.is_ok()) {
-      [library release];
-      return flash_f16_tail_pad_pipeline.status();
-    }
-    impl->flash_f16_tail_pad_pipeline = flash_f16_tail_pad_pipeline.value();
-
     auto argmax_pipeline = make_pipeline("argmax_f32_i32");
     if (!argmax_pipeline.is_ok()) {
       [library release];
@@ -4912,7 +4863,6 @@ bool MpsContext::valid() const {
          impl_->copy_region_pipeline != nil && impl_->copy_rows_pipeline != nil &&
          impl_->copy_rows_to_f16_pipeline != nil &&
          impl_->copy_f16_rows_pipeline != nil &&
-         impl_->flash_f16_tail_pad_pipeline != nil &&
          impl_->argmax_pipeline != nil &&
          impl_->attention_pipeline != nil &&
          impl_->attention_f16_kv_pipeline != nil &&
@@ -9447,67 +9397,25 @@ Status MpsContext::attention_f32_batched_f16_kv(
                      tail_source_offset)) {
       return Status::invalid_argument("MPS F16 KV flash attention tail offset overflow");
     }
-
-    auto tail_tokens_u32 =
-      checked_u32(tail_tokens, "F16 KV flash attention tail tokens");
-    auto kv_dim_u32 = checked_u32(kv_dim, "F16 KV flash attention tail kv_dim");
-    auto tail_source_offset_u32 =
-      checked_u32(tail_source_offset, "F16 KV flash attention tail source offset");
-    auto flash_tail_values_u32 =
-      checked_u32(flash_tail_values, "F16 KV flash attention tail values");
-    if (!tail_tokens_u32.is_ok()) {
-      return tail_tokens_u32.status();
+    status = zero_buffer(impl_->flash_f16_key_tail_scratch, flash_tail_bytes);
+    if (!status.is_ok()) {
+      return status;
     }
-    if (!kv_dim_u32.is_ok()) {
-      return kv_dim_u32.status();
+    status = zero_buffer(impl_->flash_f16_value_tail_scratch, flash_tail_bytes);
+    if (!status.is_ok()) {
+      return status;
     }
-    if (!tail_source_offset_u32.is_ok()) {
-      return tail_source_offset_u32.status();
+    status = copy_f16_rows(key_cache, impl_->flash_f16_key_tail_scratch,
+                           tail_tokens, kv_dim, kv_dim, tail_source_offset,
+                           kv_dim, 0);
+    if (!status.is_ok()) {
+      return status;
     }
-    if (!flash_tail_values_u32.is_ok()) {
-      return flash_tail_values_u32.status();
-    }
-
-    @autoreleasepool {
-      id<MTLCommandBuffer> command_buffer = impl_->command_buffer();
-      if (command_buffer == nil) {
-        return Status::unavailable("failed to create Metal command buffer");
-      }
-      id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-      if (encoder == nil) {
-        return Status::unavailable("failed to create Metal compute encoder");
-      }
-
-      FlashAttentionTailPadParams params{
-        tail_tokens_u32.value(),
-        kv_dim_u32.value(),
-        tail_source_offset_u32.value(),
-        flash_tail_values_u32.value(),
-      };
-      [encoder setComputePipelineState:impl_->flash_f16_tail_pad_pipeline];
-      [encoder setBuffer:key_cache.impl_->buffer offset:0 atIndex:0];
-      [encoder setBuffer:value_cache.impl_->buffer offset:0 atIndex:1];
-      [encoder setBuffer:impl_->flash_f16_key_tail_scratch.impl_->buffer
-                  offset:0
-                 atIndex:2];
-      [encoder setBuffer:impl_->flash_f16_value_tail_scratch.impl_->buffer
-                  offset:0
-                 atIndex:3];
-      [encoder setBytes:&params length:sizeof(params) atIndex:4];
-      const NSUInteger max_threads =
-        [impl_->flash_f16_tail_pad_pipeline maxTotalThreadsPerThreadgroup];
-      const NSUInteger threads_per_group =
-        std::min(max_threads, static_cast<NSUInteger>(256));
-      const MTLSize grid_size =
-        MTLSizeMake(static_cast<NSUInteger>(flash_tail_values), 1, 1);
-      const MTLSize threadgroup_size = MTLSizeMake(threads_per_group, 1, 1);
-      [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
-      [encoder endEncoding];
-      auto finish_status = impl_->finish_command_buffer(
-        command_buffer, "MPS F16 KV flash attention tail pad command failed: ");
-      if (!finish_status.is_ok()) {
-        return finish_status;
-      }
+    status = copy_f16_rows(value_cache, impl_->flash_f16_value_tail_scratch,
+                           tail_tokens, kv_dim, kv_dim, tail_source_offset,
+                           kv_dim, 0);
+    if (!status.is_ok()) {
+      return status;
     }
   }
 

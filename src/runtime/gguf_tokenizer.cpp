@@ -739,8 +739,9 @@ Result<std::vector<std::int64_t>> gguf_encode_text(const GgufTokenizer& tokenize
 
 Result<std::vector<std::int64_t>> gguf_encode_qwen35_chat_prompt(
   const GgufTokenizer& tokenizer, const std::vector<ChatMessage>& messages,
-  bool add_generation_prompt) {
-  auto prompt = format_qwen35_chat_prompt(tokenizer, messages, add_generation_prompt);
+  bool add_generation_prompt, bool enable_thinking) {
+  auto prompt = format_qwen35_chat_prompt(tokenizer, messages, add_generation_prompt,
+                                          enable_thinking);
   if (!prompt.is_ok()) {
     return prompt.status();
   }
@@ -775,7 +776,8 @@ Result<std::string> gguf_decode_token_text(const GgufTokenizer& tokenizer,
 
 Result<std::string> format_qwen35_chat_prompt(const GgufTokenizer& tokenizer,
                                               const std::vector<ChatMessage>& messages,
-                                              bool add_generation_prompt) {
+                                              bool add_generation_prompt,
+                                              bool enable_thinking) {
   if (tokenizer.pre != "qwen35") {
     return Status::invalid_argument("Qwen3.5 chat formatter requires tokenizer pre qwen35");
   }
@@ -794,6 +796,11 @@ Result<std::string> format_qwen35_chat_prompt(const GgufTokenizer& tokenizer,
   }
   if (add_generation_prompt) {
     prompt << "<|im_start|>assistant\n";
+    if (enable_thinking) {
+      prompt << "<think>\n";
+    } else {
+      prompt << "<think>\n\n</think>\n\n";
+    }
   }
   return prompt.str();
 }

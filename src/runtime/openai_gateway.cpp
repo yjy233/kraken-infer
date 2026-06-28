@@ -529,6 +529,11 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
   }
   stream = bool_value(object_get(root, "stream"), false);
   enable_thinking = bool_value(object_get(root, "enable_thinking"), false);
+  if (const auto* chat_template_kwargs = object_get(root, "chat_template_kwargs");
+      chat_template_kwargs != nullptr) {
+    enable_thinking = bool_value(object_get(*chat_template_kwargs, "enable_thinking"),
+                                 enable_thinking);
+  }
   compute_device = config.compute_device;
   const auto device = string_value(object_get(root, "device"));
   if (device == "cpu") {
@@ -548,6 +553,11 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
     sampling.do_sample = true;
     sampling.top_p_set = true;
     sampling.top_p = *top_p;
+  }
+  if (const auto top_k = size_value(object_get(root, "top_k")); top_k.has_value()) {
+    sampling.do_sample = true;
+    sampling.top_k_set = true;
+    sampling.top_k = *top_k;
   }
   if (const auto seed = u64_value(object_get(root, "seed")); seed.has_value()) {
     sampling.do_sample = true;
@@ -910,8 +920,10 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
        "{\"type\":\"string\"},\"prompt\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"array\","
        "\"items\":{\"type\":\"string\"}}]},\"max_tokens\":{\"type\":\"integer\"},"
-       "\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":\"number\"},"
+       "\"temperature\":{\"type\":\"number\"},\"top_k\":{\"type\":\"integer\"},"
+       "\"top_p\":{\"type\":\"number\"},"
        "\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
+       "\"chat_template_kwargs\":{\"type\":\"object\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
        "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"prompt\"]}}}},\"responses\":{\"200\":"
        "{\"description\":\"Text completion or SSE stream\"}}}},"
@@ -919,11 +931,13 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
        "{\"type\":\"string\"},\"messages\":{\"type\":\"array\"},\"tools\":{\"type\":\"array\"},"
        "\"tool_choice\":{},\"max_tokens\":{\"type\":\"integer\"},\"max_completion_tokens\":"
-       "{\"type\":\"integer\"},\"temperature\":{\"type\":\"number\"},\"top_p\":{\"type\":"
+       "{\"type\":\"integer\"},\"temperature\":{\"type\":\"number\"},\"top_k\":"
+       "{\"type\":\"integer\"},\"top_p\":{\"type\":"
        "\"number\"},\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
+       "\"chat_template_kwargs\":{\"type\":\"object\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
        "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"messages\"]}}}},\"responses\":{\"200\":"
-       "{\"description\":\"Chat completion, tool call, or SSE stream\"}}}}}";
+       "{\"description\":\"Chat completion, tool call, or SSE stream\"}}}}}}";
   return output.str();
 }
 

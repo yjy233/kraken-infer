@@ -2942,34 +2942,34 @@ Result<mps::MpsBuffer> run_qwen35_decode_token(
     const auto& layer = map.layers[layer_index];
     switch (layer.kind) {
       case Qwen35LayerKind::linear_attention: {
-        auto layer_output = run_qwen35_linear_layer(
-          context, weights, cache, layer, current_hidden, plan.hidden_size,
+        auto layer_output = run_qwen35_linear_layer_chunk(
+          context, weights, cache, layer, current_hidden, 1, plan.hidden_size,
           plan.linear_conv_kernel, plan.linear_conv_channels,
           plan.linear_key_heads, plan.linear_key_head_dim,
           plan.linear_value_heads, plan.linear_inner_size,
           linear_layers_executed, plan.cache.recurrent_r_elements_per_layer,
           plan.cache.recurrent_s_elements_per_layer,
-          static_cast<float>(model.rms_norm_eps));
+          nullptr, layer_index, position, static_cast<float>(model.rms_norm_eps),
+          nullptr);
         if (!layer_output.is_ok()) {
           return layer_output.status();
         }
-        current_hidden = std::move(layer_output.value().layer_output);
+        current_hidden = std::move(layer_output.value());
         ++linear_layers_executed;
         break;
       }
       case Qwen35LayerKind::full_attention: {
-        auto layer_output = run_qwen35_full_attention_layer(
-          context, weights, cache, layer, current_hidden, plan.hidden_size,
+        auto layer_output = run_qwen35_full_attention_layer_chunk(
+          context, weights, cache, layer, current_hidden, 1, plan.hidden_size,
           plan.attention_heads, plan.kv_heads, plan.head_dim,
           full_attention_layers_executed, position,
           plan.cache.attention_capacity_tokens, mrope_sections,
           static_cast<float>(model.rope_theta),
-          static_cast<float>(model.rms_norm_eps));
+          static_cast<float>(model.rms_norm_eps), nullptr);
         if (!layer_output.is_ok()) {
           return layer_output.status();
         }
-        auto output_pair = std::move(layer_output.value());
-        current_hidden = std::move(output_pair.first);
+        current_hidden = std::move(layer_output.value());
         ++full_attention_layers_executed;
         break;
       }
@@ -3912,14 +3912,16 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     auto span = profiler.scoped("request.tokenize");
     if (!request.messages.empty()) {
       auto formatted = format_qwen35_chat_prompt(tokenizer.value(),
-                                                 request.messages, true);
+                                                 request.messages, true,
+                                                 request.enable_thinking);
       if (!formatted.is_ok()) {
         return formatted.status();
       }
       prompt = formatted.value();
       prompt_tokens = gguf_encode_text(tokenizer.value(), prompt, false, true);
     } else {
-      prompt_tokens = gguf_encode_text(tokenizer.value(), prompt, false, false);
+      prompt_tokens = gguf_encode_text(tokenizer.value(), prompt, false,
+                                       request.parse_special_prompt);
     }
   }
   if (!prompt_tokens.is_ok()) {

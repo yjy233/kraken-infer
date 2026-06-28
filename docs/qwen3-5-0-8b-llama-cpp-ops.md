@@ -266,6 +266,11 @@ half8x8 path chooses the same effective tile geometry as the native
 `flash256` kernel (`Q=8`, `C=64`, `NSG=4`). The remaining parity work is
 therefore not a tile-shape mismatch; it is the detailed pad/block/mask flow,
 function-constant specialization, shared-memory layout, and tail buffer reuse.
+Two local tail experiments were rejected after measurement: skipping repeated
+tail scratch zeroing regressed the final-chunk microbench to about 53.37ms, and
+a fused F16 tail-pad kernel kept the microbench near 50.22ms but regressed one
+11k native prefill run to about 15.38s. The retained change is only reusable
+tail scratch allocation.
 
 ### Native default parity status
 

@@ -1957,10 +1957,17 @@ void test_qwen35_gguf_model_config() {
   assert(skipped_controls.is_ok());
   assert(skipped_controls.value().empty());
   const auto chat_prompt = toyllm::format_qwen35_chat_prompt(
-    tokenizer.value(), {toyllm::ChatMessage{"user", "hello"}}, true);
+    tokenizer.value(), {toyllm::ChatMessage{"user", "hello"}}, true, false);
   assert(chat_prompt.is_ok());
   assert(chat_prompt.value() ==
-         "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n");
+         "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
+         "<think>\n\n</think>\n\n");
+  const auto thinking_chat_prompt = toyllm::format_qwen35_chat_prompt(
+    tokenizer.value(), {toyllm::ChatMessage{"user", "hello"}}, true, true);
+  assert(thinking_chat_prompt.is_ok());
+  assert(thinking_chat_prompt.value() ==
+         "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
+         "<think>\n");
   const auto hello_tokens = toyllm::gguf_encode_text(tokenizer.value(), "hello", false, false);
   assert(hello_tokens.is_ok());
   assert((hello_tokens.value() == std::vector<std::int64_t>{14556}));
@@ -1980,10 +1987,17 @@ void test_qwen35_gguf_model_config() {
   assert(chat_tokens.is_ok());
   assert((chat_tokens.value() ==
           std::vector<std::int64_t>{248045, 846, 198, 14556, 248046, 198,
-                                    248045, 74455, 198}));
+                                    248045, 74455, 198, 248068, 271,
+                                    248069, 271}));
+  const auto thinking_chat_tokens =
+    toyllm::gguf_encode_text(tokenizer.value(), thinking_chat_prompt.value(), false, true);
+  assert(thinking_chat_tokens.is_ok());
+  assert((thinking_chat_tokens.value() ==
+          std::vector<std::int64_t>{248045, 846, 198, 14556, 248046, 198,
+                                    248045, 74455, 198, 248068, 198}));
   const auto chat_tokens_via_helper =
     toyllm::gguf_encode_qwen35_chat_prompt(
-      tokenizer.value(), {toyllm::ChatMessage{"user", "hello"}}, true);
+      tokenizer.value(), {toyllm::ChatMessage{"user", "hello"}}, true, false);
   assert(chat_tokens_via_helper.is_ok());
   assert(chat_tokens_via_helper.value() == chat_tokens.value());
 
@@ -2038,6 +2052,25 @@ void test_qwen35_gguf_generation_uses_native_runtime() {
   assert(logits_result.value().logits_top.size() == 3);
   assert(logits_result.value().logits_top[0].token_id == 11);
   assert(logits_result.value().logits_top[0].logit > 12.0F);
+
+  const std::string uk_question =
+    "\xE7" "\xAE" "\x80" "\xE5" "\x8D" "\x95" "\xE4" "\xBB"
+    "\x8B" "\xE7" "\xBB" "\x8D" "\xE4" "\xB8" "\x80" "\xE4"
+    "\xB8" "\x8B" "\xE8" "\x8B" "\xB1" "\xE5" "\x9B" "\xBD";
+  toyllm::CpuGenerationRequest cached_decode_request;
+  cached_decode_request.model_dir = model_dir;
+  cached_decode_request.prompt =
+    std::string{"<|im_start|>user\n"} + uk_question +
+    "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+  cached_decode_request.max_new_tokens = 2;
+  cached_decode_request.parse_special_prompt = true;
+  cached_decode_request.compute_device = toyllm::Device::mps();
+  const auto cached_decode = toyllm::generate_cpu(cached_decode_request);
+  assert(cached_decode.is_ok());
+  assert(cached_decode.value().prompt_tokens == 15);
+  assert(cached_decode.value().generated_tokens == 2);
+  assert(cached_decode.value().text ==
+         "\xE8" "\x8B" "\xB1" "\xE5" "\x9B" "\xBD" "\xEF" "\xBC" "\x88");
 
   request.sampling.do_sample = true;
   request.sampling.top_k_set = true;

@@ -33,6 +33,7 @@ struct CpuGenerationRequest {
   std::size_t max_new_tokens{16};
   std::size_t prefill_chunk_tokens{0};
   std::size_t logits_top_k{0};
+  bool parse_special_prompt{false};
   bool enable_thinking{false};
   std::vector<ChatMessage> messages;
   std::filesystem::path debug_dump_dir;

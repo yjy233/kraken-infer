@@ -49,12 +49,12 @@ struct GgufTokenizer {
   bool parse_special);
 [[nodiscard]] Result<std::vector<std::int64_t>> gguf_encode_qwen35_chat_prompt(
   const GgufTokenizer& tokenizer, const std::vector<ChatMessage>& messages,
-  bool add_generation_prompt);
+  bool add_generation_prompt, bool enable_thinking);
 [[nodiscard]] Result<std::string> gguf_decode_token_text(const GgufTokenizer& tokenizer,
                                                          const std::vector<std::int64_t>& ids,
                                                          bool skip_control);
 [[nodiscard]] Result<std::string> format_qwen35_chat_prompt(
   const GgufTokenizer& tokenizer, const std::vector<ChatMessage>& messages,
-  bool add_generation_prompt);
+  bool add_generation_prompt, bool enable_thinking);
 
 }  // namespace toyllm

@@ -53,6 +53,7 @@ void print_usage(std::string_view program) {
             << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
                " [--prefill-chunk-tokens N]"
                " [--device cpu|mps|mpsgraph]"
+               " [--parse-special]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--logits-top-k K]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
@@ -62,6 +63,7 @@ void print_usage(std::string_view program) {
             << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
                " [--prefill-chunk-tokens N]"
                " [--device cpu|mps|mpsgraph]"
+               " [--parse-special]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--logits-top-k K]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
@@ -360,7 +362,8 @@ void print_kv_cache_report(const toyllm::CpuKvCacheReport& report) {
 
 int run_cpu_generation(const std::string& model_path, const std::string& prompt,
                        std::size_t max_new_tokens, bool enable_thinking,
-                       std::size_t logits_top_k, std::size_t prefill_chunk_tokens,
+                       bool parse_special_prompt, std::size_t logits_top_k,
+                       std::size_t prefill_chunk_tokens,
                        const std::filesystem::path& debug_dump_dir, bool print_kv_cache_stats,
                        bool verify_kv_cache, toyllm::Device compute_device,
                        const toyllm::CpuSamplingConfig& sampling, bool stream,
@@ -376,6 +379,7 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
   request.max_new_tokens = max_new_tokens;
   request.prefill_chunk_tokens = prefill_chunk_tokens;
   request.logits_top_k = logits_top_k;
+  request.parse_special_prompt = parse_special_prompt;
   request.enable_thinking = enable_thinking;
   request.debug_dump_dir = debug_dump_dir;
   request.verify_kv_cache = verify_kv_cache;
@@ -1064,6 +1068,7 @@ int main(int argc, char** argv) {
   std::size_t max_new_tokens = 16;
   std::size_t prefill_chunk_tokens = 0;
   std::size_t logits_top_k = 0;
+  bool parse_special_prompt = false;
   bool enable_thinking = false;
   bool print_kv_cache_stats = false;
   bool verify_kv_cache = false;
@@ -1113,6 +1118,10 @@ int main(int argc, char** argv) {
     }
     if (arg_equals(argv[index], "--enable-thinking")) {
       enable_thinking = true;
+      continue;
+    }
+    if (arg_equals(argv[index], "--parse-special")) {
+      parse_special_prompt = true;
       continue;
     }
     if (arg_equals(argv[index], "--device") && index + 1 < argc) {
@@ -1222,8 +1231,9 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking, logits_top_k,
-                            prefill_chunk_tokens, debug_dump_dir, print_kv_cache_stats,
-                            verify_kv_cache, compute_device, sampling, stream,
+  return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking,
+                            parse_special_prompt, logits_top_k, prefill_chunk_tokens,
+                            debug_dump_dir, print_kv_cache_stats, verify_kv_cache,
+                            compute_device, sampling, stream,
                             observability);
 }

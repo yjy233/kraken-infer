@@ -394,3 +394,13 @@ source ~/.zshrc
   --profile summary \
   --profile-dir build/profiles
 ```
+
+```
+./build/debug/kraken-infer serve \
+  --host 127.0.0.1 \
+  --port 18080 \
+  --model models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
+  --model-id qwen3.5-0.8b \
+  --device mps \
+  --max-new-tokens 128
+```
