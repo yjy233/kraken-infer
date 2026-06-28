@@ -2,7 +2,10 @@
 #include "toyllm/backends/mpsgraph/mpsgraph_backend.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
+#include "toyllm/runtime/gguf_reader.hpp"
+#include "toyllm/runtime/gguf_tokenizer.hpp"
 #include "toyllm/runtime/openai_gateway.hpp"
+#include "toyllm/runtime/qwen35_runtime.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -32,21 +35,41 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program << " weights [model_dir]\n";
   std::cout << "  " << program << " doctor [model_dir]\n";
   std::cout << "  " << program
+            << " bench-qwen35-matmul --model <model_dir> --tensor <name>"
+               " [--tokens N] [--iterations N] [--warmup N] [--list]\n";
+  std::cout << "  " << program
+            << " bench-qwen35-gdn [--tokens N] [--key-heads N]"
+               " [--value-heads N] [--head-dim N]"
+               " [--iterations N] [--warmup N]\n";
+  std::cout << "  " << program
+            << " bench-qwen35-attention [--tokens N] [--start-position N]"
+               " [--capacity-tokens N] [--heads N] [--kv-heads N]"
+               " [--head-dim N] [--f16-kv|--f32-kv]"
+               " [--iterations N] [--warmup N]\n";
+  std::cout << "  " << program
+            << " tokenize --prompt <text> [--model <model_dir>] [--add-special]"
+               " [--parse-special]\n";
+  std::cout << "  " << program
             << " infer --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
+               " [--prefill-chunk-tokens N]"
                " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
+               " [--logits-top-k K]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n";
   std::cout << "  " << program
             << " run --prompt <text> [--model <model_dir>] [--max-new-tokens N]"
+               " [--prefill-chunk-tokens N]"
                " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
+               " [--logits-top-k K]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n";
   std::cout << "  " << program
             << " chat [model_dir] [--max-new-tokens N] [--enable-thinking] [--dump-dir DIR]"
+               " [--prefill-chunk-tokens N]"
                " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--kv-cache-stats] [--verify-kv-cache]"
@@ -56,7 +79,6 @@ void print_usage(std::string_view program) {
             << " serve [--host 127.0.0.1] [--port 8080] [--model <model_dir>]"
                " [--model-id ID] [--device cpu|mps|mpsgraph] [--max-new-tokens N]"
                " [--mpsgraph-warmup]"
-               " [--llama-server PATH] [--llama-cpp-dir DIR] [--llama-server-port N]"
                " [--mmproj PATH] [--ctx-size N] [--parallel N] [--no-mtp]\n\n";
   std::cout << "       [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n\n";
@@ -128,6 +150,11 @@ std::optional<toyllm::Device> parse_device_arg(std::string_view value) {
   return std::nullopt;
 }
 
+bool is_k_quant_2d_tensor(const toyllm::GgufTensorInfo& tensor) {
+  return tensor.shape.size() == 2U &&
+         (tensor.type == 12U || tensor.type == 13U || tensor.type == 14U);
+}
+
 int inspect_model(const std::filesystem::path& model_path) {
   auto bundle = toyllm::load_model_bundle(model_path);
   if (!bundle.is_ok()) {
@@ -182,6 +209,49 @@ int inspect_weights(const std::filesystem::path& model_path) {
   return EXIT_SUCCESS;
 }
 
+void print_token_ids(const std::vector<std::int64_t>& ids) {
+  std::cout << '[';
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    if (i != 0) {
+      std::cout << ", ";
+    }
+    std::cout << ids[i];
+  }
+  std::cout << "]\n";
+}
+
+int run_tokenize(const std::filesystem::path& model_path, std::string_view prompt,
+                 bool add_special, bool parse_special) {
+  if (prompt.empty()) {
+    std::cerr << "tokenize requires --prompt.\n";
+    return EXIT_FAILURE;
+  }
+
+  const auto gguf_path = toyllm::resolve_gguf_model_path(model_path);
+  if (!gguf_path.is_ok()) {
+    std::cerr << "Failed to resolve GGUF model: " << gguf_path.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto gguf = toyllm::read_gguf_file(gguf_path.value());
+  if (!gguf.is_ok()) {
+    std::cerr << "Failed to read GGUF model: " << gguf.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto tokenizer = toyllm::load_gguf_tokenizer(gguf.value());
+  if (!tokenizer.is_ok()) {
+    std::cerr << "Failed to load GGUF tokenizer: " << tokenizer.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto ids =
+    toyllm::gguf_encode_text(tokenizer.value(), prompt, add_special, parse_special);
+  if (!ids.is_ok()) {
+    std::cerr << "Failed to tokenize prompt: " << ids.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+  print_token_ids(ids.value());
+  return EXIT_SUCCESS;
+}
+
 int run_doctor(const std::filesystem::path& model_path) {
   std::cout << "kraken-infer " << kVersion << '\n';
   std::cout << "\n== MPS ==\n";
@@ -209,6 +279,68 @@ int run_doctor(const std::filesystem::path& model_path) {
   return inspect_weights(model_path);
 }
 
+int list_qwen35_matmul_tensors(const std::filesystem::path& model_path) {
+  const auto gguf_path = toyllm::resolve_gguf_model_path(model_path);
+  if (!gguf_path.is_ok()) {
+    std::cerr << "Failed to resolve GGUF model: " << gguf_path.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto gguf = toyllm::read_gguf_file(gguf_path.value());
+  if (!gguf.is_ok()) {
+    std::cerr << "Failed to read GGUF model: " << gguf.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << "Qwen3.5 K-quant matmul tensors:\n";
+  std::cout << "GGUF: " << gguf_path.value().string() << '\n';
+  for (const auto& tensor : gguf.value().tensors) {
+    if (!is_k_quant_2d_tensor(tensor)) {
+      continue;
+    }
+    std::cout << "- " << tensor.name << " [" << tensor.shape[0] << ", "
+              << tensor.shape[1] << "] " << toyllm::ggml_type_name(tensor.type)
+              << '\n';
+  }
+  return EXIT_SUCCESS;
+}
+
+int run_qwen35_matmul_bench(const toyllm::Qwen35MatmulBenchConfig& config) {
+  const auto result = toyllm::benchmark_qwen35_metal_matmul(config);
+  if (!result.is_ok()) {
+    std::cerr << "Qwen3.5 matmul bench failed: "
+              << result.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << toyllm::format_qwen35_matmul_bench_result(result.value());
+  return EXIT_SUCCESS;
+}
+
+int run_qwen35_gdn_bench(const toyllm::Qwen35GdnBenchConfig& config) {
+  const auto result = toyllm::benchmark_qwen35_metal_gdn(config);
+  if (!result.is_ok()) {
+    std::cerr << "Qwen3.5 GDN bench failed: "
+              << result.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << toyllm::format_qwen35_gdn_bench_result(result.value());
+  return EXIT_SUCCESS;
+}
+
+int run_qwen35_attention_bench(
+  const toyllm::Qwen35AttentionBenchConfig& config) {
+  const auto result = toyllm::benchmark_qwen35_metal_attention(config);
+  if (!result.is_ok()) {
+    std::cerr << "Qwen3.5 attention bench failed: "
+              << result.status().message() << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::cout << toyllm::format_qwen35_attention_bench_result(result.value());
+  return EXIT_SUCCESS;
+}
+
 void print_kv_cache_report(const toyllm::CpuKvCacheReport& report) {
   if (!report.available) {
     return;
@@ -228,6 +360,7 @@ void print_kv_cache_report(const toyllm::CpuKvCacheReport& report) {
 
 int run_cpu_generation(const std::string& model_path, const std::string& prompt,
                        std::size_t max_new_tokens, bool enable_thinking,
+                       std::size_t logits_top_k, std::size_t prefill_chunk_tokens,
                        const std::filesystem::path& debug_dump_dir, bool print_kv_cache_stats,
                        bool verify_kv_cache, toyllm::Device compute_device,
                        const toyllm::CpuSamplingConfig& sampling, bool stream,
@@ -241,6 +374,8 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
   request.model_dir = std::filesystem::path{model_path};
   request.prompt = prompt;
   request.max_new_tokens = max_new_tokens;
+  request.prefill_chunk_tokens = prefill_chunk_tokens;
+  request.logits_top_k = logits_top_k;
   request.enable_thinking = enable_thinking;
   request.debug_dump_dir = debug_dump_dir;
   request.verify_kv_cache = verify_kv_cache;
@@ -282,7 +417,8 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
 
 int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens,
              bool enable_thinking, const std::filesystem::path& debug_dump_dir,
-             bool print_kv_cache_stats, bool verify_kv_cache, toyllm::Device compute_device,
+             bool print_kv_cache_stats, bool verify_kv_cache,
+             std::size_t prefill_chunk_tokens, toyllm::Device compute_device,
              const toyllm::CpuSamplingConfig& sampling, bool stream,
              const toyllm::ObservabilityConfig& observability) {
   std::cout << "kraken-infer chat\n";
@@ -311,6 +447,7 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
     toyllm::CpuGenerationRequest request;
     request.model_dir = model_path;
     request.max_new_tokens = max_new_tokens;
+    request.prefill_chunk_tokens = prefill_chunk_tokens;
     request.enable_thinking = enable_thinking;
     request.messages = messages;
     request.debug_dump_dir = debug_dump_dir;
@@ -425,6 +562,244 @@ int main(int argc, char** argv) {
     return run_doctor(model_path);
   }
 
+  if (arg_equals(argv[1], "bench-qwen35-matmul")) {
+    toyllm::Qwen35MatmulBenchConfig config;
+    config.model_dir = default_model_path();
+    bool list_tensors = false;
+    for (int index = 2; index < argc; ++index) {
+      if (arg_equals(argv[index], "--model") && index + 1 < argc) {
+        config.model_dir = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--tensor") && index + 1 < argc) {
+        config.tensor_name = argv[++index];
+        continue;
+      }
+      if (arg_equals(argv[index], "--tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--tokens must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--iterations") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--iterations must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.timed_iterations = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--warmup") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--warmup must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.warmup_iterations = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--list")) {
+        list_tensors = true;
+        continue;
+      }
+      std::cerr << "Unknown bench-qwen35-matmul option: " << argv[index] << '\n';
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    if (list_tensors) {
+      return list_qwen35_matmul_tensors(config.model_dir);
+    }
+    return run_qwen35_matmul_bench(config);
+  }
+
+  if (arg_equals(argv[1], "bench-qwen35-gdn")) {
+    toyllm::Qwen35GdnBenchConfig config;
+    for (int index = 2; index < argc; ++index) {
+      if (arg_equals(argv[index], "--tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--tokens must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--key-heads") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--key-heads must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.key_heads = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--value-heads") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--value-heads must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.value_heads = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--head-dim") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--head-dim must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.head_dim = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--iterations") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--iterations must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.timed_iterations = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--warmup") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--warmup must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.warmup_iterations = *parsed;
+        continue;
+      }
+      std::cerr << "Unknown bench-qwen35-gdn option: " << argv[index] << '\n';
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    return run_qwen35_gdn_bench(config);
+  }
+
+  if (arg_equals(argv[1], "bench-qwen35-attention")) {
+    toyllm::Qwen35AttentionBenchConfig config;
+    for (int index = 2; index < argc; ++index) {
+      if (arg_equals(argv[index], "--tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--tokens must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--start-position") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--start-position must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.start_position = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--capacity-tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--capacity-tokens must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.capacity_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--heads") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--heads must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.heads = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--kv-heads") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--kv-heads must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.kv_heads = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--head-dim") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--head-dim must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.head_dim = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--iterations") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--iterations must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.timed_iterations = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--warmup") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--warmup must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.warmup_iterations = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--f16-kv")) {
+        config.f16_kv = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--f32-kv")) {
+        config.f16_kv = false;
+        continue;
+      }
+      std::cerr << "Unknown bench-qwen35-attention option: "
+                << argv[index] << '\n';
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    return run_qwen35_attention_bench(config);
+  }
+
+  if (arg_equals(argv[1], "tokenize")) {
+    std::filesystem::path model_path = default_model_path();
+    std::string prompt;
+    bool add_special = false;
+    bool parse_special = false;
+    for (int index = 2; index < argc; ++index) {
+      if (arg_equals(argv[index], "--model") && index + 1 < argc) {
+        model_path = std::filesystem::path{argv[++index]};
+        continue;
+      }
+      if (arg_equals(argv[index], "--prompt") && index + 1 < argc) {
+        prompt = argv[++index];
+        continue;
+      }
+      if (arg_equals(argv[index], "--add-special")) {
+        add_special = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--parse-special")) {
+        parse_special = true;
+        continue;
+      }
+      std::cerr << "Unknown tokenize option: " << argv[index] << '\n';
+      print_usage(argv[0]);
+      return EXIT_FAILURE;
+    }
+    return run_tokenize(model_path, prompt, add_special, parse_special);
+  }
+
   if (arg_equals(argv[1], "serve")) {
     toyllm::OpenAIGatewayConfig config;
     config.model_dir = default_model_path();
@@ -472,23 +847,6 @@ int main(int argc, char** argv) {
       }
       if (arg_equals(argv[index], "--mpsgraph-warmup")) {
         config.mpsgraph_warmup = true;
-        continue;
-      }
-      if (arg_equals(argv[index], "--llama-server") && index + 1 < argc) {
-        config.llama_server_path = std::filesystem::path{argv[++index]};
-        continue;
-      }
-      if (arg_equals(argv[index], "--llama-cpp-dir") && index + 1 < argc) {
-        config.llama_cpp_dir = std::filesystem::path{argv[++index]};
-        continue;
-      }
-      if (arg_equals(argv[index], "--llama-server-port") && index + 1 < argc) {
-        const auto parsed = parse_size_arg(argv[++index]);
-        if (!parsed.has_value() || *parsed == 0 || *parsed > 65535U) {
-          std::cerr << "--llama-server-port must be a positive integer.\n";
-          return EXIT_FAILURE;
-        }
-        config.llama_server_port = static_cast<int>(*parsed);
         continue;
       }
       if (arg_equals(argv[index], "--mmproj") && index + 1 < argc) {
@@ -549,6 +907,7 @@ int main(int argc, char** argv) {
   if (arg_equals(argv[1], "chat")) {
     std::filesystem::path model_path = default_model_path();
     std::size_t max_new_tokens = 16;
+    std::size_t prefill_chunk_tokens = 0;
     bool enable_thinking = false;
     bool print_kv_cache_stats = false;
     bool verify_kv_cache = false;
@@ -571,6 +930,15 @@ int main(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         max_new_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--prefill-chunk-tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--prefill-chunk-tokens must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        prefill_chunk_tokens = *parsed;
         continue;
       }
       if (arg_equals(argv[index], "--enable-thinking")) {
@@ -686,14 +1054,16 @@ int main(int argc, char** argv) {
       model_path_set = true;
     }
     return run_chat(model_path, max_new_tokens, enable_thinking, debug_dump_dir,
-                    print_kv_cache_stats, verify_kv_cache, compute_device, sampling, stream,
-                    observability);
+                    print_kv_cache_stats, verify_kv_cache, prefill_chunk_tokens,
+                    compute_device, sampling, stream, observability);
   }
 
   const bool explicit_generation = arg_equals(argv[1], "run") || arg_equals(argv[1], "infer");
   const bool legacy_generation = !explicit_generation;
   const int first_option = explicit_generation ? 2 : 1;
   std::size_t max_new_tokens = 16;
+  std::size_t prefill_chunk_tokens = 0;
+  std::size_t logits_top_k = 0;
   bool enable_thinking = false;
   bool print_kv_cache_stats = false;
   bool verify_kv_cache = false;
@@ -721,6 +1091,24 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
       }
       max_new_tokens = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--prefill-chunk-tokens") && index + 1 < argc) {
+      const auto parsed = parse_size_arg(argv[++index]);
+      if (!parsed.has_value() || *parsed == 0) {
+        std::cerr << "--prefill-chunk-tokens must be a positive integer.\n";
+        return EXIT_FAILURE;
+      }
+      prefill_chunk_tokens = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--logits-top-k") && index + 1 < argc) {
+      const auto parsed = parse_size_arg(argv[++index]);
+      if (!parsed.has_value()) {
+        std::cerr << "--logits-top-k must be a non-negative integer.\n";
+        return EXIT_FAILURE;
+      }
+      logits_top_k = *parsed;
       continue;
     }
     if (arg_equals(argv[index], "--enable-thinking")) {
@@ -834,7 +1222,8 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking, debug_dump_dir,
-                            print_kv_cache_stats, verify_kv_cache, compute_device, sampling,
-                            stream, observability);
+  return run_cpu_generation(model_path, prompt, max_new_tokens, enable_thinking, logits_top_k,
+                            prefill_chunk_tokens, debug_dump_dir, print_kv_cache_stats,
+                            verify_kv_cache, compute_device, sampling, stream,
+                            observability);
 }

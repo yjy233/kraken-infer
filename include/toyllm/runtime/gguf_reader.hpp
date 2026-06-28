@@ -2,8 +2,10 @@
 
 #include "toyllm/core/status.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -58,10 +60,41 @@ struct GgufFile {
   std::unordered_map<std::string, GgufMetadataValue> metadata;
 };
 
+struct GgufTensorBytes {
+  const std::byte* data{nullptr};
+  std::size_t size{0};
+};
+
+class GgufMappedData {
+ public:
+  GgufMappedData();
+  ~GgufMappedData();
+
+  GgufMappedData(const GgufMappedData&) = delete;
+  GgufMappedData& operator=(const GgufMappedData&) = delete;
+
+  GgufMappedData(GgufMappedData&& other) noexcept;
+  GgufMappedData& operator=(GgufMappedData&& other) noexcept;
+
+  [[nodiscard]] static Result<GgufMappedData> open(const GgufFile& file);
+  [[nodiscard]] bool valid() const;
+  [[nodiscard]] std::uint64_t size() const;
+  [[nodiscard]] Result<GgufTensorBytes> tensor_bytes(const GgufTensorInfo& tensor) const;
+
+ private:
+  struct Impl;
+
+  explicit GgufMappedData(std::unique_ptr<Impl> impl);
+
+  std::unique_ptr<Impl> impl_;
+};
+
 [[nodiscard]] Result<std::filesystem::path> resolve_gguf_model_path(
   const std::filesystem::path& path);
 [[nodiscard]] Result<GgufFile> read_gguf_file(const std::filesystem::path& path);
 
+[[nodiscard]] const GgufTensorInfo* find_gguf_tensor(const GgufFile& file,
+                                                     const std::string& name);
 [[nodiscard]] const GgufMetadataValue* find_gguf_metadata(const GgufFile& file,
                                                           const std::string& key);
 [[nodiscard]] std::string gguf_value_kind_name(GgufValueKind kind);

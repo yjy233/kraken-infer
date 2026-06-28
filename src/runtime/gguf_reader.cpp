@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -440,6 +441,83 @@ std::string join_values(const std::vector<T>& values) {
 
 }  // namespace
 
+struct GgufMappedData::Impl {
+  std::filesystem::path path;
+  int fd{-1};
+  const std::byte* data{nullptr};
+  std::uint64_t size{0};
+
+  ~Impl() {
+    if (data != nullptr) {
+      (void)::munmap(const_cast<std::byte*>(data), static_cast<std::size_t>(size));
+    }
+    if (fd >= 0) {
+      (void)::close(fd);
+    }
+  }
+};
+
+GgufMappedData::GgufMappedData() = default;
+GgufMappedData::~GgufMappedData() = default;
+GgufMappedData::GgufMappedData(GgufMappedData&& other) noexcept = default;
+GgufMappedData& GgufMappedData::operator=(GgufMappedData&& other) noexcept = default;
+GgufMappedData::GgufMappedData(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+Result<GgufMappedData> GgufMappedData::open(const GgufFile& file) {
+  auto impl = std::make_unique<Impl>();
+  impl->path = file.path;
+  impl->fd = ::open(impl->path.c_str(), O_RDONLY);
+  if (impl->fd < 0) {
+    return Status::invalid_argument("failed to open GGUF data file: " +
+                                    impl->path.string());
+  }
+
+  struct stat file_stat {};
+  if (::fstat(impl->fd, &file_stat) != 0 || file_stat.st_size <= 0) {
+    return Status::invalid_argument("invalid GGUF data file size: " +
+                                    impl->path.string());
+  }
+  impl->size = static_cast<std::uint64_t>(file_stat.st_size);
+  if (impl->size != file.file_size) {
+    return Status::invalid_argument("GGUF data file size changed after metadata read: " +
+                                    impl->path.string());
+  }
+  void* mapped =
+    ::mmap(nullptr, static_cast<std::size_t>(impl->size), PROT_READ, MAP_PRIVATE,
+           impl->fd, 0);
+  if (mapped == MAP_FAILED) {
+    return Status::invalid_argument("failed to mmap GGUF data file: " +
+                                    impl->path.string());
+  }
+  impl->data = static_cast<const std::byte*>(mapped);
+  return GgufMappedData(std::move(impl));
+}
+
+bool GgufMappedData::valid() const {
+  return impl_ != nullptr && impl_->data != nullptr && impl_->size > 0;
+}
+
+std::uint64_t GgufMappedData::size() const {
+  return impl_ == nullptr ? 0 : impl_->size;
+}
+
+Result<GgufTensorBytes> GgufMappedData::tensor_bytes(const GgufTensorInfo& tensor) const {
+  if (!valid()) {
+    return Status::invalid_argument("GGUF mapped data is not initialized");
+  }
+  if (tensor.byte_size > std::numeric_limits<std::size_t>::max()) {
+    return Status::invalid_argument("GGUF tensor byte size exceeds size_t: " +
+                                    tensor.name);
+  }
+  if (tensor.absolute_offset > impl_->size ||
+      tensor.byte_size > impl_->size - tensor.absolute_offset) {
+    return Status::invalid_argument("GGUF tensor byte range exceeds mapped file: " +
+                                    tensor.name);
+  }
+  return GgufTensorBytes{impl_->data + tensor.absolute_offset,
+                         static_cast<std::size_t>(tensor.byte_size)};
+}
+
 Result<std::filesystem::path> resolve_gguf_model_path(const std::filesystem::path& path) {
   if (!std::filesystem::exists(path)) {
     return Status::unavailable("model path does not exist: " + path.string());
@@ -547,6 +625,17 @@ const GgufMetadataValue* find_gguf_metadata(const GgufFile& file, const std::str
     return nullptr;
   }
   return &it->second;
+}
+
+const GgufTensorInfo* find_gguf_tensor(const GgufFile& file, const std::string& name) {
+  const auto it = std::find_if(file.tensors.begin(), file.tensors.end(),
+                               [&](const GgufTensorInfo& tensor) {
+                                 return tensor.name == name;
+                               });
+  if (it == file.tensors.end()) {
+    return nullptr;
+  }
+  return &*it;
 }
 
 std::string gguf_value_kind_name(GgufValueKind kind) {

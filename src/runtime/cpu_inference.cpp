@@ -1,17 +1,47 @@
 #include "toyllm/runtime/cpu_inference.hpp"
 
+#include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/mpsgraph_inference.hpp"
 #include "toyllm/backends/mps/mps_backend.hpp"
-#include "toyllm/runtime/llama_cpp_bridge.hpp"
+#include "toyllm/runtime/qwen35_runtime.hpp"
 #include "cpu/qwen_cpu_model.hpp"
 
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace toyllm {
 
 namespace {
+
+std::string escape_debug_text(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char character : value) {
+    switch (character) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        escaped.push_back(character);
+        break;
+    }
+  }
+  return escaped;
+}
 
 CpuKvCacheReport to_public_report(const cpu::KvCacheStats& stats) {
   return CpuKvCacheReport{
@@ -31,42 +61,8 @@ CpuKvCacheReport to_public_report(const cpu::KvCacheStats& stats) {
 }  // namespace
 
 Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
-  if (is_gguf_model_path(request.model_dir)) {
-    if (request.max_new_tokens == 0) {
-      return Status::invalid_argument("max_new_tokens must be greater than zero");
-    }
-    LlamaCppGenerationRequest llama_request;
-    llama_request.server.model_path = request.model_dir;
-    llama_request.server.model_alias = "kraken-infer-gguf";
-    llama_request.server.compute_device = request.compute_device;
-    llama_request.prompt = request.prompt;
-    llama_request.messages = request.messages;
-    llama_request.max_new_tokens = request.max_new_tokens;
-    llama_request.stream = static_cast<bool>(request.stream_token);
-    llama_request.stream_token = request.stream_token;
-    llama_request.observability = request.observability;
-    if (request.sampling.temperature_set) {
-      llama_request.temperature = request.sampling.temperature;
-    }
-    if (request.sampling.top_p_set) {
-      llama_request.top_p = request.sampling.top_p;
-    }
-    if (request.sampling.seed_set) {
-      llama_request.seed = request.sampling.seed;
-      llama_request.seed_set = true;
-    }
-
-    auto generated = generate_with_llama_cpp(llama_request);
-    if (!generated.is_ok()) {
-      return generated.status();
-    }
-    CpuGenerationResult result{};
-    result.implemented = true;
-    result.text = generated.value().text;
-    result.finish_reason = generated.value().finish_reason;
-    result.prompt_tokens = generated.value().prompt_tokens;
-    result.generated_tokens = generated.value().generated_tokens;
-    return result;
+  if (resolve_gguf_model_path(request.model_dir).is_ok()) {
+    return generate_qwen35_metal(request);
   }
   if (request.prompt.empty() && request.messages.empty()) {
     return Status::invalid_argument("prompt must not be empty");
@@ -133,7 +129,18 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
 
 std::string format_cpu_generation_result(const CpuGenerationResult& result) {
   if (result.implemented) {
-    return result.text + '\n';
+    std::ostringstream output;
+    output << result.text << '\n';
+    if (!result.logits_top.empty()) {
+      output << "logits_top:\n";
+      for (std::size_t index = 0; index < result.logits_top.size(); ++index) {
+        const auto& entry = result.logits_top[index];
+        output << index << " token_id=" << entry.token_id
+               << " logit=" << entry.logit
+               << " text=\"" << escape_debug_text(entry.text) << "\"\n";
+      }
+    }
+    return output.str();
   }
 
   std::ostringstream output;

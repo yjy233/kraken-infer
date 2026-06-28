@@ -11,6 +11,43 @@
 
 性能目标是和 llama.cpp Metal 路径同量级。Qwen3.5 路径只接受 GGUF，不复用现有 safetensors 权重加载路径；现有 Qwen3 0.6B safetensors 路径可以继续作为旧模型兼容路径存在。
 
+## 最终目标和边界
+
+最终目标是在本仓库内实现一个独立的 Qwen3.5 0.8B GGUF runtime 和 macOS Metal backend，执行行为、模型覆盖和性能都对齐 llama.cpp 的 Metal 路径。这里的“参考 llama.cpp”不是长期调用、链接或代理 llama.cpp，而是把必要的关键实现迁移、改写并维护在本仓库内。
+
+最终交付必须满足：
+
+- 不依赖 `~/code/llama.cpp` 源码目录。
+- 不依赖 `llama-server`、`llama-cli` 或任何 llama.cpp 运行时进程。
+- 不链接 `libllama`、`libggml`、`libggml-metal` 或其他 llama.cpp 构建产物。
+- 不通过 HTTP、子进程、C API bridge、动态库或静态库绕回 llama.cpp。
+- 可以临时创建 `third-party/` 并拷贝 llama.cpp 代码作为阅读和迁移用 staging area，但最终必须删除该目录或确保它不参与构建和运行。
+- 可以复制/改写 llama.cpp 的关键算法、数据结构和 Metal kernel，但迁入代码必须落在本仓库的命名空间、构建系统和 backend 边界内，并保留必要的许可证/来源标注。
+
+macOS 是唯一目标平台。Qwen3.5 runtime 不做 CPU fallback，不以 CPU reference path 作为生产执行路径；CPU 只允许作为离线调试、shape validation 或测试对齐辅助。核心推理链路必须走本仓库自己的 Metal backend，包括 GGUF quantized matmul、full attention、gated delta net recurrent attention、hybrid KV/recurrent cache、MRoPE、sampling 所需的 logits path，以及后续 MTP/MoE/多模态路径。
+
+旧的 `llama_cpp_bridge` 不属于最终方案，已从当前构建和源码中移除。任何新功能都应继续朝“原生 GGUF + 原生 Metal backend”收敛，不能重新引入 bridge/server/libllama 的使用面。
+
+## 当前迁移状态
+
+- 已有 `gguf_reader` 可读取 Qwen3.5 0.8B GGUF metadata 和 tensor directory。
+- 已新增原生 Qwen3.5 dense weight map，按 llama.cpp `qwen35.cpp` 的张量命名校验 token embedding、output norm、full attention 层、linear recurrent attention 层和 MTP 层。
+- 已新增 GGUF tensor payload mmap 访问层，可按 tensor directory 返回不复制的 byte span，作为后续 Metal weight upload 和 quantized kernel 的输入。
+- 已新增 GGUF tokenizer metadata loader 和 Qwen3.5 BPE encode/decode，可读取 `tokenizer.ggml.tokens`、`tokenizer.ggml.token_type`、`tokenizer.ggml.merges`、special token id 和 `tokenizer.chat_template`，并能生成/编码 Qwen chat prompt。基础英文、数字和 chat control token 样例已用 llama.cpp `llama-tokenize` 参考 id 固化到 smoke test。
+- 已新增 `kraken-infer tokenize` GGUF tokenizer 对齐工具，可直接输出本仓库 native tokenizer 的 token id，便于继续和 llama.cpp 做一次性参考对比。
+- Metal backend 已新增 Q4_K/Q5_K/Q6_K matvec、llama.cpp-style 64x32 simdgroup K-quant `mul_mm`、F32 MPSMatrix matmul、F32 norm/activation/row copy、Qwen3.5 Q/K/V split+L2 norm fused kernel、Qwen3.5 beta/gate prepare fused kernel、实验性 Qwen3.5 norm-gated fused kernel、MRoPE、SSM conv state build、batched gated delta net 和 batched causal attention；single-token full attention decode 支持 F32 KV 和默认 F16 KV，prefill full-attention 现在优先走 Qwen3.5 形状专用的 `flash256` kernel（8 queries/threadgroup、64 KV columns/block、`DK=DV=256`、内置 causal mask），兼容条件是 `head_dim=256`；F16 KV cache 默认开启并通过 F32->F16 cache writeback、F16 single-token attention、F16 batched online fallback 和 F16 flash256 读取完成，`KRAKEN_QWEN35_F16_KV=0` 可回退 F32 KV。非 64 对齐的当前 KV 长度会在 GPU 侧只为最后一个 partial block 做 K/V tail padding，再进入同一个 flash kernel；`KRAKEN_QWEN35_FLASH_ATTENTION=0` 可禁用，`1` 可强制兼容形状使用。短 chunk 或不兼容形状回退到稳定的 8-query simdgroup online-softmax kernel；长 chunk (`tokens >= 1024`) 的非 flash fallback 仍可切到共享 K/V threadgroup tile kernel，默认 KV tile 为 16；`KRAKEN_QWEN35_TILED_ATTENTION=1` 可强制 16-token 以上启用，`0/false/off/no` 可禁用，`KRAKEN_QWEN35_TILED_ATTENTION_TILE=32` 可在设备支持时启用 32-token KV tile specialization。该路径已用 Qwen 实际维度 `heads=8, kv_heads=2, head_dim=256` 的非零 Q/K/V smoke test、65-token 非对齐 F32/F16 tail smoke test、64-token logits top-k 和 520-token generation 对齐默认路径。上述算子覆盖 Qwen3.5 dense 0.8B 当前 Q4_K_M GGUF 的原生 Metal forward 所需基础算子。
+- GGUF generation 默认入口已切到本仓库的 `generate_qwen35_metal`，不再默认转发到 `llama.cpp` server bridge。
+- 旧 `llama_cpp_bridge` header/source、CMake 编译项、gateway proxy 分支和 CLI `--llama-*` 参数已移除。
+- 当前 `generate_qwen35_metal` 已完成 GGUF 加载、Metal 权重上传、chunked prefill、hybrid KV/recurrent cache、full attention 层、linear recurrent attention 层、final logits、device-side argmax、logits top-k readback、greedy multi-token decode，以及基础 `top_k`/`top_p`/`temperature`/`seed` 采样。默认 greedy 路径仍只读回设备侧 argmax；只有启用采样时才读回最后一行 logits，并按 llama.cpp common sampler 的 `top_k -> top_p -> temperature -> dist` 基本顺序做 host-side sampling。
+- full attention 的 joint Q/G projection 已按 llama.cpp 的 per-head interleaved layout 拆分，`hello` 与 `hello world` 的首步 logits top token/logit 已和 llama.cpp 对齐。Q4_K/Q5_K/Q6_K prompt projection 已按 llama.cpp dispatch 分成 4-8 token `mul_mv_ext` 和 >8 token 64x32 simdgroup K-quant `mul_mm`，均直接消费 GGUF block 权重；linear recurrent attention 的 batched GDN 现在对 Qwen3.5 `head_dim=128`、`key_heads=value_heads` 走 llama.cpp-style simdgroup specialization，每个 threadgroup 覆盖 4 个 state rows，用 `simd_sum` 替代旧通用 kernel 的 threadgroup reduction/barrier；卷积后 Q/K/V 拆分和 Q/K L2 norm、以及 beta sigmoid + alpha bias/softplus/scale 在普通推理路径已融合成 Qwen3.5 Metal kernel，debug dump 路径仍保留旧中间张量语义。GDN 后的 norm-gated fused kernel 已实现并可用 `KRAKEN_QWEN35_FUSED_NORM_GATED=1` 实验开启，但一次 11k 测得约 19.69s，慢于默认路径，因此暂不默认启用。
+- CLI/request 已暴露 `--prefill-chunk-tokens N`，默认现在是 1024。prefill 现在默认按 chunk 提交 Metal command buffer，避免 11k prompt 全部塞进一个超大 command buffer；`KRAKEN_QWEN35_PREFILL_COMMIT=single` 可回退旧单次提交，`layer` 仅用于诊断且极慢。默认 F16 KV cache 将 65-token `hello` prompt 的真实模型 KV bytes 从 1,646,592 降到 823,296，top-5 token 顺序和 F32 KV 一致。
+- 性能记录：520 个 `hello` token、2-token decode 的粗略 wall-clock 约 2.0-2.1s；2048-token prompt 在 chunk=2048、F16 KV + auto flash256 下约 5.37s，`KRAKEN_QWEN35_F16_KV=0` 的 F32 KV 约 5.51s，`KRAKEN_QWEN35_FLASH_ATTENTION=0` 回退 tiled path 后约 6.07s，早前禁用 tiled 后约 6.75s；11k `hello` prompt 在默认 F16 KV、auto flash256、chunk command-buffer 提交、optimized GDN、fused Q/K/V split+L2 norm、fused beta/gate prepare 和 reusable flash-tail scratch 下完成并输出 ` hello`。早前默认路径 wall-clock 约 16.97-17.38s；最新 profile summary total 约 15.58s，prefill 约 14.41s，prefill commit 约 14.33s，`/usr/bin/time` wall-clock 约 15.75s。优化前 chunk sweep 显示 1024 约 25.76s、512 约 27.52s、1536 约 35.74s、2048 约 38.10s，因此默认切到 1024；旧单大图提交约 57-66s。
+- 最新 llama.cpp 参考同机 `llama-bench pp11000` 为 814.58 ± 8.05 tok/s，即纯 prefill 约 13.50s。按纯 prefill 口径，当前 native 约慢 1.07x，耗时多约 0.90s，吞吐低约 6.3%。旧的转置 F32 dense `MPSMatrixMultiplication` bridge 仍可用 `KRAKEN_QWEN35_DENSE_PREFILL=1` 显式打开作对照，但 11k 本次测得约 67.07s，慢于默认 quant path；简单 row-token tiling 已测试并拒绝，因为会把 520-token prompt 从 14s 区间回退到 24s 区间。仍待迁移/优化的是 chunk 内 quant matmul、完整 llama.cpp flash-attention parity、llama.cpp backend sampler/offloaded sampler parity、MTP/speculative、MoE/多模态路径和全 prompt 阈值化 logits 对齐。
+- 已新增 `kraken-infer bench-qwen35-matmul` 原生诊断入口，用真实 GGUF 2D Q4_K/Q5_K/Q6_K tensor 调用当前 `MpsContext::matmul_q*_k_f32_device` 路径，并以一次 graph commit 作为一次 timed iteration。`--list` 可列出可测 tensor；例如 `blk.0.attn_qkv.weight` 在 `--tokens 16 --iterations 1 --warmup 0` 下已验证能走 Q5_K Metal path 并返回 checksum。benchmark 输出和普通 trace span 都带 `dispatch` 字段，1024-token prompt projection 应显示 `mul_mm_simd_64x32`，4-8 token 小 batch 应显示 `mul_mv_ext_r1_*`。Apple M4 上 1024-token、2 warmup、10 timed iteration 的当前 baseline 是：`blk.0.attn_qkv.weight` Q5_K 约 5.84ms，`blk.0.ffn_gate.weight` Q4_K 约 3.58ms，`blk.0.ffn_down.weight` Q6_K 约 3.84ms，`blk.0.ssm_out.weight` Q4_K 约 2.53ms。这个入口只用于定位 chunk 内 quant `mul_mm` 性能差距，不依赖 llama.cpp/libllama，也不改变默认推理路径。
+- 已新增 `kraken-infer bench-qwen35-gdn` 原生诊断入口，用 Qwen3.5 标准形状的 synthetic F32 Q/K/V/gate/beta/state buffer 调用当前 fused GDN backend。Apple M4 上 `tokens=1024,key_heads=value_heads=16,head_dim=128` 的 `qwen35_simdgroup_4rows` dispatch 约 4.98ms；760-token final chunk 形状约 4.13ms。这个入口用于拆分 recurrent layer 的 GDN 成本，不依赖 llama.cpp/libllama，也不改变默认推理路径。
+- 已新增 `kraken-infer bench-qwen35-attention` 原生诊断入口，用 Qwen3.5 full-attention 标准形状的 synthetic Q/K/V cache buffer 调用当前 `attention_f32_batched_f16_kv` 默认路径。Apple M4 上 `tokens=1024,start=0,key_count=1024,heads=8,kv_heads=2,head_dim=256` 的 `flash256_f16_kv` dispatch 约 5.59ms；11k final chunk 形状 `tokens=760,start=10240,capacity=11000,key_count=11000` 在 reusable flash-tail scratch 后约 50.06ms，并显示 `flash256_f16_kv+tail`。这个入口会把 backend 内部的非 64 对齐 tail padding 计入 attention 耗时，用于后续逐项对照 llama.cpp Metal flash-attn kernel，不依赖 llama.cpp/libllama，也不改变默认推理路径。
+- 最新同机 11k prompt 对比：`llama-bench -p 11000 -n 0 -ngl 99` 测得 `pp11000=814.58 ± 8.05 tok/s`，纯 prefill 约 13.50s；本仓库默认 native 路径同一模型 `--max-new-tokens 1 --profile summary` 测得 `prefill_ms=14407`，约 14.41s、763.5 tok/s。按纯 prefill 口径，当前 native 约慢 1.07x，耗时多约 0.90s，吞吐低约 6.3%。端到端 wall-clock 因包含 decode、logits、CLI 和 profile 开销，不和 `llama-bench -n 0` 直接等价。
+
 ## llama.cpp 参考点
 
 核心参考文件：

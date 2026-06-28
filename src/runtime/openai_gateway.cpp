@@ -1,7 +1,7 @@
 #include "toyllm/runtime/openai_gateway.hpp"
 
 #include "toyllm/runtime/cpu_inference.hpp"
-#include "toyllm/runtime/llama_cpp_bridge.hpp"
+#include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/mpsgraph_inference.hpp"
 
 #include <arpa/inet.h>
@@ -1131,77 +1131,6 @@ HttpRequest read_http_request(int fd) {
   return request;
 }
 
-std::vector<std::pair<std::string, std::string>> proxy_headers(const HttpRequest& request) {
-  std::vector<std::pair<std::string, std::string>> headers;
-  headers.reserve(request.headers.size() + 1U);
-  bool has_content_type = false;
-  for (const auto& entry : request.headers) {
-    if (entry.first == "host" || entry.first == "connection" ||
-        entry.first == "content-length") {
-      continue;
-    }
-    if (entry.first == "content-type") {
-      has_content_type = true;
-    }
-    headers.emplace_back(entry.first, entry.second);
-  }
-  if (!has_content_type) {
-    headers.emplace_back("content-type", "application/json");
-  }
-  return headers;
-}
-
-bool should_proxy_to_llama_cpp(const OpenAIGatewayConfig& config, const HttpRequest& request) {
-  if (!is_gguf_model_path(config.model_dir)) {
-    return false;
-  }
-  if (request.path == "/health" || request.path == "/v1/health") {
-    return true;
-  }
-  if (request.path == "/v1/models" || request.path == "/props" ||
-      request.path == "/v1/completions" || request.path == "/v1/chat/completions" ||
-      request.path == "/v1/embeddings" || request.path == "/v1/responses") {
-    return true;
-  }
-  return request.path.rfind("/v1/", 0) == 0;
-}
-
-void send_llama_cpp_proxy_response(int fd, const LlamaCppHttpResponse& response) {
-  std::ostringstream header;
-  header << "HTTP/1.1 " << response.status << ' ' << http_status_text(response.status)
-         << "\r\n";
-  header << "Content-Type: " << response.content_type << "\r\n";
-  header << "Content-Length: " << response.body.size() << "\r\n";
-  header << "Connection: close\r\n\r\n";
-  (void)write_all(fd, header.str());
-  (void)write_all(fd, response.body);
-}
-
-void proxy_to_llama_cpp(int fd, const OpenAIGatewayConfig& config,
-                        const HttpRequest& request) {
-  LlamaCppServerOptions options;
-  options.model_path = config.model_dir;
-  options.executable_path = config.llama_server_path;
-  options.llama_cpp_dir = config.llama_cpp_dir;
-  options.mmproj_path = config.mmproj_path;
-  options.model_alias = config.model_id;
-  options.port = config.llama_server_port;
-  options.compute_device = config.compute_device;
-  options.context_size = config.context_size;
-  options.parallel_slots = config.parallel_slots;
-  options.enable_mtp = config.enable_mtp;
-
-  const auto target_path =
-    request.query.empty() ? request.path : request.path + "?" + request.query;
-  auto response = forward_openai_request_to_llama_cpp(
-    options, request.method, target_path, request.body, proxy_headers(request));
-  if (!response.is_ok()) {
-    send_json_response(fd, 500, error_body(response.status().message(), "server_error"));
-    return;
-  }
-  send_llama_cpp_proxy_response(fd, response.value());
-}
-
 void send_forced_tool_response(int fd, const ChatRequest& request, std::string_view request_id) {
   const auto id = completion_id();
   const auto created = unix_time();
@@ -1321,10 +1250,6 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
 void handle_client(int fd, const OpenAIGatewayConfig& config) {
   try {
     const auto request = read_http_request(fd);
-    if (should_proxy_to_llama_cpp(config, request)) {
-      proxy_to_llama_cpp(fd, config, request);
-      return;
-    }
     if (request.path == "/health" || request.path == "/v1/health") {
       if (request.method != "GET") {
         send_json_response(fd, 405, error_body("method not allowed"));
@@ -1554,9 +1479,8 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
   std::cout << "model: " << config.model_id << '\n';
   std::cout << "model path: " << config.model_dir.string() << '\n';
   std::cout << "device: " << config.compute_device.to_string() << '\n';
-  if (is_gguf_model_path(config.model_dir)) {
-    std::cout << "gguf backend: llama.cpp server bridge on " << config.host << ':'
-              << config.llama_server_port << '\n';
+  if (resolve_gguf_model_path(config.model_dir).is_ok()) {
+    std::cout << "gguf backend: native Qwen3.5 Metal runtime\n";
     if (!config.mmproj_path.empty()) {
       std::cout << "mmproj: " << config.mmproj_path.string() << '\n';
     }

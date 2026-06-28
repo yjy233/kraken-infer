@@ -1,8 +1,21 @@
 # Milestones
 
-本文档定义 Qwen3 0.6B 从模型结构读取到最终推理框架的阶段性功能目标。
+本文档原先定义 Qwen3 0.6B 从模型结构读取到最终推理框架的阶段性功能目标。当前主目标已切换为 Qwen3.5 0.8B GGUF：在本仓库内实现独立 runtime 和 macOS Metal backend，性能对齐 llama.cpp Metal 路径，最终不依赖 llama.cpp 源码目录、`llama-server`、`llama-cli`、`libllama`、`libggml` 或任何 llama.cpp 构建产物。
 
-当前目标模型：
+Qwen3 0.6B safetensors 路径保留为历史实现和 correctness 参考，不再是新 backend 的架构方向。新工作应以 `docs/qwen3-5-0-8b-technical-plan.md` 为准：可以临时把 llama.cpp 拷到 `third-party/` 用于迁移，但最终必须删除该临时依赖；Qwen3.5 生产执行路径必须走本仓库自己的 Metal backend，不做 CPU fallback，不通过 HTTP/server/C API/dylib 绕回 llama.cpp。
+
+当前主目标模型：
+
+- Model: `Qwen/Qwen3.5-0.8B`
+- Local path: `models/qwen3.5-0.8b/`
+- Format: `GGUF`
+- Architecture: `qwen35`
+- Layers: `24`
+- Hidden size: `1024`
+- Vocab size: `248320`
+- Backend target: native macOS Metal
+
+历史参考模型：
 
 - Model: `Qwen/Qwen3-0.6B`
 - Local path: `models/qwen3-0.6b/`

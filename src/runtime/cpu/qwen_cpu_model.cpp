@@ -8,6 +8,7 @@
 #include "toyllm/backends/mps/mps_backend.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/gguf_reader.hpp"
+#include "toyllm/runtime/qwen35_weight_map.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1439,7 +1440,17 @@ std::string build_weight_summary(const std::filesystem::path& model_dir) {
       }
       output << "] " << ggml_type_name(it->type) << '\n';
     }
-    output << "Qwen3.5 GGUF mapping: ok\n";
+    if (bundle.value().model.architecture == "qwen35") {
+      auto qwen35_map = build_qwen35_weight_map(bundle.value().model, gguf.value());
+      if (!qwen35_map.is_ok()) {
+        throw std::runtime_error(qwen35_map.status().message());
+      }
+      output << format_qwen35_weight_map_summary(qwen35_map.value());
+      output << "Qwen3.5 GGUF mapping: ok\n";
+    } else {
+      output << "Native Qwen3.5 weight map: not implemented for "
+             << bundle.value().model.architecture << '\n';
+    }
     output << "Validation: ok\n";
     return output.str();
   }

@@ -819,9 +819,9 @@ Result<ModelBundle> load_gguf_bundle(const std::filesystem::path& input_path) {
   model.total_layer_count = model.num_hidden_layers;
   model.rms_norm_eps = gguf_optional_f64(gguf.value(), "attention.layer_norm_rms_epsilon", 0.0);
   model.rope_theta = gguf_optional_f64(gguf.value(), "rope.freq_base", 0.0);
-  if (model.num_attention_heads > 0) {
-    const auto attention_projection = model.hidden_size;
-    model.head_dim = attention_projection / model.num_attention_heads;
+  model.head_dim = gguf_optional_i64(gguf.value(), "attention.key_length", 0);
+  if (model.head_dim == 0 && model.num_attention_heads > 0) {
+    model.head_dim = model.hidden_size / model.num_attention_heads;
   }
 
   model.full_attention_interval = gguf_optional_i64(gguf.value(), "full_attention_interval", 4);

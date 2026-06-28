@@ -31,6 +31,8 @@ struct CpuGenerationRequest {
   std::filesystem::path model_dir{"models/qwen3-0.6b"};
   std::string prompt;
   std::size_t max_new_tokens{16};
+  std::size_t prefill_chunk_tokens{0};
+  std::size_t logits_top_k{0};
   bool enable_thinking{false};
   std::vector<ChatMessage> messages;
   std::filesystem::path debug_dump_dir;
@@ -65,6 +67,12 @@ struct CpuGenerationResult {
   std::vector<std::string> missing_dependencies;
   CpuKvCacheReport kv_cache;
   bool kv_cache_verified{false};
+  struct LogitTopEntry {
+    std::int64_t token_id{0};
+    float logit{0.0F};
+    std::string text;
+  };
+  std::vector<LogitTopEntry> logits_top;
 };
 
 [[nodiscard]] Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request);

@@ -48,11 +48,13 @@ target_sources(
     src/runtime/cpu/safetensors.cpp
     src/runtime/cpu/tokenizer.cpp
     src/runtime/gguf_reader.cpp
-    src/runtime/llama_cpp_bridge.cpp
     src/runtime/cpu_inference.cpp
+    src/runtime/gguf_tokenizer.cpp
     src/runtime/mpsgraph_inference.cpp
     src/runtime/openai_gateway.cpp
     src/runtime/profiling.cpp
+    src/runtime/qwen35_runtime.cpp
+    src/runtime/qwen35_weight_map.cpp
     src/runtime/qwen_tokenizer.cpp
     src/runtime/runtime.cpp
     src/backends/mpsgraph/mpsgraph_kv_cache.cpp

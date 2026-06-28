@@ -400,12 +400,17 @@ ProfileArtifacts RequestProfiler::write_artifacts() {
     return 0U;
   }();
   const auto prefill_ns = [&]() -> std::uint64_t {
+    std::uint64_t request_total = 0;
+    std::uint64_t qwen35_commit_total = 0;
     for (const auto& span : impl_->spans) {
+      const auto duration = span.end_ns > span.start_ns ? span.end_ns - span.start_ns : 0U;
       if (span.name == "request.prefill") {
-        return span.end_ns > span.start_ns ? span.end_ns - span.start_ns : 0U;
+        request_total += duration;
+      } else if (span.name.rfind("qwen35.prefill.commit", 0) == 0) {
+        qwen35_commit_total += duration;
       }
     }
-    return 0U;
+    return qwen35_commit_total != 0U ? qwen35_commit_total : request_total;
   }();
   const auto tokenize_ns = [&]() -> std::uint64_t {
     std::uint64_t total = 0;
