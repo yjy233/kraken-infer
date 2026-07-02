@@ -4937,6 +4937,13 @@ Status ensure_mps_buffer_size(const MpsContext& context, MpsBuffer& buffer,
 
 Status MpsContext::copy_to_buffer(MpsBuffer& buffer, const void* data,
                                   std::size_t byte_size) const {
+  return copy_to_buffer_at(buffer, 0, data, byte_size);
+}
+
+Status MpsContext::copy_to_buffer_at(MpsBuffer& buffer,
+                                     std::size_t destination_offset,
+                                     const void* data,
+                                     std::size_t byte_size) const {
   if (!valid()) {
     return Status::unavailable("MPS context is not initialized");
   }
@@ -4946,16 +4953,30 @@ Status MpsContext::copy_to_buffer(MpsBuffer& buffer, const void* data,
   if (data == nullptr) {
     return Status::invalid_argument("MPS copy source must not be null");
   }
-  if (byte_size > buffer.byte_size()) {
+  if (destination_offset > buffer.byte_size() ||
+      byte_size > buffer.byte_size() - destination_offset) {
     return Status::invalid_argument("MPS copy size exceeds destination buffer size");
   }
 
-  std::memcpy([buffer.impl_->buffer contents], data, byte_size);
+  auto status = impl_->commit_graph();
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto* destination = static_cast<std::uint8_t*>([buffer.impl_->buffer contents]);
+  std::memcpy(destination + destination_offset, data, byte_size);
   return Status::ok();
 }
 
 Status MpsContext::copy_from_buffer(const MpsBuffer& buffer, void* data,
                                     std::size_t byte_size) const {
+  return copy_from_buffer_at(buffer, 0, data, byte_size);
+}
+
+Status MpsContext::copy_from_buffer_at(const MpsBuffer& buffer,
+                                       std::size_t source_offset,
+                                       void* data,
+                                       std::size_t byte_size) const {
   if (!valid()) {
     return Status::unavailable("MPS context is not initialized");
   }
@@ -4965,7 +4986,8 @@ Status MpsContext::copy_from_buffer(const MpsBuffer& buffer, void* data,
   if (data == nullptr) {
     return Status::invalid_argument("MPS copy destination must not be null");
   }
-  if (byte_size > buffer.byte_size()) {
+  if (source_offset > buffer.byte_size() ||
+      byte_size > buffer.byte_size() - source_offset) {
     return Status::invalid_argument("MPS copy size exceeds source buffer size");
   }
   auto status = impl_->commit_graph();
@@ -4973,7 +4995,41 @@ Status MpsContext::copy_from_buffer(const MpsBuffer& buffer, void* data,
     return status;
   }
 
-  std::memcpy(data, [buffer.impl_->buffer contents], byte_size);
+  const auto* source = static_cast<const std::uint8_t*>([buffer.impl_->buffer contents]);
+  std::memcpy(data, source + source_offset, byte_size);
+  return Status::ok();
+}
+
+Status MpsContext::copy_buffer_region(const MpsBuffer& source,
+                                      MpsBuffer& destination,
+                                      std::size_t source_offset,
+                                      std::size_t destination_offset,
+                                      std::size_t byte_size) const {
+  if (!valid()) {
+    return Status::unavailable("MPS context is not initialized");
+  }
+  if (!source.valid() || !destination.valid()) {
+    return Status::invalid_argument("MPS buffer is not initialized");
+  }
+  if (source_offset > source.byte_size() ||
+      byte_size > source.byte_size() - source_offset) {
+    return Status::invalid_argument("MPS copy size exceeds source buffer size");
+  }
+  if (destination_offset > destination.byte_size() ||
+      byte_size > destination.byte_size() - destination_offset) {
+    return Status::invalid_argument("MPS copy size exceeds destination buffer size");
+  }
+  auto status = impl_->commit_graph();
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  const auto* source_bytes =
+    static_cast<const std::uint8_t*>([source.impl_->buffer contents]);
+  auto* destination_bytes =
+    static_cast<std::uint8_t*>([destination.impl_->buffer contents]);
+  std::memmove(destination_bytes + destination_offset,
+               source_bytes + source_offset, byte_size);
   return Status::ok();
 }
 

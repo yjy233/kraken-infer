@@ -117,6 +117,10 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
 - SSE streaming。
 - `temperature`、`top_p`、`seed`、`max_tokens`、`max_completion_tokens`。
 - `enable_thinking`，用于打开或关闭 Qwen3 thinking 输出。
+- `chat_template_kwargs.enable_thinking` 和 `reasoning_format`，用于 Qwen3.5
+  thinking prompt 控制和 `reasoning_content` 拆分。
+- `cache_prompt` / `n_cache_reuse`，用于 Qwen3.5 exact-prefix 跨请求
+  block cache；第一版只复用完整 prompt prefix block。
 - 非标准但实用的 per-request `device`。
 - 基础 tools/tool_choice 协议兼容，返回 OpenAI-style `tool_calls`。
 - 浏览器对话页 `/chat_page`，支持 max new tokens、streaming 和 thinking 开关。
@@ -213,6 +217,89 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
     "device": "mps"
   }'
 ```
+
+Qwen3.5 0.8B thinking test：
+
+```bash
+./build/debug/kraken-infer serve \
+  --host 127.0.0.1 \
+  --port 18080 \
+  --model models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
+  --model-id qwen3.5-0.8b \
+  --device mps \
+  --max-new-tokens 128
+```
+
+```bash
+curl http://127.0.0.1:18080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.5-0.8b",
+    "messages": [{"role": "user", "content": "用一句话介绍你自己"}],
+    "max_completion_tokens": 128,
+    "chat_template_kwargs": {"enable_thinking": true},
+    "reasoning_format": "deepseek"
+  }'
+```
+
+Streaming thinking：
+
+```bash
+curl -N http://127.0.0.1:18080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.5-0.8b",
+    "messages": [{"role": "user", "content": "计算 23 * 19，并给出答案"}],
+    "max_completion_tokens": 128,
+    "stream": true,
+    "chat_template_kwargs": {"enable_thinking": true},
+    "reasoning_format": "deepseek"
+  }'
+```
+
+Qwen3.5 cross-request prefix cache：
+
+```bash
+./build/debug/kraken-infer serve \
+  --host 127.0.0.1 \
+  --port 18080 \
+  --model models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
+  --model-id qwen3.5-0.8b \
+  --device mps \
+  --max-new-tokens 32 \
+  --prefill-chunk-tokens 64 \
+  --cache-prompt \
+  --cache-block-tokens 64 \
+  --cache-capacity-blocks 16
+```
+
+Run the same request twice. The first request commits full prompt blocks; the
+second request reports cached prompt tokens in response headers:
+
+```bash
+curl -i http://127.0.0.1:18080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.5-0.8b",
+    "messages": [{"role": "user", "content": "请用三段话解释 KV cache 的作用、prefill 和 decode 的区别，以及为什么相同 system prompt 能复用 cache。每段都要包含一个具体例子。"}],
+    "max_completion_tokens": 32,
+    "cache_prompt": true,
+    "n_cache_reuse": 64,
+    "chat_template_kwargs": {"enable_thinking": false}
+  }'
+```
+
+Look for:
+
+```text
+X-Kraken-Prompt-Cache-Hit-Tokens: 64
+X-Kraken-Prompt-Cache-Miss-Tokens: ...
+```
+
+The current implementation is a single-process, single-active-slot,
+host-backed block cache. It restores exact prefix K/V plus Qwen3.5 recurrent
+R/S state at block boundaries. It does not yet implement paged KV, block-table
+attention, or llama.cpp-style middle-chunk KV shifting.
 
 Text completion：
 
@@ -357,8 +444,9 @@ web/                     Static browser chat page assets
 ## Current Boundaries
 
 - 主要支持 batch size `1`。
-- 当前模型目标是 dense `Qwen3ForCausalLM`。
-- 暂不直接支持 Qwen3.5 hybrid architecture 或 MoE expert routing。
+- 默认模型目标是 dense `Qwen3ForCausalLM`。
+- Qwen3.5 当前覆盖 dense 0.8B GGUF 文本路径；MoE、VL/Omni 多模态和 MTP
+  仍不在当前范围。
 - MPS path 已 full-forward，但仍是 correctness-first/initial performance path。
 - 许多 MPS kernel dispatch 仍逐 op 等待 command buffer 完成。
 - logits 仍会读回 CPU 做 sampling。

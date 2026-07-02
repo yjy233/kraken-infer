@@ -80,10 +80,45 @@ Status MpsContext::copy_to_buffer(MpsBuffer& buffer, const void* data,
   return Status::unavailable("MPS backend was not compiled for this build");
 }
 
+Status MpsContext::copy_to_buffer_at(MpsBuffer& buffer,
+                                     std::size_t destination_offset,
+                                     const void* data,
+                                     std::size_t byte_size) const {
+  (void)buffer;
+  (void)destination_offset;
+  (void)data;
+  (void)byte_size;
+  return Status::unavailable("MPS backend was not compiled for this build");
+}
+
 Status MpsContext::copy_from_buffer(const MpsBuffer& buffer, void* data,
                                     std::size_t byte_size) const {
   (void)buffer;
   (void)data;
+  (void)byte_size;
+  return Status::unavailable("MPS backend was not compiled for this build");
+}
+
+Status MpsContext::copy_from_buffer_at(const MpsBuffer& buffer,
+                                       std::size_t source_offset,
+                                       void* data,
+                                       std::size_t byte_size) const {
+  (void)buffer;
+  (void)source_offset;
+  (void)data;
+  (void)byte_size;
+  return Status::unavailable("MPS backend was not compiled for this build");
+}
+
+Status MpsContext::copy_buffer_region(const MpsBuffer& source,
+                                      MpsBuffer& destination,
+                                      std::size_t source_offset,
+                                      std::size_t destination_offset,
+                                      std::size_t byte_size) const {
+  (void)source;
+  (void)destination;
+  (void)source_offset;
+  (void)destination_offset;
   (void)byte_size;
   return Status::unavailable("MPS backend was not compiled for this build");
 }

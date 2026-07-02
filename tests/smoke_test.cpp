@@ -9,8 +9,10 @@
 #include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/gguf_tokenizer.hpp"
 #include "toyllm/runtime/qwen35_runtime.hpp"
+#include "toyllm/runtime/qwen35_prefix_cache.hpp"
 #include "toyllm/runtime/qwen35_weight_map.hpp"
 #include "toyllm/runtime/qwen_tokenizer.hpp"
+#include "toyllm/runtime/reasoning_parser.hpp"
 #include "toyllm/runtime/runtime.hpp"
 
 #include <array>
@@ -105,6 +107,109 @@ void test_mpsgraph_generation_does_not_fallback() {
   assert(!result.is_ok());
   assert(result.status().code() == toyllm::StatusCode::unavailable);
   assert(result.status().message().find("streaming") != std::string::npos);
+}
+
+void append_reasoning_deltas(const std::vector<toyllm::ReasoningDelta>& deltas,
+                             std::string& reasoning, std::string& content) {
+  for (const auto& delta : deltas) {
+    if (delta.kind == toyllm::ReasoningDelta::Kind::reasoning) {
+      reasoning += delta.text;
+    } else {
+      content += delta.text;
+    }
+  }
+}
+
+void test_reasoning_parser() {
+  const auto none = toyllm::split_reasoning_content(
+    "<think>\nprivate\n</think>\n\npublic", false, toyllm::ReasoningFormat::none);
+  assert(none.reasoning_content.empty());
+  assert(none.content == "<think>\nprivate\n</think>\n\npublic");
+
+  const auto explicit_think = toyllm::split_reasoning_content(
+    "<think>\nprivate\n</think>\n\npublic", false, toyllm::ReasoningFormat::deepseek);
+  assert(explicit_think.reasoning_content == "private");
+  assert(explicit_think.content == "public");
+
+  const auto qwen_prefill = toyllm::split_reasoning_content(
+    "private\n</think>\n\npublic", true, toyllm::ReasoningFormat::auto_);
+  assert(qwen_prefill.reasoning_content == "private");
+  assert(qwen_prefill.content == "public");
+
+  const auto unfinished = toyllm::split_reasoning_content(
+    "still thinking\n", true, toyllm::ReasoningFormat::deepseek);
+  assert(unfinished.reasoning_content == "still thinking");
+  assert(unfinished.content.empty());
+
+  const auto parsed = toyllm::parse_reasoning_format("deepseek");
+  assert(parsed.is_ok());
+  assert(parsed.value() == toyllm::ReasoningFormat::deepseek);
+  const auto invalid = toyllm::parse_reasoning_format("verbose");
+  assert(!invalid.is_ok());
+  assert(invalid.status().message().find("reasoning_format") != std::string::npos);
+
+  toyllm::ReasoningStreamParser stream_parser{true, toyllm::ReasoningFormat::deepseek};
+  std::string reasoning;
+  std::string content;
+  append_reasoning_deltas(stream_parser.push("pri"), reasoning, content);
+  append_reasoning_deltas(stream_parser.push("vate\n</thi"), reasoning, content);
+  append_reasoning_deltas(stream_parser.push("nk>\n\npublic"), reasoning, content);
+  append_reasoning_deltas(stream_parser.finish(), reasoning, content);
+  assert(reasoning == "private");
+  assert(content == "public");
+
+  toyllm::ReasoningStreamParser content_parser{false, toyllm::ReasoningFormat::deepseek};
+  reasoning.clear();
+  content.clear();
+  append_reasoning_deltas(content_parser.push("before <thi"), reasoning, content);
+  append_reasoning_deltas(content_parser.push("nk>\nsecret"), reasoning, content);
+  append_reasoning_deltas(content_parser.push("\n</think>\n\nafter"), reasoning, content);
+  append_reasoning_deltas(content_parser.finish(), reasoning, content);
+  assert(reasoning == "secret");
+  assert(content == "before after");
+}
+
+void test_qwen35_prefix_cache_index() {
+  toyllm::Qwen35PrefixCacheIndex cache{
+    toyllm::Qwen35PrefixCacheConfig{
+      true,
+      2,
+      2,
+      0,
+    }};
+  const std::vector<std::int64_t> first{1, 2, 3, 4, 5};
+  auto miss = cache.lookup(first);
+  assert(miss.hit_tokens == 0);
+  assert(miss.block_hashes.empty());
+
+  auto commit0 = cache.commit_block(first, 0);
+  assert(commit0.inserted);
+  assert(!commit0.evicted);
+  assert(commit0.slot == 0);
+  auto commit1 = cache.commit_block(first, 2);
+  assert(commit1.inserted);
+  assert(!commit1.evicted);
+  assert(commit1.slot == 1);
+
+  auto hit = cache.lookup(first);
+  assert(hit.hit_tokens == 4);
+  assert(hit.block_hashes.size() == 2);
+
+  const std::vector<std::int64_t> forked{1, 2, 9, 9};
+  auto fork_hit = cache.lookup(forked);
+  assert(fork_hit.hit_tokens == 2);
+  assert(fork_hit.block_hashes.size() == 1);
+
+  const std::vector<std::int64_t> second{7, 8, 9, 10};
+  auto commit2 = cache.commit_block(second, 0);
+  assert(commit2.inserted);
+  assert(commit2.evicted);
+  auto after_evict = cache.lookup(first);
+  assert(after_evict.hit_tokens == 2);
+
+  auto stats = cache.stats();
+  assert(stats.stored_blocks == 2);
+  assert(stats.evicted_blocks == 1);
 }
 
 void test_mpsgraph_kv_cache_layout() {
@@ -2918,6 +3023,8 @@ int main() {
   test_mpsgraph_backend_query();
   test_mpsgraph_operator_smoke();
   test_mpsgraph_generation_does_not_fallback();
+  test_reasoning_parser();
+  test_qwen35_prefix_cache_index();
   test_mpsgraph_kv_cache_layout();
   test_mpsgraph_kv_cache_store();
   test_mpsgraph_qk_norm_rope_and_attention_ops();

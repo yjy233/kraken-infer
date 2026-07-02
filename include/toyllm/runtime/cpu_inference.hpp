@@ -35,6 +35,10 @@ struct CpuGenerationRequest {
   std::size_t logits_top_k{0};
   bool parse_special_prompt{false};
   bool enable_thinking{false};
+  bool cache_prompt{false};
+  std::size_t cache_reuse_min_tokens{0};
+  std::size_t cache_block_tokens{0};
+  std::size_t cache_capacity_blocks{0};
   std::vector<ChatMessage> messages;
   std::filesystem::path debug_dump_dir;
   bool verify_kv_cache{false};
@@ -57,6 +61,17 @@ struct CpuKvCacheReport {
   std::uint64_t total_bytes{0};
 };
 
+struct CpuPromptCacheReport {
+  bool enabled{false};
+  std::size_t block_tokens{0};
+  std::size_t capacity_blocks{0};
+  std::size_t stored_blocks{0};
+  std::size_t hit_tokens{0};
+  std::size_t miss_tokens{0};
+  std::size_t committed_tokens{0};
+  std::size_t evicted_blocks{0};
+};
+
 struct CpuGenerationResult {
   bool implemented{false};
   std::string text;
@@ -67,6 +82,7 @@ struct CpuGenerationResult {
   std::filesystem::path profile_dir;
   std::vector<std::string> missing_dependencies;
   CpuKvCacheReport kv_cache;
+  CpuPromptCacheReport prompt_cache;
   bool kv_cache_verified{false};
   struct LogitTopEntry {
     std::int64_t token_id{0};

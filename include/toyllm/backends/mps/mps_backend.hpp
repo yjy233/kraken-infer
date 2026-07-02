@@ -96,8 +96,21 @@ class MpsContext {
   [[nodiscard]] Result<MpsBuffer> make_buffer(std::size_t byte_size) const;
   [[nodiscard]] Status copy_to_buffer(MpsBuffer& buffer, const void* data,
                                       std::size_t byte_size) const;
+  [[nodiscard]] Status copy_to_buffer_at(MpsBuffer& buffer,
+                                         std::size_t destination_offset,
+                                         const void* data,
+                                         std::size_t byte_size) const;
   [[nodiscard]] Status copy_from_buffer(const MpsBuffer& buffer, void* data,
                                         std::size_t byte_size) const;
+  [[nodiscard]] Status copy_from_buffer_at(const MpsBuffer& buffer,
+                                           std::size_t source_offset,
+                                           void* data,
+                                           std::size_t byte_size) const;
+  [[nodiscard]] Status copy_buffer_region(const MpsBuffer& source,
+                                          MpsBuffer& destination,
+                                          std::size_t source_offset,
+                                          std::size_t destination_offset,
+                                          std::size_t byte_size) const;
   [[nodiscard]] Status zero_buffer(MpsBuffer& buffer, std::size_t byte_size) const;
   [[nodiscard]] Result<MpsMatVecWorkspace> make_matvec_workspace(std::size_t rows,
                                                                  std::size_t cols) const;

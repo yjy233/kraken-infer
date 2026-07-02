@@ -80,8 +80,11 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program
             << " serve [--host 127.0.0.1] [--port 8080] [--model <model_dir>]"
                " [--model-id ID] [--device cpu|mps|mpsgraph] [--max-new-tokens N]"
+               " [--prefill-chunk-tokens N]"
                " [--mpsgraph-warmup]"
-               " [--mmproj PATH] [--ctx-size N] [--parallel N] [--no-mtp]\n\n";
+               " [--mmproj PATH] [--ctx-size N] [--parallel N] [--no-mtp]"
+               " [--cache-prompt|--no-cache-prompt] [--cache-reuse N]"
+               " [--cache-block-tokens N] [--cache-capacity-blocks N]\n\n";
   std::cout << "       [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n\n";
   std::cout << "Compatibility flags:\n";
@@ -849,6 +852,15 @@ int main(int argc, char** argv) {
         config.default_max_tokens = *parsed;
         continue;
       }
+      if (arg_equals(argv[index], "--prefill-chunk-tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--prefill-chunk-tokens must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.prefill_chunk_tokens = *parsed;
+        continue;
+      }
       if (arg_equals(argv[index], "--mpsgraph-warmup")) {
         config.mpsgraph_warmup = true;
         continue;
@@ -877,6 +889,41 @@ int main(int argc, char** argv) {
       }
       if (arg_equals(argv[index], "--no-mtp")) {
         config.enable_mtp = false;
+        continue;
+      }
+      if (arg_equals(argv[index], "--cache-prompt")) {
+        config.cache_prompt = true;
+        continue;
+      }
+      if (arg_equals(argv[index], "--no-cache-prompt")) {
+        config.cache_prompt = false;
+        continue;
+      }
+      if (arg_equals(argv[index], "--cache-reuse") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value()) {
+          std::cerr << "--cache-reuse must be a non-negative integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.cache_reuse_min_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--cache-block-tokens") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--cache-block-tokens must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.cache_block_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--cache-capacity-blocks") && index + 1 < argc) {
+        const auto parsed = parse_size_arg(argv[++index]);
+        if (!parsed.has_value() || *parsed == 0) {
+          std::cerr << "--cache-capacity-blocks must be a positive integer.\n";
+          return EXIT_FAILURE;
+        }
+        config.cache_capacity_blocks = *parsed;
         continue;
       }
       if (arg_equals(argv[index], "--profile") && index + 1 < argc) {

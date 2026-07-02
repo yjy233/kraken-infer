@@ -5,6 +5,7 @@
 #include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/gguf_tokenizer.hpp"
 #include "toyllm/runtime/qwen_tokenizer.hpp"
+#include "toyllm/runtime/qwen35_prefix_cache.hpp"
 #include "toyllm/runtime/qwen35_weight_map.hpp"
 
 #include "cpu/debug_dump.hpp"
@@ -15,7 +16,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string_view>
@@ -463,6 +466,361 @@ Result<std::size_t> checked_size_t(std::uint64_t value, const char* name) {
     return Status::invalid_argument(std::string{name} + " exceeds size_t range");
   }
   return static_cast<std::size_t>(value);
+}
+
+struct Qwen35HostPrefixCacheLayout {
+  std::filesystem::path model_dir;
+  std::size_t block_tokens{0};
+  std::size_t full_attention_layers{0};
+  std::size_t linear_attention_layers{0};
+  std::size_t kv_dim{0};
+  std::size_t kv_element_bytes{0};
+  std::size_t hidden_size{0};
+  std::uint64_t recurrent_r_cache_bytes{0};
+  std::uint64_t recurrent_s_cache_bytes{0};
+  bool kv_cache_f16{true};
+};
+
+bool operator==(const Qwen35HostPrefixCacheLayout& lhs,
+                const Qwen35HostPrefixCacheLayout& rhs) {
+  return lhs.model_dir == rhs.model_dir &&
+         lhs.block_tokens == rhs.block_tokens &&
+         lhs.full_attention_layers == rhs.full_attention_layers &&
+         lhs.linear_attention_layers == rhs.linear_attention_layers &&
+         lhs.kv_dim == rhs.kv_dim &&
+         lhs.kv_element_bytes == rhs.kv_element_bytes &&
+         lhs.hidden_size == rhs.hidden_size &&
+         lhs.recurrent_r_cache_bytes == rhs.recurrent_r_cache_bytes &&
+         lhs.recurrent_s_cache_bytes == rhs.recurrent_s_cache_bytes &&
+         lhs.kv_cache_f16 == rhs.kv_cache_f16;
+}
+
+struct Qwen35HostPrefixPayload {
+  std::vector<std::uint8_t> key_cache;
+  std::vector<std::uint8_t> value_cache;
+  std::vector<std::uint8_t> recurrent_r_cache;
+  std::vector<std::uint8_t> recurrent_s_cache;
+  std::vector<std::uint8_t> last_hidden;
+};
+
+struct Qwen35HostPrefixCommitResult {
+  bool committed{false};
+  bool evicted{false};
+};
+
+class Qwen35HostPrefixCache {
+ public:
+  void configure(const Qwen35HostPrefixCacheLayout& layout,
+                 Qwen35PrefixCacheConfig config) {
+    if (!layout_.has_value() || !(*layout_ == layout) ||
+        config.block_tokens != index_.config().block_tokens ||
+        config.capacity_blocks != index_.config().capacity_blocks ||
+        config.min_reuse_tokens != index_.config().min_reuse_tokens ||
+        config.enabled != index_.config().enabled) {
+      layout_ = layout;
+      index_ = Qwen35PrefixCacheIndex(config);
+      payloads_.clear();
+    }
+  }
+
+  [[nodiscard]] Qwen35PrefixCacheLookup lookup(
+    const std::vector<std::int64_t>& tokens) {
+    return index_.lookup(tokens);
+  }
+
+  [[nodiscard]] Result<Qwen35HostPrefixCommitResult> commit_block(
+    const mps::MpsContext& context, const Qwen35MetalCache& cache,
+    const Qwen35ExecutionPlan& plan, const mps::MpsBuffer& chunk_hidden,
+    const std::vector<std::int64_t>& tokens, std::size_t token_start,
+    std::size_t chunk_tokens) {
+    if (!layout_.has_value() || chunk_tokens != layout_->block_tokens ||
+        token_start + layout_->block_tokens > tokens.size()) {
+      return Qwen35HostPrefixCommitResult{};
+    }
+    auto hash = index_.hash_for_block(tokens, token_start);
+    if (!hash.has_value()) {
+      return Qwen35HostPrefixCommitResult{};
+    }
+    if (payloads_.find(*hash) != payloads_.end()) {
+      return Qwen35HostPrefixCommitResult{};
+    }
+
+    auto payload = read_payload(context, cache, plan, chunk_hidden, token_start,
+                                chunk_tokens);
+    if (!payload.is_ok()) {
+      return payload.status();
+    }
+
+    auto commit = index_.commit_block(tokens, token_start);
+    Qwen35HostPrefixCommitResult result;
+    if (!commit.inserted) {
+      return result;
+    }
+    if (commit.evicted) {
+      payloads_.erase(commit.evicted_hash);
+      result.evicted = true;
+    }
+    payloads_[commit.hash] = std::move(payload.value());
+    result.committed = true;
+    return result;
+  }
+
+  [[nodiscard]] Status restore(
+    const mps::MpsContext& context, Qwen35MetalCache& cache,
+    const Qwen35ExecutionPlan& plan,
+    const std::vector<std::uint64_t>& block_hashes) const {
+    if (!layout_.has_value()) {
+      return Status::ok();
+    }
+    for (std::size_t block_index = 0; block_index < block_hashes.size();
+         ++block_index) {
+      const auto it = payloads_.find(block_hashes[block_index]);
+      if (it == payloads_.end()) {
+        return Status::invalid_argument("Qwen3.5 prefix cache payload is missing");
+      }
+      auto status = restore_kv_block(context, cache, plan, it->second,
+                                     block_index * layout_->block_tokens);
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+    if (!block_hashes.empty()) {
+      const auto it = payloads_.find(block_hashes.back());
+      if (it == payloads_.end()) {
+        return Status::invalid_argument("Qwen3.5 prefix cache payload is missing");
+      }
+      auto status = restore_recurrent(context, cache, it->second);
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+    return Status::ok();
+  }
+
+  [[nodiscard]] const std::vector<std::uint8_t>* last_hidden(
+    std::uint64_t hash) const {
+    const auto it = payloads_.find(hash);
+    if (it == payloads_.end()) {
+      return nullptr;
+    }
+    return &it->second.last_hidden;
+  }
+
+  [[nodiscard]] Qwen35PrefixCacheStats stats() const {
+    return index_.stats();
+  }
+
+ private:
+  Qwen35PrefixCacheIndex index_{Qwen35PrefixCacheConfig{}};
+  std::optional<Qwen35HostPrefixCacheLayout> layout_;
+  std::unordered_map<std::uint64_t, Qwen35HostPrefixPayload> payloads_;
+
+  [[nodiscard]] Result<std::size_t> kv_block_layer_bytes() const {
+    if (!layout_.has_value()) {
+      return Status::invalid_argument("Qwen3.5 prefix cache layout is not configured");
+    }
+    std::size_t elements = 0;
+    if (!checked_mul_size(layout_->block_tokens, layout_->kv_dim, elements)) {
+      return Status::invalid_argument("Qwen3.5 prefix cache KV block size overflow");
+    }
+    std::size_t bytes = 0;
+    if (!checked_mul_size(elements, layout_->kv_element_bytes, bytes)) {
+      return Status::invalid_argument("Qwen3.5 prefix cache KV block bytes overflow");
+    }
+    return bytes;
+  }
+
+  [[nodiscard]] Result<std::size_t> kv_layer_payload_offset(
+    std::size_t layer) const {
+    auto block_bytes = kv_block_layer_bytes();
+    if (!block_bytes.is_ok()) {
+      return block_bytes.status();
+    }
+    std::size_t offset = 0;
+    if (!checked_mul_size(layer, block_bytes.value(), offset)) {
+      return Status::invalid_argument("Qwen3.5 prefix cache payload offset overflow");
+    }
+    return offset;
+  }
+
+  [[nodiscard]] Result<std::size_t> active_kv_byte_offset(
+    const Qwen35ExecutionPlan& plan, std::size_t layer,
+    std::size_t token_start) const {
+    std::size_t row = 0;
+    if (!checked_mul_size(layer, plan.cache.attention_capacity_tokens, row)) {
+      return Status::invalid_argument("Qwen3.5 active KV layer offset overflow");
+    }
+    if (token_start > std::numeric_limits<std::size_t>::max() - row) {
+      return Status::invalid_argument("Qwen3.5 active KV token offset overflow");
+    }
+    row += token_start;
+    std::size_t elements = 0;
+    if (!checked_mul_size(row, plan.cache.kv_dim, elements)) {
+      return Status::invalid_argument("Qwen3.5 active KV element offset overflow");
+    }
+    std::size_t bytes = 0;
+    if (!checked_mul_size(elements, plan.cache.kv_cache_element_bytes, bytes)) {
+      return Status::invalid_argument("Qwen3.5 active KV byte offset overflow");
+    }
+    return bytes;
+  }
+
+  [[nodiscard]] Result<Qwen35HostPrefixPayload> read_payload(
+    const mps::MpsContext& context, const Qwen35MetalCache& cache,
+    const Qwen35ExecutionPlan& plan, const mps::MpsBuffer& chunk_hidden,
+    std::size_t token_start, std::size_t chunk_tokens) const {
+    auto block_bytes = kv_block_layer_bytes();
+    if (!block_bytes.is_ok()) {
+      return block_bytes.status();
+    }
+    std::size_t kv_payload_bytes = 0;
+    if (!checked_mul_size(layout_->full_attention_layers, block_bytes.value(),
+                          kv_payload_bytes)) {
+      return Status::invalid_argument("Qwen3.5 prefix cache KV payload overflow");
+    }
+
+    Qwen35HostPrefixPayload payload;
+    payload.key_cache.resize(kv_payload_bytes);
+    payload.value_cache.resize(kv_payload_bytes);
+    for (std::size_t layer = 0; layer < layout_->full_attention_layers; ++layer) {
+      auto source_offset = active_kv_byte_offset(plan, layer, token_start);
+      if (!source_offset.is_ok()) {
+        return source_offset.status();
+      }
+      auto payload_offset = kv_layer_payload_offset(layer);
+      if (!payload_offset.is_ok()) {
+        return payload_offset.status();
+      }
+      auto status = context.copy_from_buffer_at(
+        cache.key_cache, source_offset.value(),
+        payload.key_cache.data() + payload_offset.value(), block_bytes.value());
+      if (!status.is_ok()) {
+        return status;
+      }
+      status = context.copy_from_buffer_at(
+        cache.value_cache, source_offset.value(),
+        payload.value_cache.data() + payload_offset.value(), block_bytes.value());
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+
+    auto recurrent_r_bytes =
+      checked_size_t(cache.recurrent_r_cache_bytes, "Qwen3.5 recurrent R cache");
+    if (!recurrent_r_bytes.is_ok()) {
+      return recurrent_r_bytes.status();
+    }
+    payload.recurrent_r_cache.resize(recurrent_r_bytes.value());
+    if (!payload.recurrent_r_cache.empty()) {
+      auto status = context.copy_from_buffer_at(
+        cache.recurrent_r_cache, 0, payload.recurrent_r_cache.data(),
+        payload.recurrent_r_cache.size());
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+
+    auto recurrent_s_bytes =
+      checked_size_t(cache.recurrent_s_cache_bytes, "Qwen3.5 recurrent S cache");
+    if (!recurrent_s_bytes.is_ok()) {
+      return recurrent_s_bytes.status();
+    }
+    payload.recurrent_s_cache.resize(recurrent_s_bytes.value());
+    if (!payload.recurrent_s_cache.empty()) {
+      auto status = context.copy_from_buffer_at(
+        cache.recurrent_s_cache, 0, payload.recurrent_s_cache.data(),
+        payload.recurrent_s_cache.size());
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+
+    std::size_t hidden_bytes = 0;
+    if (!checked_mul_size(layout_->hidden_size, sizeof(float), hidden_bytes)) {
+      return Status::invalid_argument("Qwen3.5 prefix last hidden bytes overflow");
+    }
+    std::size_t hidden_row = 0;
+    if (!checked_mul_size(chunk_tokens - 1U, layout_->hidden_size, hidden_row)) {
+      return Status::invalid_argument("Qwen3.5 prefix last hidden offset overflow");
+    }
+    std::size_t hidden_offset = 0;
+    if (!checked_mul_size(hidden_row, sizeof(float), hidden_offset)) {
+      return Status::invalid_argument("Qwen3.5 prefix last hidden byte offset overflow");
+    }
+    payload.last_hidden.resize(hidden_bytes);
+    auto status = context.copy_from_buffer_at(chunk_hidden, hidden_offset,
+                                              payload.last_hidden.data(),
+                                              payload.last_hidden.size());
+    if (!status.is_ok()) {
+      return status;
+    }
+    return payload;
+  }
+
+  [[nodiscard]] Status restore_kv_block(
+    const mps::MpsContext& context, Qwen35MetalCache& cache,
+    const Qwen35ExecutionPlan& plan, const Qwen35HostPrefixPayload& payload,
+    std::size_t token_start) const {
+    auto block_bytes = kv_block_layer_bytes();
+    if (!block_bytes.is_ok()) {
+      return block_bytes.status();
+    }
+    for (std::size_t layer = 0; layer < layout_->full_attention_layers; ++layer) {
+      auto destination_offset = active_kv_byte_offset(plan, layer, token_start);
+      if (!destination_offset.is_ok()) {
+        return destination_offset.status();
+      }
+      auto payload_offset = kv_layer_payload_offset(layer);
+      if (!payload_offset.is_ok()) {
+        return payload_offset.status();
+      }
+      auto status = context.copy_to_buffer_at(
+        cache.key_cache, destination_offset.value(),
+        payload.key_cache.data() + payload_offset.value(), block_bytes.value());
+      if (!status.is_ok()) {
+        return status;
+      }
+      status = context.copy_to_buffer_at(
+        cache.value_cache, destination_offset.value(),
+        payload.value_cache.data() + payload_offset.value(), block_bytes.value());
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+    return Status::ok();
+  }
+
+  [[nodiscard]] Status restore_recurrent(
+    const mps::MpsContext& context, Qwen35MetalCache& cache,
+    const Qwen35HostPrefixPayload& payload) const {
+    if (!payload.recurrent_r_cache.empty()) {
+      auto status = context.copy_to_buffer_at(
+        cache.recurrent_r_cache, 0, payload.recurrent_r_cache.data(),
+        payload.recurrent_r_cache.size());
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+    if (!payload.recurrent_s_cache.empty()) {
+      auto status = context.copy_to_buffer_at(
+        cache.recurrent_s_cache, 0, payload.recurrent_s_cache.data(),
+        payload.recurrent_s_cache.size());
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+    return Status::ok();
+  }
+};
+
+Qwen35HostPrefixCache& qwen35_host_prefix_cache() {
+  static Qwen35HostPrefixCache cache;
+  return cache;
+}
+
+std::mutex& qwen35_host_prefix_cache_mutex() {
+  static std::mutex mutex;
+  return mutex;
 }
 
 float f16_to_float_cpu(const std::uint8_t* data) {
@@ -3854,6 +4212,11 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (request.max_new_tokens == 0) {
     return Status::invalid_argument("max_new_tokens must be greater than zero");
   }
+  std::unique_lock<std::mutex> prompt_cache_lock(
+    qwen35_host_prefix_cache_mutex(), std::defer_lock);
+  if (request.cache_prompt) {
+    prompt_cache_lock.lock();
+  }
 
   RequestProfiler profiler(request.observability);
   profiler.set_metadata("model_dir", request.model_dir.string());
@@ -3972,6 +4335,56 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       profiler.set_metadata("qwen35_prefill_commit", "layer");
       break;
   }
+  const auto cache_block_tokens =
+    request.cache_block_tokens == 0 ? plan.value().prefill.chunk_tokens
+                                    : request.cache_block_tokens;
+  const auto cache_capacity_blocks =
+    request.cache_capacity_blocks == 0 ? std::size_t{16}
+                                       : request.cache_capacity_blocks;
+  bool prompt_cache_enabled =
+    request.cache_prompt && cache_block_tokens > 0 &&
+    cache_capacity_blocks > 0 &&
+    cache_block_tokens == plan.value().prefill.chunk_tokens &&
+    prefill_commit_mode == Qwen35PrefillCommitMode::chunk;
+  if (request.cache_prompt && prefill_commit_mode != Qwen35PrefillCommitMode::chunk) {
+    profiler.set_metadata("prompt_cache_disabled_reason", "prefill_commit_mode");
+  } else if (request.cache_prompt &&
+             cache_block_tokens != plan.value().prefill.chunk_tokens) {
+    profiler.set_metadata("prompt_cache_disabled_reason", "block_chunk_mismatch");
+  }
+
+  Qwen35PrefixCacheLookup prompt_cache_lookup;
+  std::size_t prompt_cache_committed_tokens = 0;
+  std::size_t prompt_cache_evicted_blocks = 0;
+  if (prompt_cache_enabled) {
+    Qwen35HostPrefixCacheLayout layout;
+    layout.model_dir = request.model_dir;
+    layout.block_tokens = cache_block_tokens;
+    layout.full_attention_layers = plan.value().cache.full_attention_layers;
+    layout.linear_attention_layers = plan.value().cache.linear_attention_layers;
+    layout.kv_dim = plan.value().cache.kv_dim;
+    layout.kv_element_bytes = plan.value().cache.kv_cache_element_bytes;
+    layout.hidden_size = plan.value().hidden_size;
+    layout.recurrent_r_cache_bytes = plan.value().cache.recurrent_r_cache_bytes;
+    layout.recurrent_s_cache_bytes = plan.value().cache.recurrent_s_cache_bytes;
+    layout.kv_cache_f16 = plan.value().cache.kv_cache_f16;
+    qwen35_host_prefix_cache().configure(
+      layout, Qwen35PrefixCacheConfig{
+                true,
+                cache_block_tokens,
+                cache_capacity_blocks,
+                request.cache_reuse_min_tokens,
+              });
+    prompt_cache_lookup =
+      qwen35_host_prefix_cache().lookup(prompt_tokens.value());
+  }
+  profiler.set_metadata("prompt_cache_enabled",
+                        std::string{prompt_cache_enabled ? "1" : "0"});
+  profiler.set_metadata("prompt_cache_block_tokens", cache_block_tokens);
+  profiler.set_metadata("prompt_cache_hit_tokens",
+                        prompt_cache_lookup.hit_tokens);
+  profiler.set_metadata("prompt_cache_miss_tokens",
+                        prompt_token_count - prompt_cache_lookup.hit_tokens);
 
   auto context = [&]() {
     auto span = profiler.scoped("qwen35.mps.create_context");
@@ -3987,6 +4400,14 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!cache.is_ok()) {
     return cache.status();
   }
+  if (prompt_cache_enabled && !prompt_cache_lookup.block_hashes.empty()) {
+    auto restore_status = qwen35_host_prefix_cache().restore(
+      context.value(), cache.value(), plan.value(),
+      prompt_cache_lookup.block_hashes);
+    if (!restore_status.is_ok()) {
+      return restore_status;
+    }
+  }
   auto weights = [&]() {
     auto span = profiler.scoped("qwen35.weights.upload");
     return upload_qwen35_metal_weights(
@@ -3996,6 +4417,66 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!weights.is_ok()) {
     return weights.status();
   }
+  const auto* output_norm = find_metal_weight(weights.value(), map.value().output_norm.name);
+  const auto* output_weight = find_metal_weight(weights.value(), map.value().output.name);
+  if (output_norm == nullptr || output_weight == nullptr) {
+    return Status::invalid_argument("Qwen3.5 output norm/head weights are missing");
+  }
+  if (map.value().layers.empty()) {
+    return Status::invalid_argument("Qwen3.5 weight map has no layers");
+  }
+  auto mrope_sections = qwen35_mrope_sections(bundle.value().model);
+  if (!mrope_sections.is_ok()) {
+    return mrope_sections.status();
+  }
+  Qwen35LogitsOutput logits_output;
+  Status status;
+  const bool prompt_cache_full_hit =
+    prompt_cache_enabled && prompt_cache_lookup.hit_tokens == prompt_token_count &&
+    !prompt_cache_lookup.block_hashes.empty();
+  if (prompt_cache_full_hit) {
+    auto final_hidden = make_qwen35_f32_buffer(context.value(),
+                                               plan.value().hidden_size,
+                                               "Qwen3.5 cached final hidden");
+    if (!final_hidden.is_ok()) {
+      return final_hidden.status();
+    }
+    const auto* cached_hidden =
+      qwen35_host_prefix_cache().last_hidden(prompt_cache_lookup.block_hashes.back());
+    if (cached_hidden == nullptr) {
+      return Status::invalid_argument("Qwen3.5 prefix cache last hidden is missing");
+    }
+    status = context.value().copy_to_buffer(final_hidden.value(),
+                                            cached_hidden->data(),
+                                            cached_hidden->size());
+    if (!status.is_ok()) {
+      return status;
+    }
+    MpsGraphGuard logits_guard(context.value());
+    status = logits_guard.begin();
+    if (!status.is_ok()) {
+      return status;
+    }
+    {
+      auto logits_span = profiler.scoped("qwen35.prefill.logits");
+      auto logits_result = run_qwen35_output_logits(
+        context.value(), final_hidden.value(), plan.value().hidden_size,
+        static_cast<float>(bundle.value().model.rms_norm_eps), *output_norm,
+        *output_weight, debug_dump, "prefill", !sampling.value().do_sample);
+      if (!logits_result.is_ok()) {
+        return logits_result.status();
+      }
+      logits_output = std::move(logits_result.value());
+    }
+    {
+      auto prefill_span = profiler.scoped("request.prefill");
+      auto commit_span = profiler.scoped("qwen35.prefill.commit");
+      status = logits_guard.commit();
+    }
+    if (!status.is_ok()) {
+      return status;
+    }
+  } else {
   auto prompt_token_ids = [&]() {
     auto span = profiler.scoped("qwen35.prompt_ids.upload");
     return make_qwen35_token_id_buffer(context.value(), prompt_tokens.value());
@@ -4037,16 +4518,10 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       return embed_dump_status;
     }
   }
-  if (map.value().layers.empty()) {
-    return Status::invalid_argument("Qwen3.5 weight map has no layers");
-  }
-  auto mrope_sections = qwen35_mrope_sections(bundle.value().model);
-  if (!mrope_sections.is_ok()) {
-    return mrope_sections.status();
-  }
   mps::MpsBuffer last_chunk_hidden;
   std::size_t last_chunk_tokens = 0;
-  for (std::size_t chunk_start = 0; chunk_start < prompt_tokens.value().size();
+  for (std::size_t chunk_start = prompt_cache_lookup.hit_tokens;
+       chunk_start < prompt_tokens.value().size();
        chunk_start += plan.value().prefill.chunk_tokens) {
     const auto chunk_tokens =
       std::min(plan.value().prefill.chunk_tokens,
@@ -4060,7 +4535,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     if (!chunk_hidden.is_ok()) {
       return chunk_hidden.status();
     }
-    auto status = context.value().copy_f32_region(
+    status = context.value().copy_f32_region(
       first_hidden.value(), chunk_hidden.value(),
       chunk_start * plan.value().hidden_size, 0,
       chunk_tokens * plan.value().hidden_size);
@@ -4140,11 +4615,43 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       return Status::internal_error("Qwen3.5 Metal chunk layer execution count mismatch");
     }
     if (prefill_commit_mode == Qwen35PrefillCommitMode::chunk) {
-      auto commit_status = qwen35_prefill_commit_and_rebegin(
-        graph_guard, profiler, "qwen35.prefill.commit.chunk",
-        qwen35_chunk_profile_fields(chunk_start, chunk_tokens));
-      if (!commit_status.is_ok()) {
-        return commit_status;
+      if (prompt_cache_enabled && chunk_tokens == cache_block_tokens &&
+          chunk_start % cache_block_tokens == 0) {
+        {
+          auto commit_span = profiler.scoped(
+            "qwen35.prefill.commit.chunk",
+            qwen35_chunk_profile_fields(chunk_start, chunk_tokens));
+          auto commit_status = graph_guard.commit();
+          if (!commit_status.is_ok()) {
+            return commit_status;
+          }
+        }
+        auto cache_commit = qwen35_host_prefix_cache().commit_block(
+          context.value(), cache.value(), plan.value(), current_hidden,
+          prompt_tokens.value(), chunk_start, chunk_tokens);
+        if (!cache_commit.is_ok()) {
+          return cache_commit.status();
+        }
+        if (cache_commit.value().committed) {
+          prompt_cache_committed_tokens += cache_block_tokens;
+        }
+        if (cache_commit.value().evicted) {
+          ++prompt_cache_evicted_blocks;
+        }
+        {
+          auto begin_span = profiler.scoped("qwen35.prefill.graph_begin");
+          auto begin_status = graph_guard.begin();
+          if (!begin_status.is_ok()) {
+            return begin_status;
+          }
+        }
+      } else {
+        auto commit_status = qwen35_prefill_commit_and_rebegin(
+          graph_guard, profiler, "qwen35.prefill.commit.chunk",
+          qwen35_chunk_profile_fields(chunk_start, chunk_tokens));
+        if (!commit_status.is_ok()) {
+          return commit_status;
+        }
       }
     }
     last_chunk_tokens = chunk_tokens;
@@ -4153,17 +4660,12 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!last_chunk_hidden.valid() || last_chunk_tokens == 0) {
     return Status::internal_error("Qwen3.5 Metal prefill produced no final hidden state");
   }
-  const auto* output_norm = find_metal_weight(weights.value(), map.value().output_norm.name);
-  const auto* output_weight = find_metal_weight(weights.value(), map.value().output.name);
-  if (output_norm == nullptr || output_weight == nullptr) {
-    return Status::invalid_argument("Qwen3.5 output norm/head weights are missing");
-  }
   auto final_hidden = make_qwen35_f32_buffer(context.value(), plan.value().hidden_size,
                                              "Qwen3.5 final hidden");
   if (!final_hidden.is_ok()) {
     return final_hidden.status();
   }
-  auto status = context.value().copy_f32_region(
+  status = context.value().copy_f32_region(
     last_chunk_hidden, final_hidden.value(),
     (last_chunk_tokens - 1U) * plan.value().hidden_size, 0,
     plan.value().hidden_size);
@@ -4177,7 +4679,6 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!status.is_ok()) {
     return status;
   }
-  Qwen35LogitsOutput logits_output;
   {
     auto logits_span = profiler.scoped("qwen35.prefill.logits");
     auto logits_result = run_qwen35_output_logits(
@@ -4196,6 +4697,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   }
   if (!status.is_ok()) {
     return status;
+  }
   }
 
   std::vector<std::int64_t> generated_tokens;
@@ -4322,6 +4824,23 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   result.kv_cache.key_bytes = cache.value().key_cache_bytes;
   result.kv_cache.value_bytes = cache.value().value_cache_bytes;
   result.kv_cache.total_bytes = cache.value().key_cache_bytes + cache.value().value_cache_bytes;
+  if (prompt_cache_enabled) {
+    const auto cache_stats = qwen35_host_prefix_cache().stats();
+    result.prompt_cache.enabled = true;
+    result.prompt_cache.block_tokens = cache_stats.block_tokens;
+    result.prompt_cache.capacity_blocks = cache_stats.capacity_blocks;
+    result.prompt_cache.stored_blocks = cache_stats.stored_blocks;
+    result.prompt_cache.hit_tokens = prompt_cache_lookup.hit_tokens;
+    result.prompt_cache.miss_tokens = prompt_token_count - prompt_cache_lookup.hit_tokens;
+    result.prompt_cache.committed_tokens = prompt_cache_committed_tokens;
+    result.prompt_cache.evicted_blocks = prompt_cache_evicted_blocks;
+    profiler.set_metadata("prompt_cache_committed_tokens",
+                          prompt_cache_committed_tokens);
+    profiler.set_metadata("prompt_cache_evicted_blocks",
+                          prompt_cache_evicted_blocks);
+    profiler.set_metadata("prompt_cache_stored_blocks",
+                          cache_stats.stored_blocks);
+  }
   profiler.set_metadata("generated_tokens", result.generated_tokens);
   profiler.set_status("ok");
   const auto artifacts = profiler.write_artifacts();

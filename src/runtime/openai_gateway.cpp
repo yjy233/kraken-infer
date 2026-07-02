@@ -3,6 +3,7 @@
 #include "toyllm/runtime/cpu_inference.hpp"
 #include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/mpsgraph_inference.hpp"
+#include "toyllm/runtime/reasoning_parser.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -379,6 +380,17 @@ bool bool_value(const JsonValue* value, bool fallback = false) {
   return value->boolean;
 }
 
+bool required_bool_value(const JsonValue* value, std::string_view name,
+                         bool fallback = false) {
+  if (value == nullptr || value->type == JsonValue::Type::null) {
+    return fallback;
+  }
+  if (value->type != JsonValue::Type::boolean) {
+    throw std::runtime_error(std::string{name} + " must be a boolean");
+  }
+  return value->boolean;
+}
+
 std::optional<std::size_t> size_value(const JsonValue* value) {
   if (value == nullptr || value->type != JsonValue::Type::number || value->number < 0.0) {
     return std::nullopt;
@@ -436,8 +448,14 @@ struct ChatRequest {
   std::string model;
   std::vector<ChatMessage> messages;
   std::size_t max_tokens{16};
+  std::size_t prefill_chunk_tokens{0};
   bool stream{false};
   bool enable_thinking{false};
+  bool cache_prompt{false};
+  std::size_t cache_reuse_min_tokens{0};
+  std::size_t cache_block_tokens{0};
+  std::size_t cache_capacity_blocks{0};
+  ReasoningFormat reasoning_format{ReasoningFormat::none};
   CpuSamplingConfig sampling;
   Device compute_device{Device::cpu()};
   std::vector<ToolSpec> tools;
@@ -448,8 +466,13 @@ struct CompletionRequest {
   std::string model;
   std::string prompt;
   std::size_t max_tokens{16};
+  std::size_t prefill_chunk_tokens{0};
   bool stream{false};
   bool enable_thinking{false};
+  bool cache_prompt{false};
+  std::size_t cache_reuse_min_tokens{0};
+  std::size_t cache_block_tokens{0};
+  std::size_t cache_capacity_blocks{0};
   CpuSamplingConfig sampling;
   Device compute_device{Device::cpu()};
 };
@@ -517,7 +540,13 @@ std::vector<ChatMessage> parse_messages(const JsonValue* value) {
 }
 
 void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayConfig& config,
-                                     std::size_t& max_tokens, bool& stream, bool& enable_thinking,
+                                     std::size_t& max_tokens,
+                                     std::size_t& prefill_chunk_tokens,
+                                     bool& stream, bool& enable_thinking,
+                                     bool& cache_prompt,
+                                     std::size_t& cache_reuse_min_tokens,
+                                     std::size_t& cache_block_tokens,
+                                     std::size_t& cache_capacity_blocks,
                                      Device& compute_device, CpuSamplingConfig& sampling) {
   max_tokens = config.default_max_tokens;
   if (const auto parsed = size_value(object_get(root, "max_tokens")); parsed.has_value()) {
@@ -527,12 +556,22 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
       parsed.has_value()) {
     max_tokens = *parsed;
   }
+  prefill_chunk_tokens = config.prefill_chunk_tokens;
+  if (const auto parsed = size_value(object_get(root, "prefill_chunk_tokens"));
+      parsed.has_value()) {
+    prefill_chunk_tokens = *parsed;
+  }
   stream = bool_value(object_get(root, "stream"), false);
-  enable_thinking = bool_value(object_get(root, "enable_thinking"), false);
+  enable_thinking =
+    required_bool_value(object_get(root, "enable_thinking"), "enable_thinking", false);
   if (const auto* chat_template_kwargs = object_get(root, "chat_template_kwargs");
       chat_template_kwargs != nullptr) {
-    enable_thinking = bool_value(object_get(*chat_template_kwargs, "enable_thinking"),
-                                 enable_thinking);
+    if (chat_template_kwargs->type != JsonValue::Type::object) {
+      throw std::runtime_error("chat_template_kwargs must be an object");
+    }
+    enable_thinking =
+      required_bool_value(object_get(*chat_template_kwargs, "enable_thinking"),
+                          "chat_template_kwargs.enable_thinking", enable_thinking);
   }
   compute_device = config.compute_device;
   const auto device = string_value(object_get(root, "device"));
@@ -564,6 +603,38 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
     sampling.seed_set = true;
     sampling.seed = *seed;
   }
+  cache_prompt = required_bool_value(object_get(root, "cache_prompt"),
+                                     "cache_prompt", config.cache_prompt);
+  cache_reuse_min_tokens = config.cache_reuse_min_tokens;
+  if (const auto parsed = size_value(object_get(root, "n_cache_reuse"));
+      parsed.has_value()) {
+    cache_reuse_min_tokens = *parsed;
+  }
+  cache_block_tokens = config.cache_block_tokens;
+  if (const auto parsed = size_value(object_get(root, "cache_block_tokens"));
+      parsed.has_value()) {
+    cache_block_tokens = *parsed;
+  }
+  cache_capacity_blocks = config.cache_capacity_blocks;
+  if (const auto parsed = size_value(object_get(root, "cache_capacity_blocks"));
+      parsed.has_value()) {
+    cache_capacity_blocks = *parsed;
+  }
+}
+
+ReasoningFormat parse_request_reasoning_format(const JsonValue& root) {
+  const auto* value = object_get(root, "reasoning_format");
+  if (value == nullptr || value->type == JsonValue::Type::null) {
+    return ReasoningFormat::none;
+  }
+  if (value->type != JsonValue::Type::string) {
+    throw std::runtime_error("reasoning_format must be a string");
+  }
+  const auto parsed = parse_reasoning_format(value->string);
+  if (!parsed.is_ok()) {
+    throw std::runtime_error(parsed.status().message());
+  }
+  return parsed.value();
 }
 
 std::string parse_prompt(const JsonValue* value) {
@@ -608,9 +679,15 @@ ChatRequest parse_chat_request(std::string_view body, const OpenAIGatewayConfig&
   ChatRequest request;
   request.model = string_value(object_get(root, "model"), config.model_id);
   request.messages = parse_messages(object_get(root, "messages"));
-  parse_common_generation_options(root, config, request.max_tokens, request.stream,
-                                  request.enable_thinking, request.compute_device,
+  parse_common_generation_options(root, config, request.max_tokens,
+                                  request.prefill_chunk_tokens, request.stream,
+                                  request.enable_thinking, request.cache_prompt,
+                                  request.cache_reuse_min_tokens,
+                                  request.cache_block_tokens,
+                                  request.cache_capacity_blocks,
+                                  request.compute_device,
                                   request.sampling);
+  request.reasoning_format = parse_request_reasoning_format(root);
   request.tools = parse_tools(object_get(root, "tools"));
   request.forced_tool = parse_tool_choice(object_get(root, "tool_choice"), request.tools);
   return request;
@@ -622,8 +699,13 @@ CompletionRequest parse_completion_request(std::string_view body,
   CompletionRequest request;
   request.model = string_value(object_get(root, "model"), config.model_id);
   request.prompt = parse_prompt(object_get(root, "prompt"));
-  parse_common_generation_options(root, config, request.max_tokens, request.stream,
-                                  request.enable_thinking, request.compute_device,
+  parse_common_generation_options(root, config, request.max_tokens,
+                                  request.prefill_chunk_tokens, request.stream,
+                                  request.enable_thinking, request.cache_prompt,
+                                  request.cache_reuse_min_tokens,
+                                  request.cache_block_tokens,
+                                  request.cache_capacity_blocks,
+                                  request.compute_device,
                                   request.sampling);
   return request;
 }
@@ -670,6 +752,25 @@ void send_json_response(
   response << "Connection: close\r\n\r\n";
   response << body;
   (void)write_all(fd, response.str());
+}
+
+std::vector<std::pair<std::string, std::string>> request_headers(
+  std::string_view request_id) {
+  return {{"X-Request-Id", std::string{request_id}}};
+}
+
+std::vector<std::pair<std::string, std::string>> request_headers(
+  std::string_view request_id, const CpuPromptCacheReport& cache) {
+  auto headers = request_headers(request_id);
+  if (cache.enabled) {
+    headers.push_back({"X-Kraken-Prompt-Cache-Hit-Tokens",
+                       std::to_string(cache.hit_tokens)});
+    headers.push_back({"X-Kraken-Prompt-Cache-Miss-Tokens",
+                       std::to_string(cache.miss_tokens)});
+    headers.push_back({"X-Kraken-Prompt-Cache-Committed-Tokens",
+                       std::to_string(cache.committed_tokens)});
+  }
+  return headers;
 }
 
 void send_text_response(int fd, int status, std::string_view content_type,
@@ -920,10 +1021,13 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
        "{\"type\":\"string\"},\"prompt\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"array\","
        "\"items\":{\"type\":\"string\"}}]},\"max_tokens\":{\"type\":\"integer\"},"
+       "\"prefill_chunk_tokens\":{\"type\":\"integer\"},"
        "\"temperature\":{\"type\":\"number\"},\"top_k\":{\"type\":\"integer\"},"
        "\"top_p\":{\"type\":\"number\"},"
        "\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
        "\"chat_template_kwargs\":{\"type\":\"object\"},"
+       "\"cache_prompt\":{\"type\":\"boolean\"},\"n_cache_reuse\":{\"type\":\"integer\"},"
+       "\"cache_block_tokens\":{\"type\":\"integer\"},\"cache_capacity_blocks\":{\"type\":\"integer\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
        "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"prompt\"]}}}},\"responses\":{\"200\":"
        "{\"description\":\"Text completion or SSE stream\"}}}},"
@@ -931,10 +1035,15 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
        "{\"type\":\"string\"},\"messages\":{\"type\":\"array\"},\"tools\":{\"type\":\"array\"},"
        "\"tool_choice\":{},\"max_tokens\":{\"type\":\"integer\"},\"max_completion_tokens\":"
-       "{\"type\":\"integer\"},\"temperature\":{\"type\":\"number\"},\"top_k\":"
+       "{\"type\":\"integer\"},\"prefill_chunk_tokens\":{\"type\":\"integer\"},"
+       "\"temperature\":{\"type\":\"number\"},\"top_k\":"
        "{\"type\":\"integer\"},\"top_p\":{\"type\":"
        "\"number\"},\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
-       "\"chat_template_kwargs\":{\"type\":\"object\"},"
+       "\"chat_template_kwargs\":{\"type\":\"object\",\"properties\":{\"enable_thinking\":"
+       "{\"type\":\"boolean\"}},\"additionalProperties\":true},"
+       "\"reasoning_format\":{\"type\":\"string\",\"enum\":[\"none\",\"auto\",\"deepseek\"]},"
+       "\"cache_prompt\":{\"type\":\"boolean\"},\"n_cache_reuse\":{\"type\":\"integer\"},"
+       "\"cache_block_tokens\":{\"type\":\"integer\"},\"cache_capacity_blocks\":{\"type\":\"integer\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
        "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"messages\"]}}}},\"responses\":{\"200\":"
        "{\"description\":\"Chat completion, tool call, or SSE stream\"}}}}}}";
@@ -956,15 +1065,19 @@ std::string completion_body(std::string_view id, std::int64_t created, std::stri
 }
 
 std::string chat_completion_body(std::string_view id, std::int64_t created,
-                                 std::string_view model, std::string_view content,
+                                 std::string_view model,
+                                 const ReasoningMessage& message,
                                  std::string_view finish_reason,
                                  std::size_t prompt_tokens,
                                  std::size_t completion_tokens) {
   std::ostringstream output;
   output << "{\"id\":\"" << json_escape(id) << "\",\"object\":\"chat.completion\",";
   output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
-         << "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\""
-         << json_escape(content)
+         << "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\"";
+  if (!message.reasoning_content.empty()) {
+    output << ",\"reasoning_content\":\"" << json_escape(message.reasoning_content) << '"';
+  }
+  output << ",\"content\":\"" << json_escape(message.content)
          << "\"},\"finish_reason\":\"" << json_escape(finish_reason)
          << "\"}],\"usage\":{\"prompt_tokens\":" << prompt_tokens
          << ",\"completion_tokens\":" << completion_tokens
@@ -1004,7 +1117,9 @@ std::string completion_stream_chunk(std::string_view id, std::int64_t created,
 }
 
 std::string stream_chunk(std::string_view id, std::int64_t created, std::string_view model,
-                         std::string_view delta, bool role, std::string_view finish_reason) {
+                         std::string_view content_delta,
+                         std::string_view reasoning_delta, bool role,
+                         std::string_view finish_reason) {
   std::ostringstream output;
   output << "{\"id\":\"" << json_escape(id) << "\",\"object\":\"chat.completion.chunk\",";
   output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
@@ -1014,11 +1129,18 @@ std::string stream_chunk(std::string_view id, std::int64_t created, std::string_
     output << "\"role\":\"assistant\"";
     wrote = true;
   }
-  if (!delta.empty()) {
+  if (!reasoning_delta.empty()) {
     if (wrote) {
       output << ',';
     }
-    output << "\"content\":\"" << json_escape(delta) << "\"";
+    output << "\"reasoning_content\":\"" << json_escape(reasoning_delta) << "\"";
+    wrote = true;
+  }
+  if (!content_delta.empty()) {
+    if (wrote) {
+      output << ',';
+    }
+    output << "\"content\":\"" << json_escape(content_delta) << "\"";
   }
   output << "},\"finish_reason\":";
   if (finish_reason.empty()) {
@@ -1168,7 +1290,12 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
   generation.model_dir = config.model_dir;
   generation.prompt = request.prompt;
   generation.max_new_tokens = request.max_tokens;
+  generation.prefill_chunk_tokens = request.prefill_chunk_tokens;
   generation.enable_thinking = request.enable_thinking;
+  generation.cache_prompt = request.cache_prompt;
+  generation.cache_reuse_min_tokens = request.cache_reuse_min_tokens;
+  generation.cache_block_tokens = request.cache_block_tokens;
+  generation.cache_capacity_blocks = request.cache_capacity_blocks;
   generation.compute_device = request.compute_device;
   generation.sampling = request.sampling;
   generation.observability = observability;
@@ -1189,7 +1316,7 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
                                        result.value().finish_reason,
                                        result.value().prompt_tokens,
                                        result.value().generated_tokens),
-                       {{"X-Request-Id", std::string{request_id}}});
+                       request_headers(request_id, result.value().prompt_cache));
     return;
   }
 
@@ -1220,7 +1347,12 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
   generation.model_dir = config.model_dir;
   generation.messages = request.messages;
   generation.max_new_tokens = request.max_tokens;
+  generation.prefill_chunk_tokens = request.prefill_chunk_tokens;
   generation.enable_thinking = request.enable_thinking;
+  generation.cache_prompt = request.cache_prompt;
+  generation.cache_reuse_min_tokens = request.cache_reuse_min_tokens;
+  generation.cache_block_tokens = request.cache_block_tokens;
+  generation.cache_capacity_blocks = request.cache_capacity_blocks;
   generation.compute_device = request.compute_device;
   generation.sampling = request.sampling;
   generation.observability = observability;
@@ -1236,19 +1368,32 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
                          {{"X-Request-Id", std::string{request_id}}});
       return;
     }
+    const auto message = split_reasoning_content(result.value().text,
+                                                 request.enable_thinking,
+                                                 request.reasoning_format);
     send_json_response(fd, 200,
-                       chat_completion_body(id, created, request.model, result.value().text,
+                       chat_completion_body(id, created, request.model, message,
                                             result.value().finish_reason,
                                             result.value().prompt_tokens,
                                             result.value().generated_tokens),
-                       {{"X-Request-Id", std::string{request_id}}});
+                       request_headers(request_id, result.value().prompt_cache));
     return;
   }
 
   send_sse_headers(fd, {{"X-Request-Id", std::string{request_id}}});
-  send_sse(fd, stream_chunk(id, created, request.model, {}, true, {}));
+  send_sse(fd, stream_chunk(id, created, request.model, {}, {}, true, {}));
+  ReasoningStreamParser reasoning_parser{request.enable_thinking,
+                                         request.reasoning_format};
   generation.stream_token = [&](std::string_view token) {
-    send_sse(fd, stream_chunk(id, created, request.model, token, false, {}));
+    for (const auto& delta : reasoning_parser.push(token)) {
+      if (delta.kind == ReasoningDelta::Kind::reasoning) {
+        send_sse(fd, stream_chunk(id, created, request.model, {}, delta.text,
+                                  false, {}));
+      } else {
+        send_sse(fd, stream_chunk(id, created, request.model, delta.text, {},
+                                  false, {}));
+      }
+    }
   };
   const auto result = generate_cpu(generation);
   if (!result.is_ok()) {
@@ -1256,7 +1401,16 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
     send_sse(fd, "[DONE]");
     return;
   }
-  send_sse(fd, stream_chunk(id, created, request.model, {}, false,
+  for (const auto& delta : reasoning_parser.finish()) {
+    if (delta.kind == ReasoningDelta::Kind::reasoning) {
+      send_sse(fd, stream_chunk(id, created, request.model, {}, delta.text,
+                                false, {}));
+    } else {
+      send_sse(fd, stream_chunk(id, created, request.model, delta.text, {},
+                                false, {}));
+    }
+  }
+  send_sse(fd, stream_chunk(id, created, request.model, {}, {}, false,
                             result.value().finish_reason));
   send_sse(fd, "[DONE]");
 }
