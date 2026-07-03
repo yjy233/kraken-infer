@@ -212,6 +212,37 @@ void test_qwen35_prefix_cache_index() {
   assert(stats.evicted_blocks == 1);
 }
 
+void test_qwen35_prefix_cache_min_reuse_and_clear() {
+  toyllm::Qwen35PrefixCacheIndex cache{
+    toyllm::Qwen35PrefixCacheConfig{
+      true,
+      2,
+      4,
+      4,
+    }};
+  const std::vector<std::int64_t> tokens{1, 2, 3, 4, 5};
+  assert(cache.commit_block(tokens, 0).inserted);
+
+  auto below_threshold = cache.lookup(tokens);
+  assert(below_threshold.hit_tokens == 0);
+  assert(below_threshold.block_hashes.empty());
+
+  assert(cache.commit_block(tokens, 2).inserted);
+  auto hit = cache.lookup(tokens);
+  assert(hit.hit_tokens == 4);
+  assert(hit.block_hashes.size() == 2);
+
+  cache.clear();
+  auto after_clear = cache.lookup(tokens);
+  assert(after_clear.hit_tokens == 0);
+  assert(after_clear.block_hashes.empty());
+  const auto stats = cache.stats();
+  assert(stats.enabled);
+  assert(stats.block_tokens == 2);
+  assert(stats.capacity_blocks == 4);
+  assert(stats.stored_blocks == 0);
+}
+
 void test_mpsgraph_kv_cache_layout() {
   auto context_result = toyllm::mpsgraph::MpsGraphContext::create();
   if (!context_result.is_ok()) {
@@ -3025,6 +3056,7 @@ int main() {
   test_mpsgraph_generation_does_not_fallback();
   test_reasoning_parser();
   test_qwen35_prefix_cache_index();
+  test_qwen35_prefix_cache_min_reuse_and_clear();
   test_mpsgraph_kv_cache_layout();
   test_mpsgraph_kv_cache_store();
   test_mpsgraph_qk_norm_rope_and_attention_ops();
