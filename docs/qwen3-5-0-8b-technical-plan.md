@@ -733,6 +733,30 @@ text GGUF:   qwen35 / qwen35moe / qwen3vl / qwen3vlmoe
 mmproj GGUF: clip arch, vision/audio encoder + projector
 ```
 
+### Qwen3.5 0.8B LV 调研结论
+
+Qwen3.5 0.8B 的首个多模态目标按 `Qwen3_5ForConditionalGeneration`
+处理，不把它当成 `qwen3vl` text decoder。`~/code/llama.cpp` 的实际拆分是：
+
+- text GGUF 仍然走 `qwen35`，即 `Qwen3_5TextModel` 和
+  `llama_model_qwen35`。
+- image 能力不在 `src/models/qwen35.cpp` 的 decoder graph 里实现。
+- conditional 模型另有一个 mmproj GGUF，负责 vision encoder、merger/projector
+  和 deepstack projector。
+- 本地 llama.cpp 的 mmproj converter/projector 复用了 `qwen3vl_merger` 这个实现
+  名称；这只是视觉侧 projector 类型名，不改变 Qwen3.5 0.8B 的 text runtime 目标。
+
+因此第一版 Qwen3.5 0.8B LV 只需要支持：
+
+```text
+text model:  general.architecture = "qwen35"
+mmproj:      general.architecture = "clip"
+projector:   clip.projector_type / clip.vision.projector_type = "qwen3vl_merger"
+```
+
+不需要先实现 `qwen3vl` / `qwen3vlmoe` text architecture，也不应该把视觉权重塞进
+`Qwen35Runtime` 的 decoder layer weight map。
+
 CLI/API 形态：
 
 ```text
@@ -771,12 +795,14 @@ clip.audio.projector.downsample_rate
 clip.audio.projector.head_count
 ```
 
-Qwen3VL vision path follows llama.cpp `tools/mtmd/models/qwen3vl.cpp`:
+Qwen3.5 0.8B image path follows llama.cpp 的 mtmd/mmproj pipeline：
 
 - image preprocessing: resize/tile/normalize according to mmproj metadata。
-- patch embedding: Qwen3VL Conv3D temporal kernel is split into `v.patch_embd.weight` and `v.patch_embd.weight.1` by converter。
+- patch embedding: temporal Conv3D kernel is split into `v.patch_embd.weight`
+  and `v.patch_embd.weight.1` by converter。
 - vision transformer: `v.blk.{i}.*` tensors。
-- merger/projector: `mm.0.*` and `mm.2.*` for Qwen3VL merger。
+- merger/projector: `mm.0.*` and `mm.2.*` for the Qwen3.5 conditional
+  mmproj merger。
 - deepstack: `v.deepstack.{i}.norm/fc1/fc2` for `clip.vision.is_deepstack_layers`。
 
 Qwen3 Omni audio path follows llama.cpp `tools/mtmd/models/qwen3a.cpp` and `mtmd-audio.cpp`:
@@ -787,10 +813,17 @@ Qwen3 Omni audio path follows llama.cpp `tools/mtmd/models/qwen3a.cpp` and `mtmd
 
 embedding injection：
 
-- tokenizer 生成包含 media placeholder 的 token 序列。
-- vision/audio encoder 输出 projected embeddings。
-- runtime 用 projected embeddings 替换 placeholder span 的 token embeddings。
-- text token、image patch token、audio frame token 的 position ids 和 MRoPE section 需要和 llama.cpp mtmd 行为对齐。
+- OpenAI/chat 输入先被拆成 text chunk 和 media chunk。
+- text chunk 走 tokenizer，进入 decoder 的 token embedding path。
+- vision/audio encoder 输出 projected embeddings，embedding 宽度必须等于 text model
+  的 input embedding width；Qwen3.5 0.8B 通常是 1024，但运行时必须按 GGUF
+  metadata 校验，不能硬编码。
+- media chunk 直接进入 decoder 的 raw embedding path，不伪造成 token id。
+- 对 MRoPE decoder，text token 的 position 在所有 RoPE section broadcast；image
+  embedding 则携带二维 decoder position。
+- image token 的 MRoPE 位置按 llama.cpp mtmd：`t = pos0`，
+  `x = pos0 + col`，`y = pos0 + row`，`z = 0`；图片占用的 logical
+  position 数是 `max(nx, ny)`。
 - 多图、多音频输入时，每个 media item 保留独立 grid/chunk metadata，batch 内不能混用 shape。
 
 Omni 以 llama.cpp GGUF scope 为准：text decoder 接收 vision/audio embeddings 并生成文本 token。若 GGUF 包含额外 talker/vocoder 模块，需要作为新的 mm output backend 接入同一 media pipeline。

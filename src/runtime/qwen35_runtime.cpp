@@ -470,6 +470,12 @@ Result<std::size_t> checked_size_t(std::uint64_t value, const char* name) {
 
 struct Qwen35HostPrefixCacheLayout {
   std::filesystem::path model_dir;
+  std::filesystem::path model_file;
+  std::uint64_t gguf_version{0};
+  std::uint64_t gguf_tensor_count{0};
+  std::uint64_t gguf_metadata_count{0};
+  std::uint64_t gguf_file_size{0};
+  std::uint64_t tokenizer_fingerprint{0};
   std::size_t block_tokens{0};
   std::size_t full_attention_layers{0};
   std::size_t linear_attention_layers{0};
@@ -484,6 +490,12 @@ struct Qwen35HostPrefixCacheLayout {
 bool operator==(const Qwen35HostPrefixCacheLayout& lhs,
                 const Qwen35HostPrefixCacheLayout& rhs) {
   return lhs.model_dir == rhs.model_dir &&
+         lhs.model_file == rhs.model_file &&
+         lhs.gguf_version == rhs.gguf_version &&
+         lhs.gguf_tensor_count == rhs.gguf_tensor_count &&
+         lhs.gguf_metadata_count == rhs.gguf_metadata_count &&
+         lhs.gguf_file_size == rhs.gguf_file_size &&
+         lhs.tokenizer_fingerprint == rhs.tokenizer_fingerprint &&
          lhs.block_tokens == rhs.block_tokens &&
          lhs.full_attention_layers == rhs.full_attention_layers &&
          lhs.linear_attention_layers == rhs.linear_attention_layers &&
@@ -493,6 +505,57 @@ bool operator==(const Qwen35HostPrefixCacheLayout& lhs,
          lhs.recurrent_r_cache_bytes == rhs.recurrent_r_cache_bytes &&
          lhs.recurrent_s_cache_bytes == rhs.recurrent_s_cache_bytes &&
          lhs.kv_cache_f16 == rhs.kv_cache_f16;
+}
+
+std::uint64_t qwen35_prefix_mix_u64(std::uint64_t hash,
+                                    std::uint64_t value) {
+  constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+  hash ^= value;
+  hash *= kFnvPrime;
+  return hash;
+}
+
+std::uint64_t qwen35_prefix_mix_bytes(std::uint64_t hash,
+                                      std::string_view value) {
+  hash = qwen35_prefix_mix_u64(hash,
+                               static_cast<std::uint64_t>(value.size()));
+  for (const char ch : value) {
+    hash = qwen35_prefix_mix_u64(
+      hash, static_cast<std::uint64_t>(static_cast<unsigned char>(ch)));
+  }
+  return hash;
+}
+
+std::uint64_t qwen35_tokenizer_fingerprint(const GgufTokenizer& tokenizer) {
+  std::uint64_t hash = 1469598103934665603ULL;
+  hash = qwen35_prefix_mix_bytes(hash, tokenizer.model);
+  hash = qwen35_prefix_mix_bytes(hash, tokenizer.pre);
+  hash = qwen35_prefix_mix_bytes(hash, tokenizer.chat_template);
+  hash = qwen35_prefix_mix_u64(
+    hash, static_cast<std::uint64_t>(tokenizer.tokens.size()));
+  for (const auto& token : tokenizer.tokens) {
+    hash = qwen35_prefix_mix_bytes(hash, token);
+  }
+  hash = qwen35_prefix_mix_u64(
+    hash, static_cast<std::uint64_t>(tokenizer.token_types.size()));
+  for (const auto token_type : tokenizer.token_types) {
+    hash = qwen35_prefix_mix_u64(
+      hash, static_cast<std::uint64_t>(token_type));
+  }
+  hash = qwen35_prefix_mix_u64(
+    hash, static_cast<std::uint64_t>(tokenizer.merges.size()));
+  for (const auto& merge : tokenizer.merges) {
+    hash = qwen35_prefix_mix_bytes(hash, merge);
+  }
+  hash = qwen35_prefix_mix_u64(
+    hash, static_cast<std::uint64_t>(tokenizer.bos_token_id));
+  hash = qwen35_prefix_mix_u64(
+    hash, static_cast<std::uint64_t>(tokenizer.eos_token_id));
+  hash = qwen35_prefix_mix_u64(
+    hash, static_cast<std::uint64_t>(tokenizer.pad_token_id));
+  hash = qwen35_prefix_mix_u64(hash, tokenizer.add_bos_token ? 1U : 0U);
+  hash = qwen35_prefix_mix_u64(hash, tokenizer.add_eos_token ? 1U : 0U);
+  return hash == 0 ? 1 : hash;
 }
 
 struct Qwen35HostPrefixPayload {
@@ -4359,6 +4422,12 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (prompt_cache_enabled) {
     Qwen35HostPrefixCacheLayout layout;
     layout.model_dir = request.model_dir;
+    layout.model_file = bundle.value().model_file;
+    layout.gguf_version = bundle.value().gguf_version;
+    layout.gguf_tensor_count = bundle.value().gguf_tensor_count;
+    layout.gguf_metadata_count = bundle.value().gguf_metadata_count;
+    layout.gguf_file_size = bundle.value().gguf_file_size;
+    layout.tokenizer_fingerprint = qwen35_tokenizer_fingerprint(tokenizer.value());
     layout.block_tokens = cache_block_tokens;
     layout.full_attention_layers = plan.value().cache.full_attention_layers;
     layout.linear_attention_layers = plan.value().cache.linear_attention_layers;

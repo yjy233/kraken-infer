@@ -267,9 +267,9 @@ Qwen3.5 cross-request prefix cache：
   --model-id qwen3.5-0.8b \
   --device mps \
   --max-new-tokens 32 \
-  --prefill-chunk-tokens 64 \
+  --prefill-chunk-tokens 32 \
   --cache-prompt \
-  --cache-block-tokens 64 \
+  --cache-block-tokens 32 \
   --cache-capacity-blocks 16
 ```
 
@@ -283,8 +283,10 @@ curl -i http://127.0.0.1:18080/v1/chat/completions \
     "model": "qwen3.5-0.8b",
     "messages": [{"role": "user", "content": "请用三段话解释 KV cache 的作用、prefill 和 decode 的区别，以及为什么相同 system prompt 能复用 cache。每段都要包含一个具体例子。"}],
     "max_completion_tokens": 32,
+    "prefill_chunk_tokens": 32,
     "cache_prompt": true,
-    "n_cache_reuse": 64,
+    "cache_block_tokens": 32,
+    "n_cache_reuse": 32,
     "chat_template_kwargs": {"enable_thinking": false}
   }'
 ```
@@ -292,7 +294,7 @@ curl -i http://127.0.0.1:18080/v1/chat/completions \
 Look for:
 
 ```text
-X-Kraken-Prompt-Cache-Hit-Tokens: 64
+X-Kraken-Prompt-Cache-Hit-Tokens: 32
 X-Kraken-Prompt-Cache-Miss-Tokens: ...
 ```
 
@@ -450,7 +452,8 @@ web/                     Static browser chat page assets
 - MPS path 已 full-forward，但仍是 correctness-first/initial performance path。
 - 许多 MPS kernel dispatch 仍逐 op 等待 command buffer 完成。
 - logits 仍会读回 CPU 做 sampling。
-- KV cache 当前用 F32，后续可做 BF16/FP16 KV 或 paged KV。
+- Qwen3.5 Metal path 默认使用 F16 KV，并支持 host-backed exact-prefix
+  跨请求 block cache；paged KV 和 block-table attention 仍是后续工作。
 - prefill 仍以 batch=1/token-wise 路径为主，尚未做 sequence GEMM 化。
 - Gateway 是顺序 POSIX HTTP server，不是并发生产 server。
 - Gateway usage token 统计当前返回 `0`。

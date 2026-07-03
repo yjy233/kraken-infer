@@ -450,6 +450,7 @@ struct ChatRequest {
   std::size_t max_tokens{16};
   std::size_t prefill_chunk_tokens{0};
   bool stream{false};
+  bool stream_include_usage{false};
   bool enable_thinking{false};
   bool cache_prompt{false};
   std::size_t cache_reuse_min_tokens{0};
@@ -468,6 +469,7 @@ struct CompletionRequest {
   std::size_t max_tokens{16};
   std::size_t prefill_chunk_tokens{0};
   bool stream{false};
+  bool stream_include_usage{false};
   bool enable_thinking{false};
   bool cache_prompt{false};
   std::size_t cache_reuse_min_tokens{0};
@@ -542,7 +544,8 @@ std::vector<ChatMessage> parse_messages(const JsonValue* value) {
 void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayConfig& config,
                                      std::size_t& max_tokens,
                                      std::size_t& prefill_chunk_tokens,
-                                     bool& stream, bool& enable_thinking,
+                                     bool& stream, bool& stream_include_usage,
+                                     bool& enable_thinking,
                                      bool& cache_prompt,
                                      std::size_t& cache_reuse_min_tokens,
                                      std::size_t& cache_block_tokens,
@@ -562,6 +565,13 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
     prefill_chunk_tokens = *parsed;
   }
   stream = bool_value(object_get(root, "stream"), false);
+  stream_include_usage = false;
+  if (const auto* stream_options = object_get(root, "stream_options");
+      stream_options != nullptr && stream_options->type == JsonValue::Type::object) {
+    stream_include_usage =
+      required_bool_value(object_get(*stream_options, "include_usage"),
+                          "stream_options.include_usage", false);
+  }
   enable_thinking =
     required_bool_value(object_get(root, "enable_thinking"), "enable_thinking", false);
   if (const auto* chat_template_kwargs = object_get(root, "chat_template_kwargs");
@@ -681,6 +691,7 @@ ChatRequest parse_chat_request(std::string_view body, const OpenAIGatewayConfig&
   request.messages = parse_messages(object_get(root, "messages"));
   parse_common_generation_options(root, config, request.max_tokens,
                                   request.prefill_chunk_tokens, request.stream,
+                                  request.stream_include_usage,
                                   request.enable_thinking, request.cache_prompt,
                                   request.cache_reuse_min_tokens,
                                   request.cache_block_tokens,
@@ -701,6 +712,7 @@ CompletionRequest parse_completion_request(std::string_view body,
   request.prompt = parse_prompt(object_get(root, "prompt"));
   parse_common_generation_options(root, config, request.max_tokens,
                                   request.prefill_chunk_tokens, request.stream,
+                                  request.stream_include_usage,
                                   request.enable_thinking, request.cache_prompt,
                                   request.cache_reuse_min_tokens,
                                   request.cache_block_tokens,
@@ -1024,13 +1036,17 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"prefill_chunk_tokens\":{\"type\":\"integer\"},"
        "\"temperature\":{\"type\":\"number\"},\"top_k\":{\"type\":\"integer\"},"
        "\"top_p\":{\"type\":\"number\"},"
-       "\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
+       "\"stream\":{\"type\":\"boolean\"},\"stream_options\":{\"type\":\"object\","
+       "\"properties\":{\"include_usage\":{\"type\":\"boolean\"}},"
+       "\"additionalProperties\":true},\"enable_thinking\":{\"type\":\"boolean\"},"
        "\"chat_template_kwargs\":{\"type\":\"object\"},"
        "\"cache_prompt\":{\"type\":\"boolean\"},\"n_cache_reuse\":{\"type\":\"integer\"},"
        "\"cache_block_tokens\":{\"type\":\"integer\"},\"cache_capacity_blocks\":{\"type\":\"integer\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
        "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"prompt\"]}}}},\"responses\":{\"200\":"
-       "{\"description\":\"Text completion or SSE stream\"}}}},"
+       "{\"description\":\"Text completion or SSE stream\",\"content\":{\"application/json\":"
+       "{\"schema\":{\"type\":\"object\",\"properties\":{\"usage\":{\"$ref\":"
+       "\"#/components/schemas/Usage\"}}}}}}}}},"
        "\"/v1/chat/completions\":{\"post\":{\"requestBody\":{\"required\":true,\"content\":{"
        "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
        "{\"type\":\"string\"},\"messages\":{\"type\":\"array\"},\"tools\":{\"type\":\"array\"},"
@@ -1038,7 +1054,9 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "{\"type\":\"integer\"},\"prefill_chunk_tokens\":{\"type\":\"integer\"},"
        "\"temperature\":{\"type\":\"number\"},\"top_k\":"
        "{\"type\":\"integer\"},\"top_p\":{\"type\":"
-       "\"number\"},\"stream\":{\"type\":\"boolean\"},\"enable_thinking\":{\"type\":\"boolean\"},"
+       "\"number\"},\"stream\":{\"type\":\"boolean\"},\"stream_options\":{\"type\":\"object\","
+       "\"properties\":{\"include_usage\":{\"type\":\"boolean\"}},"
+       "\"additionalProperties\":true},\"enable_thinking\":{\"type\":\"boolean\"},"
        "\"chat_template_kwargs\":{\"type\":\"object\",\"properties\":{\"enable_thinking\":"
        "{\"type\":\"boolean\"}},\"additionalProperties\":true},"
        "\"reasoning_format\":{\"type\":\"string\",\"enum\":[\"none\",\"auto\",\"deepseek\"]},"
@@ -1046,21 +1064,40 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"cache_block_tokens\":{\"type\":\"integer\"},\"cache_capacity_blocks\":{\"type\":\"integer\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
        "\"mps\",\"mps:0\",\"mpsgraph\"]}},\"required\":[\"messages\"]}}}},\"responses\":{\"200\":"
-       "{\"description\":\"Chat completion, tool call, or SSE stream\"}}}}}}";
+       "{\"description\":\"Chat completion, tool call, or SSE stream\",\"content\":"
+       "{\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"usage\":"
+       "{\"$ref\":\"#/components/schemas/Usage\"}}}}}}}}}},\"components\":{\"schemas\":"
+       "{\"Usage\":{\"type\":\"object\",\"properties\":{\"prompt_tokens\":{\"type\":\"integer\"},"
+       "\"completion_tokens\":{\"type\":\"integer\"},\"total_tokens\":{\"type\":\"integer\"},"
+       "\"prompt_tokens_details\":{\"type\":\"object\",\"properties\":{\"cached_tokens\":"
+       "{\"type\":\"integer\",\"description\":\"Number of prompt tokens served from the "
+       "cross-request KV cache.\"}}}},\"required\":[\"prompt_tokens\",\"completion_tokens\","
+       "\"total_tokens\",\"prompt_tokens_details\"]}}}}";
   return output.str();
+}
+
+void append_usage(std::ostringstream& output, std::size_t prompt_tokens,
+                  std::size_t completion_tokens, std::size_t cached_tokens) {
+  cached_tokens = std::min(cached_tokens, prompt_tokens);
+  output << "\"usage\":{\"prompt_tokens\":" << prompt_tokens
+         << ",\"completion_tokens\":" << completion_tokens
+         << ",\"total_tokens\":" << (prompt_tokens + completion_tokens)
+         << ",\"prompt_tokens_details\":{\"cached_tokens\":" << cached_tokens
+         << "}}";
 }
 
 std::string completion_body(std::string_view id, std::int64_t created, std::string_view model,
                             std::string_view text, std::string_view finish_reason,
-                            std::size_t prompt_tokens, std::size_t completion_tokens) {
+                            std::size_t prompt_tokens, std::size_t completion_tokens,
+                            std::size_t cached_tokens) {
   std::ostringstream output;
   output << "{\"id\":\"" << json_escape(id) << "\",\"object\":\"text_completion\",";
   output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
          << "\",\"choices\":[{\"index\":0,\"text\":\"" << json_escape(text)
          << "\",\"finish_reason\":\"" << json_escape(finish_reason)
-         << "\"}],\"usage\":{\"prompt_tokens\":" << prompt_tokens
-         << ",\"completion_tokens\":" << completion_tokens
-         << ",\"total_tokens\":" << (prompt_tokens + completion_tokens) << "}}";
+         << "\"}],";
+  append_usage(output, prompt_tokens, completion_tokens, cached_tokens);
+  output << '}';
   return output.str();
 }
 
@@ -1069,7 +1106,8 @@ std::string chat_completion_body(std::string_view id, std::int64_t created,
                                  const ReasoningMessage& message,
                                  std::string_view finish_reason,
                                  std::size_t prompt_tokens,
-                                 std::size_t completion_tokens) {
+                                 std::size_t completion_tokens,
+                                 std::size_t cached_tokens) {
   std::ostringstream output;
   output << "{\"id\":\"" << json_escape(id) << "\",\"object\":\"chat.completion\",";
   output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
@@ -1079,9 +1117,9 @@ std::string chat_completion_body(std::string_view id, std::int64_t created,
   }
   output << ",\"content\":\"" << json_escape(message.content)
          << "\"},\"finish_reason\":\"" << json_escape(finish_reason)
-         << "\"}],\"usage\":{\"prompt_tokens\":" << prompt_tokens
-         << ",\"completion_tokens\":" << completion_tokens
-         << ",\"total_tokens\":" << (prompt_tokens + completion_tokens) << "}}";
+         << "\"}],";
+  append_usage(output, prompt_tokens, completion_tokens, cached_tokens);
+  output << '}';
   return output.str();
 }
 
@@ -1094,8 +1132,9 @@ std::string tool_call_body(std::string_view id, std::int64_t created, std::strin
             "\"content\":null,\"tool_calls\":[{\"id\":\"call_0\",\"type\":\"function\","
             "\"function\":{\"name\":\""
          << json_escape(tool_name)
-         << "\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}],"
-            "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}";
+         << "\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}],";
+  append_usage(output, 0, 0, 0);
+  output << '}';
   return output.str();
 }
 
@@ -1113,6 +1152,21 @@ std::string completion_stream_chunk(std::string_view id, std::int64_t created,
     output << '"' << json_escape(finish_reason) << '"';
   }
   output << "}]}";
+  return output.str();
+}
+
+std::string completion_stream_usage_chunk(std::string_view id,
+                                          std::int64_t created,
+                                          std::string_view model,
+                                          std::size_t prompt_tokens,
+                                          std::size_t completion_tokens,
+                                          std::size_t cached_tokens) {
+  std::ostringstream output;
+  output << "{\"id\":\"" << json_escape(id) << "\",\"object\":\"text_completion\",";
+  output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
+         << "\",\"choices\":[],";
+  append_usage(output, prompt_tokens, completion_tokens, cached_tokens);
+  output << '}';
   return output.str();
 }
 
@@ -1149,6 +1203,21 @@ std::string stream_chunk(std::string_view id, std::int64_t created, std::string_
     output << '"' << json_escape(finish_reason) << '"';
   }
   output << "}]}";
+  return output.str();
+}
+
+std::string stream_usage_chunk(std::string_view id, std::int64_t created,
+                               std::string_view model,
+                               std::size_t prompt_tokens,
+                               std::size_t completion_tokens,
+                               std::size_t cached_tokens) {
+  std::ostringstream output;
+  output << "{\"id\":\"" << json_escape(id)
+         << "\",\"object\":\"chat.completion.chunk\",";
+  output << "\"created\":" << created << ",\"model\":\"" << json_escape(model)
+         << "\",\"choices\":[],";
+  append_usage(output, prompt_tokens, completion_tokens, cached_tokens);
+  output << '}';
   return output.str();
 }
 
@@ -1279,6 +1348,9 @@ void send_forced_tool_response(int fd, const ChatRequest& request, std::string_v
   send_sse_headers(fd, {{"X-Request-Id", std::string{request_id}}});
   send_sse(fd, tool_stream_chunk(id, created, request.model, tool_name, false));
   send_sse(fd, tool_stream_chunk(id, created, request.model, tool_name, true));
+  if (request.stream_include_usage) {
+    send_sse(fd, stream_usage_chunk(id, created, request.model, 0, 0, 0));
+  }
   send_sse(fd, "[DONE]");
 }
 
@@ -1315,7 +1387,8 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
                        completion_body(id, created, request.model, result.value().text,
                                        result.value().finish_reason,
                                        result.value().prompt_tokens,
-                                       result.value().generated_tokens),
+                                       result.value().generated_tokens,
+                                       result.value().prompt_cache.hit_tokens),
                        request_headers(request_id, result.value().prompt_cache));
     return;
   }
@@ -1332,6 +1405,12 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
   }
   send_sse(fd, completion_stream_chunk(id, created, request.model, {},
                                        result.value().finish_reason));
+  if (request.stream_include_usage) {
+    send_sse(fd, completion_stream_usage_chunk(
+                   id, created, request.model, result.value().prompt_tokens,
+                   result.value().generated_tokens,
+                   result.value().prompt_cache.hit_tokens));
+  }
   send_sse(fd, "[DONE]");
 }
 
@@ -1375,7 +1454,8 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
                        chat_completion_body(id, created, request.model, message,
                                             result.value().finish_reason,
                                             result.value().prompt_tokens,
-                                            result.value().generated_tokens),
+                                            result.value().generated_tokens,
+                                            result.value().prompt_cache.hit_tokens),
                        request_headers(request_id, result.value().prompt_cache));
     return;
   }
@@ -1412,6 +1492,12 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
   }
   send_sse(fd, stream_chunk(id, created, request.model, {}, {}, false,
                             result.value().finish_reason));
+  if (request.stream_include_usage) {
+    send_sse(fd, stream_usage_chunk(id, created, request.model,
+                                    result.value().prompt_tokens,
+                                    result.value().generated_tokens,
+                                    result.value().prompt_cache.hit_tokens));
+  }
   send_sse(fd, "[DONE]");
 }
 

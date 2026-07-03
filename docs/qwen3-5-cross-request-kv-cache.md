@@ -108,6 +108,23 @@ active row 0。
 经过 MRoPE，active cache 里保存的是带 absolute position 的 K，直接把中间 token 搬到
 新位置会有正确性风险。第一版只复用“相同 token 在相同 absolute position”的 prefix。
 
+### Qwen3.5 0.8B LV 对 cache 的影响
+
+Qwen3.5 0.8B 的 text+image 路径在 llama.cpp 中不是把图片转成普通 token id：
+
+- text decoder 仍是 `qwen35`。
+- image 侧由单独 mmproj GGUF 负责 vision encoder 和 projector。
+- mtmd 把 prompt 拆成 text chunk 和 image chunk。
+- text chunk 进入 token embedding path。
+- image chunk 先编码成 projected embedding，然后作为 raw embedding batch 喂给
+  decoder。
+- 对 MRoPE decoder，text token 的 position 会 broadcast 到所有 section；image
+  embedding 使用二维 position。
+
+因此跨请求 cache 的第一版不能继续假设 prompt prefix 是
+`std::vector<std::int64_t> tokens`。纯文本请求可以继续走 token block key；一旦请求
+包含图片，block key 必须描述 decoder 实际看到的多模态 prefix。
+
 ## Block Cache 设计
 
 ### Cache Key
@@ -117,11 +134,23 @@ active row 0。
 - model fingerprint：GGUF 路径、文件大小、mtime 或 GGUF metadata hash。
 - tokenizer fingerprint：vocab / merges / chat template hash。
 - runtime fingerprint：KV dtype、block size、Qwen3.5 layout version。
+- mmproj fingerprint：mmproj GGUF 路径、文件大小、mtime 或 metadata hash；纯文本
+  请求可为空。
 - parent block hash。
-- 当前 block token ids hash。
-- 当前 block token count。
+- 当前 block 的 decoder items：
+  - text item: token id。
+  - image item: image bytes hash 或调用方提供的稳定 image id。
+  - image item: preprocessor parameters、输出 grid `nx/ny`、temporal merge、logical
+    position count。
+  - embedding item: projected embedding hash，或能唯一推出该 embedding 的
+    image/mmproj/preprocess fingerprint。
+- 当前 block 的 decoder item count。
 
-hash 只用于索引。命中后必须校验保存的 token ids，避免 hash collision 导致错误复用。
+hash 只用于索引。命中后必须校验保存的 token ids / image ids / grid metadata，
+避免 hash collision 或图像 preprocess 差异导致错误复用。
+
+第一阶段可以先规定：包含 image chunk 的请求只允许在 image chunk 边界处切 block，
+并且不跨 image chunk 做半个 block 的复用。后续再支持 text/image 混排 block。
 
 ### Metadata
 
@@ -353,8 +382,12 @@ OpenAI-compatible request fields：
   - `prompt_cache_miss_tokens`
   - `prompt_cache_committed_tokens`
   - `prompt_cache_blocks`
-- 后续可补 OpenAI-style：
+- OpenAI-compatible usage：
   - `usage.prompt_tokens_details.cached_tokens`
+
+`cached_tokens` 统计已经从跨请求 cache 恢复的 decoder prompt 单元。纯文本时它等同于
+token 数；多模态时第一版仍按 decoder 输入单元计数，并必须 clamp 到
+`usage.prompt_tokens`。
 
 ## 实现拆分
 
@@ -451,6 +484,8 @@ OpenAI-compatible request fields：
 
 - **MRoPE absolute position 风险**：第一版只复用相同 absolute position 的 prefix，不做
   KV shifting。
+- **多模态 key 风险**：image 请求不能只按文本 token 命中。key 必须包含 image id/hash、
+  mmproj fingerprint、preprocess/grid metadata 和 MRoPE position 语义。
 - **recurrent state 风险**：只在 block 边界保存 R/S snapshot，prefix hit 只能停在完整
   block 边界。
 - **cache capacity 风险**：session active cache 必须固定 capacity；大请求需要拒绝或重建
@@ -473,4 +508,3 @@ OpenAI-compatible request fields：
 - recurrent rollback 支持 decode/speculative rejection。
 - prompt checkpoint 策略对齐 llama.cpp 的 `common_prompt_checkpoint`，用于长 prompt
   分叉和 hybrid memory rollback。
-
