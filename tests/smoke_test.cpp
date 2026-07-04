@@ -9,6 +9,7 @@
 #include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/gguf_tokenizer.hpp"
 #include "toyllm/runtime/qwen35_runtime.hpp"
+#include "toyllm/runtime/qwen35_multimodal.hpp"
 #include "toyllm/runtime/qwen35_prefix_cache.hpp"
 #include "toyllm/runtime/qwen35_weight_map.hpp"
 #include "toyllm/runtime/qwen_tokenizer.hpp"
@@ -167,6 +168,83 @@ void test_reasoning_parser() {
   append_reasoning_deltas(content_parser.finish(), reasoning, content);
   assert(reasoning == "secret");
   assert(content == "before after");
+}
+
+void test_chat_message_image_content_parts() {
+  const toyllm::ChatMessage text_message{"user", "hello"};
+  assert(!toyllm::chat_message_has_image_content(text_message));
+  assert(!toyllm::chat_messages_have_image_content({text_message}));
+
+  toyllm::ChatMessage image_message;
+  image_message.role = "user";
+  image_message.content = "describe this";
+  image_message.content_parts.push_back(toyllm::ChatContentPart{
+    toyllm::ChatContentPartKind::text,
+    "describe this",
+    {},
+    {},
+  });
+  image_message.content_parts.push_back(toyllm::ChatContentPart{
+    toyllm::ChatContentPartKind::image_url,
+    {},
+    "data:image/png;base64,AAAA",
+    "auto",
+  });
+
+  assert(toyllm::chat_message_has_image_content(image_message));
+  assert(toyllm::chat_messages_have_image_content({text_message, image_message}));
+}
+
+void test_qwen35_image_data_url_parser() {
+  const auto parsed =
+    toyllm::parse_qwen35_image_data_url("data:image/png;base64,SGVsbG8=");
+  assert(parsed.is_ok());
+  assert(parsed.value().mime_type == "image/png");
+  assert((parsed.value().bytes == std::vector<std::uint8_t>{'H', 'e', 'l', 'l', 'o'}));
+  const auto fingerprint = toyllm::qwen35_image_content_fingerprint(
+    "data:image/png;base64,SGVsbG8=", parsed.value().mime_type, "auto",
+    parsed.value().bytes);
+  const auto same_fingerprint = toyllm::qwen35_image_content_fingerprint(
+    "data:image/png;base64,ignored-url", parsed.value().mime_type, "auto",
+    parsed.value().bytes);
+  const auto different_detail = toyllm::qwen35_image_content_fingerprint(
+    "data:image/png;base64,SGVsbG8=", parsed.value().mime_type, "high",
+    parsed.value().bytes);
+  const auto url_fingerprint = toyllm::qwen35_image_content_fingerprint(
+    "https://example.test/image.png", {}, "auto", {});
+  assert(fingerprint != 0);
+  assert(fingerprint == same_fingerprint);
+  assert(fingerprint != different_detail);
+  assert(url_fingerprint != 0);
+  assert(url_fingerprint != fingerprint);
+
+  const std::vector<std::uint8_t> png_header{
+    0x89U, 0x50U, 0x4EU, 0x47U, 0x0DU, 0x0AU, 0x1AU, 0x0AU,
+    0x00U, 0x00U, 0x00U, 0x0DU, 0x49U, 0x48U, 0x44U, 0x52U,
+    0x00U, 0x00U, 0x00U, 0x02U, 0x00U, 0x00U, 0x00U, 0x03U,
+  };
+  const auto png_dimensions =
+    toyllm::infer_qwen35_image_dimensions("image/png", png_header);
+  assert(png_dimensions.is_ok());
+  assert(png_dimensions.value().width == 2);
+  assert(png_dimensions.value().height == 3);
+
+  const std::vector<std::uint8_t> jpeg_header{
+    0xFFU, 0xD8U, 0xFFU, 0xE0U, 0x00U, 0x04U, 0x00U, 0x00U,
+    0xFFU, 0xC0U, 0x00U, 0x11U, 0x08U, 0x00U, 0x05U, 0x00U,
+    0x07U, 0x03U, 0x01U, 0x11U, 0x00U, 0x02U, 0x11U, 0x00U,
+    0x03U, 0x11U, 0x00U,
+  };
+  const auto jpeg_dimensions =
+    toyllm::infer_qwen35_image_dimensions("image/jpeg", jpeg_header);
+  assert(jpeg_dimensions.is_ok());
+  assert(jpeg_dimensions.value().width == 7);
+  assert(jpeg_dimensions.value().height == 5);
+
+  const auto not_image =
+    toyllm::parse_qwen35_image_data_url("data:text/plain;base64,SGVsbG8=");
+  assert(!not_image.is_ok());
+  assert(not_image.status().message().find("image/") != std::string::npos);
 }
 
 void test_qwen35_prefix_cache_index() {
@@ -2274,6 +2352,154 @@ std::filesystem::path unique_temp_dir(std::string_view name) {
          std::filesystem::path{std::string{name} + "-" + suffix};
 }
 
+template <typename T>
+void write_binary_value(std::ostream& output, T value) {
+  output.write(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+
+void write_gguf_string(std::ostream& output, const std::string& value) {
+  write_binary_value(output, static_cast<std::uint64_t>(value.size()));
+  output.write(value.data(), static_cast<std::streamsize>(value.size()));
+}
+
+void write_gguf_metadata_string(std::ostream& output, const std::string& key,
+                                const std::string& value) {
+  write_gguf_string(output, key);
+  write_binary_value(output, static_cast<std::uint32_t>(8));  // GGUF string
+  write_gguf_string(output, value);
+}
+
+void write_gguf_metadata_i64(std::ostream& output, const std::string& key,
+                             std::int64_t value) {
+  write_gguf_string(output, key);
+  write_binary_value(output, static_cast<std::uint32_t>(11));  // GGUF int64
+  write_binary_value(output, value);
+}
+
+std::uint64_t align_up_for_test(std::uint64_t value, std::uint64_t alignment) {
+  const auto remainder = value % alignment;
+  return remainder == 0 ? value : value + (alignment - remainder);
+}
+
+struct TinyGgufTensorSpec {
+  std::string name;
+  std::vector<std::uint64_t> shape;
+};
+
+std::uint64_t tiny_gguf_f32_bytes(const TinyGgufTensorSpec& tensor) {
+  std::uint64_t elements = 1;
+  for (const auto dim : tensor.shape) {
+    elements *= dim;
+  }
+  return elements * sizeof(float);
+}
+
+void write_tiny_qwen35_mmproj_gguf(const std::filesystem::path& path,
+                                   std::vector<TinyGgufTensorSpec> tensors) {
+  std::ofstream output(path, std::ios::binary);
+  if (!output) {
+    throw std::runtime_error("failed to create " + path.string());
+  }
+
+  write_binary_value(output, static_cast<std::uint32_t>(0x46554747U));  // GGUF
+  write_binary_value(output, static_cast<std::uint32_t>(3));
+  write_binary_value(output, static_cast<std::uint64_t>(tensors.size()));
+  write_binary_value(output, static_cast<std::uint64_t>(6));
+  write_gguf_metadata_string(output, "general.architecture", "clip");
+  write_gguf_metadata_string(output, "clip.vision.projector_type", "qwen3vl_merger");
+  write_gguf_metadata_i64(output, "clip.vision.spatial_merge_size", 2);
+  write_gguf_metadata_i64(output, "clip.vision.patch_size", 14);
+  write_gguf_metadata_i64(output, "clip.vision.block_count", 1);
+  write_gguf_metadata_i64(output, "clip.vision.embedding_length", 1024);
+
+  std::uint64_t offset = 0;
+  for (const auto& tensor : tensors) {
+    write_gguf_string(output, tensor.name);
+    write_binary_value(output, static_cast<std::uint32_t>(tensor.shape.size()));
+    for (const auto dim : tensor.shape) {
+      write_binary_value(output, dim);
+    }
+    write_binary_value(output, static_cast<std::uint32_t>(0));  // GGML F32
+    write_binary_value(output, offset);
+    offset += tiny_gguf_f32_bytes(tensor);
+  }
+
+  const auto position = output.tellp();
+  if (position == std::streampos{-1}) {
+    throw std::runtime_error("failed to query GGUF write position");
+  }
+  const auto data_offset = align_up_for_test(static_cast<std::uint64_t>(position), 32);
+  for (std::uint64_t index = static_cast<std::uint64_t>(position); index < data_offset;
+       ++index) {
+    output.put('\0');
+  }
+  for (const auto& tensor : tensors) {
+    for (std::uint64_t index = 0; index < tiny_gguf_f32_bytes(tensor); ++index) {
+      output.put('\0');
+    }
+  }
+}
+
+std::vector<TinyGgufTensorSpec> tiny_qwen35_mmproj_tensors() {
+  return {
+    {"v.patch_embd.weight", {1}},
+    {"v.patch_embd.weight.1", {1}},
+    {"v.patch_embd.bias", {1}},
+    {"v.position_embd.weight", {1}},
+    {"mm.0.weight", {1}},
+    {"mm.0.bias", {1}},
+    {"mm.2.weight", {1}},
+    {"mm.2.bias", {1024}},
+    {"v.deepstack.3.norm.weight", {1}},
+    {"v.deepstack.3.norm.bias", {1}},
+    {"v.deepstack.3.fc1.weight", {1}},
+    {"v.deepstack.3.fc1.bias", {1}},
+    {"v.deepstack.3.fc2.weight", {1}},
+    {"v.deepstack.3.fc2.bias", {1}},
+  };
+}
+
+void test_qwen35_mmproj_metadata_validation() {
+  const auto temp_dir = unique_temp_dir("kraken-infer-mmproj-smoke");
+  std::filesystem::create_directories(temp_dir);
+  const auto valid_path = temp_dir / "valid-mmproj.gguf";
+  write_tiny_qwen35_mmproj_gguf(valid_path, tiny_qwen35_mmproj_tensors());
+
+  const auto metadata = toyllm::load_qwen35_mmproj_metadata(valid_path);
+  assert(metadata.is_ok());
+  assert(toyllm::qwen35_mmproj_is_qwen3vl_merger(metadata.value()));
+  assert(metadata.value().qwen3vl_required_tensors_present);
+  assert(metadata.value().deepstack_layer_count == 1);
+  assert(metadata.value().projector_output_width == 2048);
+  assert(metadata.value().missing_required_tensors.empty());
+  const auto summary = toyllm::format_qwen35_mmproj_metadata_summary(metadata.value());
+  assert(summary.find("qwen3vl_required_tensors_present: true") != std::string::npos);
+  assert(summary.find("projector_output_width: 2048") != std::string::npos);
+  const auto compatible =
+    toyllm::validate_qwen35_mmproj_text_embedding_compatibility(metadata.value(), 2048);
+  assert(compatible.is_ok());
+  const auto incompatible =
+    toyllm::validate_qwen35_mmproj_text_embedding_compatibility(metadata.value(), 1024);
+  assert(!incompatible.is_ok());
+  assert(incompatible.message().find("embedding_length") != std::string::npos);
+
+  auto missing_tensors = tiny_qwen35_mmproj_tensors();
+  missing_tensors.erase(
+    std::remove_if(missing_tensors.begin(), missing_tensors.end(),
+                   [](const TinyGgufTensorSpec& tensor) {
+                     return tensor.name == "mm.2.bias";
+                   }),
+    missing_tensors.end());
+  const auto invalid_path = temp_dir / "missing-mmproj.gguf";
+  write_tiny_qwen35_mmproj_gguf(invalid_path, std::move(missing_tensors));
+  const auto invalid = toyllm::load_qwen35_mmproj_metadata(invalid_path);
+  assert(!invalid.is_ok());
+  assert(invalid.status().message().find("mm.2.bias") != std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove_all(temp_dir, ec);
+}
+
 void write_fake_safetensors(const std::filesystem::path& path, const std::string& header,
                             std::size_t data_bytes) {
   std::ofstream output(path, std::ios::binary);
@@ -3055,6 +3281,9 @@ int main() {
   test_mpsgraph_operator_smoke();
   test_mpsgraph_generation_does_not_fallback();
   test_reasoning_parser();
+  test_chat_message_image_content_parts();
+  test_qwen35_image_data_url_parser();
+  test_qwen35_mmproj_metadata_validation();
   test_qwen35_prefix_cache_index();
   test_qwen35_prefix_cache_min_reuse_and_clear();
   test_mpsgraph_kv_cache_layout();

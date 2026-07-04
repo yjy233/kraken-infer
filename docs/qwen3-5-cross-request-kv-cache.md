@@ -110,6 +110,9 @@ active row 0。
 
 ### Qwen3.5 0.8B LV 对 cache 的影响
 
+图片输入的 llama.cpp 详细调研见 `docs/qwen3-5-0-8b-image-input-llama-cpp.md`。
+这里仅记录它对 block cache key 和 restore 语义的影响。
+
 Qwen3.5 0.8B 的 text+image 路径在 llama.cpp 中不是把图片转成普通 token id：
 
 - text decoder 仍是 `qwen35`。
@@ -388,6 +391,147 @@ OpenAI-compatible request fields：
 `cached_tokens` 统计已经从跨请求 cache 恢复的 decoder prompt 单元。纯文本时它等同于
 token 数；多模态时第一版仍按 decoder 输入单元计数，并必须 clamp 到
 `usage.prompt_tokens`。
+
+## 当前实现与验证命令
+
+当前 Qwen3.5 dense `qwen35` Metal 路径已经实现第一版跨请求 block KV cache：
+
+- cache 在 OpenAI gateway 进程内生效，服务重启后清空。
+- 命中粒度是完整 block prefix。
+- full-attention K/V、linear-attention recurrent R/S state 和 block 末尾
+  `last_hidden` 都会随 block 保存/恢复。
+- 当前实现是 host-side payload 版；device-resident arena 仍属于后续优化。
+- 纯文本请求已验证；image/LV 请求的多模态 key 和 raw embedding chunk 仍按上文方案推进。
+
+本地验证用较小 block size，方便短 prompt 也能 commit block：
+
+```bash
+./build/debug/kraken-infer serve \
+  --host 127.0.0.1 \
+  --port 18081 \
+  --model models/qwen3.5-0.8b \
+  --model-id qwen35-test \
+  --device mps \
+  --max-new-tokens 1 \
+  --prefill-chunk-tokens 16 \
+  --cache-prompt \
+  --cache-block-tokens 16 \
+  --cache-capacity-blocks 8
+```
+
+生产/长 prompt 场景通常使用默认 `prefill_chunk_tokens=1024`，并让
+`cache_block_tokens` 与 prefill chunk 对齐。
+
+非流式 Chat Completions 请求 URL：
+
+```text
+POST http://127.0.0.1:18081/v1/chat/completions
+```
+
+HTTP 层支持并发连接；推理执行保持单请求并发度。如果已有一个
+`/v1/chat/completions` 或 `/v1/completions` 正在处理，新的推理请求会立即返回
+OpenAI 兼容 `429` / `rate_limit_error`，同时非推理请求如 `/health`、`/v1/models`
+和 `/openapi.json` 仍可并发返回。
+
+示例请求。连续发送同一个请求两次，第二次应命中第一轮 commit 的完整 blocks：
+
+```bash
+cat >/tmp/kraken-cache-request.json <<'JSON'
+{
+  "model": "qwen35-test",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Please repeat the word cache exactly once after reading this prefix. Please repeat the word cache exactly once after reading this prefix. Please repeat the word cache exactly once after reading this prefix. Please repeat the word cache exactly once after reading this prefix. Please repeat the word cache exactly once after reading this prefix. Please repeat the word cache exactly once after reading this prefix. "
+    }
+  ],
+  "max_tokens": 1,
+  "cache_prompt": true,
+  "cache_block_tokens": 16,
+  "cache_capacity_blocks": 8
+}
+JSON
+
+curl -sS -D /tmp/kraken-cache-1.headers \
+  -H 'Content-Type: application/json' \
+  --data @/tmp/kraken-cache-request.json \
+  http://127.0.0.1:18081/v1/chat/completions \
+  | python3 -m json.tool
+
+curl -sS -D /tmp/kraken-cache-2.headers \
+  -H 'Content-Type: application/json' \
+  --data @/tmp/kraken-cache-request.json \
+  http://127.0.0.1:18081/v1/chat/completions \
+  | python3 -m json.tool
+```
+
+查看命中 header：
+
+```bash
+tr -d '\r' </tmp/kraken-cache-2.headers | rg 'X-Kraken-Prompt-Cache'
+```
+
+第二次响应应包含：
+
+```json
+{
+  "usage": {
+    "prompt_tokens_details": {
+      "cached_tokens": 80
+    }
+  }
+}
+```
+
+具体 token 数取决于 prompt 和 block size；关键是第二次的
+`cached_tokens` 与 `X-Kraken-Prompt-Cache-Hit-Tokens` 大于 0。
+
+流式请求使用同一个 URL，额外传 `stream=true` 和
+`stream_options.include_usage=true`：
+
+```bash
+python3 - <<'PY' >/tmp/kraken-cache-stream-request.json
+import json
+prompt = 'Please repeat the word cache exactly once after reading this prefix. ' * 6
+print(json.dumps({
+  'model': 'qwen35-test',
+  'messages': [{'role': 'user', 'content': prompt}],
+  'max_tokens': 1,
+  'cache_prompt': True,
+  'cache_block_tokens': 16,
+  'cache_capacity_blocks': 8,
+  'stream': True,
+  'stream_options': {'include_usage': True},
+}))
+PY
+
+curl -sS -N \
+  -H 'Content-Type: application/json' \
+  --data @/tmp/kraken-cache-stream-request.json \
+  http://127.0.0.1:18081/v1/chat/completions
+```
+
+在 `[DONE]` 前会有一个 `choices: []` 的 final SSE chunk，包含：
+
+```json
+{
+  "usage": {
+    "prompt_tokens": 85,
+    "completion_tokens": 1,
+    "total_tokens": 86,
+    "prompt_tokens_details": {
+      "cached_tokens": 80
+    }
+  }
+}
+```
+
+OpenAPI schema URL：
+
+```text
+GET http://127.0.0.1:18081/openapi.json
+GET http://127.0.0.1:18081/v1/openapi.json
+```
 
 ## 实现拆分
 

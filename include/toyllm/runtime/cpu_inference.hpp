@@ -40,6 +40,7 @@ struct CpuGenerationRequest {
   std::size_t cache_block_tokens{0};
   std::size_t cache_capacity_blocks{0};
   std::vector<ChatMessage> messages;
+  std::filesystem::path mmproj_path;
   std::filesystem::path debug_dump_dir;
   bool verify_kv_cache{false};
   Device compute_device{Device::cpu()};

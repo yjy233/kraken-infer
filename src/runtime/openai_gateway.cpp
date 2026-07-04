@@ -1,8 +1,10 @@
 #include "toyllm/runtime/openai_gateway.hpp"
 
+#include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/cpu_inference.hpp"
 #include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/mpsgraph_inference.hpp"
+#include "toyllm/runtime/qwen35_multimodal.hpp"
 #include "toyllm/runtime/reasoning_parser.hpp"
 
 #include <arpa/inet.h>
@@ -12,6 +14,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cctype>
@@ -23,6 +26,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <string_view>
 #include <utility>
@@ -418,26 +422,84 @@ std::optional<double> double_value(const JsonValue* value) {
   return value->number;
 }
 
-std::string content_to_text(const JsonValue* value) {
+struct ParsedMessageContent {
+  std::string text;
+  std::vector<ChatContentPart> parts;
+};
+
+ParsedMessageContent parse_message_content(const JsonValue* value) {
   if (value == nullptr || value->type == JsonValue::Type::null) {
     return {};
   }
   if (value->type == JsonValue::Type::string) {
-    return value->string;
+    return ParsedMessageContent{value->string, {}};
   }
   if (value->type == JsonValue::Type::array) {
-    std::string output;
+    ParsedMessageContent output;
     for (const auto& item : value->array) {
-      if (item.type == JsonValue::Type::object) {
-        const auto* text = object_get(item, "text");
-        if (text != nullptr && text->type == JsonValue::Type::string) {
-          output += text->string;
-        }
+      if (item.type != JsonValue::Type::object) {
+        throw std::runtime_error("message content array entries must be objects");
       }
+      const auto type = string_value(object_get(item, "type"));
+      if (type == "text") {
+        const auto* text = object_get(item, "text");
+        if (text == nullptr || text->type != JsonValue::Type::string) {
+          throw std::runtime_error("message content text part requires string text");
+        }
+        output.text += text->string;
+        output.parts.push_back(ChatContentPart{
+          ChatContentPartKind::text,
+          text->string,
+          {},
+          {},
+        });
+        continue;
+      }
+      if (type == "image_url") {
+        const auto* image_url = object_get(item, "image_url");
+        std::string url;
+        std::string detail;
+        if (image_url != nullptr && image_url->type == JsonValue::Type::string) {
+          url = image_url->string;
+        } else if (image_url != nullptr && image_url->type == JsonValue::Type::object) {
+          const auto* url_value = object_get(*image_url, "url");
+          if (url_value == nullptr || url_value->type != JsonValue::Type::string) {
+            throw std::runtime_error("message content image_url part requires image_url.url");
+          }
+          url = url_value->string;
+          detail = string_value(object_get(*image_url, "detail"));
+        } else {
+          throw std::runtime_error("message content image_url part requires image_url");
+        }
+        if (url.empty()) {
+          throw std::runtime_error("message content image_url.url must not be empty");
+        }
+        ChatContentPart part{
+          ChatContentPartKind::image_url,
+          {},
+          url,
+          detail,
+        };
+        if (qwen35_image_url_is_data_url(url)) {
+          auto parsed = parse_qwen35_image_data_url(url);
+          if (!parsed.is_ok()) {
+            throw std::runtime_error(parsed.status().message());
+          }
+          part.image_mime_type = std::move(parsed.value().mime_type);
+          part.image_bytes = std::move(parsed.value().bytes);
+          part.image_width = parsed.value().width;
+          part.image_height = parsed.value().height;
+        }
+        part.image_fingerprint = qwen35_image_content_fingerprint(
+          part.image_url, part.image_mime_type, part.detail, part.image_bytes);
+        output.parts.push_back(std::move(part));
+        continue;
+      }
+      throw std::runtime_error("unsupported message content part type: " + type);
     }
     return output;
   }
-  return {};
+  throw std::runtime_error("message content must be a string, null, or content array");
 }
 
 struct ToolSpec {
@@ -523,14 +585,14 @@ std::vector<ChatMessage> parse_messages(const JsonValue* value) {
       throw std::runtime_error("message entries must be objects");
     }
     const auto role = string_value(object_get(item, "role"));
-    const auto content = content_to_text(object_get(item, "content"));
+    const auto content = parse_message_content(object_get(item, "content"));
     if (role == "system" || role == "user" || role == "assistant") {
-      messages.push_back(ChatMessage{role, content});
+      messages.push_back(ChatMessage{role, content.text, content.parts});
       continue;
     }
     if (role == "tool") {
       const auto tool_id = string_value(object_get(item, "tool_call_id"), "tool");
-      messages.push_back(ChatMessage{"user", "Tool result " + tool_id + ":\n" + content});
+      messages.push_back(ChatMessage{"user", "Tool result " + tool_id + ":\n" + content.text});
       continue;
     }
     throw std::runtime_error("unsupported message role: " + role);
@@ -744,6 +806,10 @@ std::string http_status_text(int status) {
       return "Not Found";
     case 405:
       return "Method Not Allowed";
+    case 429:
+      return "Too Many Requests";
+    case 501:
+      return "Not Implemented";
     case 500:
       return "Internal Server Error";
     default:
@@ -828,6 +894,77 @@ std::string error_body(std::string_view message, std::string_view type = "invali
   output << "{\"error\":{\"message\":\"" << json_escape(message) << "\",\"type\":\""
          << json_escape(type) << "\",\"param\":null,\"code\":null}}";
   return output.str();
+}
+
+std::atomic_bool& gateway_inference_busy() {
+  static std::atomic_bool busy{false};
+  return busy;
+}
+
+class GatewayInferencePermit {
+ public:
+  GatewayInferencePermit() {
+    bool expected = false;
+    acquired_ = gateway_inference_busy().compare_exchange_strong(expected, true);
+  }
+
+  GatewayInferencePermit(const GatewayInferencePermit&) = delete;
+  GatewayInferencePermit& operator=(const GatewayInferencePermit&) = delete;
+
+  ~GatewayInferencePermit() {
+    if (acquired_) {
+      gateway_inference_busy().store(false);
+    }
+  }
+
+  [[nodiscard]] bool acquired() const { return acquired_; }
+
+ private:
+  bool acquired_{false};
+};
+
+void send_inference_busy_response(int fd, std::string_view request_id) {
+  send_json_response(
+    fd, 429,
+    error_body("another inference request is already running; retry later",
+               "rate_limit_error"),
+    {{"X-Request-Id", std::string{request_id}}, {"Retry-After", "1"}});
+}
+
+std::optional<std::pair<int, std::string>> chat_multimodal_error(
+  const OpenAIGatewayConfig& config, const ChatRequest& request) {
+  if (!chat_messages_have_image_content(request.messages)) {
+    return std::nullopt;
+  }
+  if (config.mmproj_path.empty()) {
+    return std::pair<int, std::string>{
+      400,
+      "image input requires starting the gateway with --mmproj pointing to the "
+      "Qwen3.5 conditional mmproj GGUF",
+    };
+  }
+  const auto metadata = load_qwen35_mmproj_metadata(config.mmproj_path);
+  if (!metadata.is_ok()) {
+    return std::pair<int, std::string>{
+      400,
+      "failed to load --mmproj: " + metadata.status().message(),
+    };
+  }
+  if (!qwen35_mmproj_is_qwen3vl_merger(metadata.value())) {
+    return std::pair<int, std::string>{
+      400,
+      "Qwen3.5 image input requires a qwen3vl_merger mmproj; got projector_type=" +
+        metadata.value().projector_type + " vision_projector_type=" +
+        metadata.value().vision_projector_type,
+    };
+  }
+  return std::pair<int, std::string>{
+    501,
+    "Qwen3.5 image input was parsed and the qwen3vl_merger mmproj metadata was "
+    "recognized with projector_output_width=" +
+      std::to_string(metadata.value().projector_output_width) +
+      ", but native vision graph execution is not implemented yet",
+  };
 }
 
 std::string models_body(const OpenAIGatewayConfig& config) {
@@ -1049,7 +1186,12 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"#/components/schemas/Usage\"}}}}}}}}},"
        "\"/v1/chat/completions\":{\"post\":{\"requestBody\":{\"required\":true,\"content\":{"
        "\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{\"model\":"
-       "{\"type\":\"string\"},\"messages\":{\"type\":\"array\"},\"tools\":{\"type\":\"array\"},"
+       "{\"type\":\"string\"},\"messages\":{\"type\":\"array\",\"items\":{\"type\":\"object\","
+       "\"properties\":{\"role\":{\"type\":\"string\"},\"content\":{\"oneOf\":[{\"type\":\"string\"},"
+       "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\","
+       "\"enum\":[\"text\",\"image_url\"]},\"text\":{\"type\":\"string\"},\"image_url\":{\"oneOf\":["
+       "{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},"
+       "\"detail\":{\"type\":\"string\"}},\"required\":[\"url\"]}]}}}}]}}}},\"tools\":{\"type\":\"array\"},"
        "\"tool_choice\":{},\"max_tokens\":{\"type\":\"integer\"},\"max_completion_tokens\":"
        "{\"type\":\"integer\"},\"prefill_chunk_tokens\":{\"type\":\"integer\"},"
        "\"temperature\":{\"type\":\"number\"},\"top_k\":"
@@ -1417,6 +1559,15 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
 void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatRequest& request,
                         std::string_view request_id, std::string_view client_request_id,
                         const ObservabilityConfig& observability) {
+  if (const auto multimodal_error = chat_multimodal_error(config, request);
+      multimodal_error.has_value()) {
+    const auto error_type = multimodal_error->first == 501 ? "not_implemented_error"
+                                                           : "invalid_request_error";
+    send_json_response(fd, multimodal_error->first,
+                       error_body(multimodal_error->second, error_type),
+                       {{"X-Request-Id", std::string{request_id}}});
+    return;
+  }
   if (request.forced_tool.has_value()) {
     send_forced_tool_response(fd, request, request_id);
     return;
@@ -1425,6 +1576,7 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
   CpuGenerationRequest generation;
   generation.model_dir = config.model_dir;
   generation.messages = request.messages;
+  generation.mmproj_path = config.mmproj_path;
   generation.max_new_tokens = request.max_tokens;
   generation.prefill_chunk_tokens = request.prefill_chunk_tokens;
   generation.enable_thinking = request.enable_thinking;
@@ -1641,8 +1793,13 @@ void handle_client(int fd, const OpenAIGatewayConfig& config) {
         send_json_response(fd, 405, error_body("method not allowed"));
         return;
       }
-      const auto completion_request = parse_completion_request(request.body, config);
       const auto request_id = make_gateway_request_id();
+      GatewayInferencePermit inference_permit;
+      if (!inference_permit.acquired()) {
+        send_inference_busy_response(fd, request_id);
+        return;
+      }
+      const auto completion_request = parse_completion_request(request.body, config);
       auto observability = config.observability;
       if (const auto profile_mode = parse_profile_mode(request.header("x-kraken-profile"));
           profile_mode.has_value()) {
@@ -1657,8 +1814,13 @@ void handle_client(int fd, const OpenAIGatewayConfig& config) {
         send_json_response(fd, 405, error_body("method not allowed"));
         return;
       }
-      const auto chat_request = parse_chat_request(request.body, config);
       const auto request_id = make_gateway_request_id();
+      GatewayInferencePermit inference_permit;
+      if (!inference_permit.acquired()) {
+        send_inference_busy_response(fd, request_id);
+        return;
+      }
+      const auto chat_request = parse_chat_request(request.body, config);
       auto observability = config.observability;
       if (const auto profile_mode = parse_profile_mode(request.header("x-kraken-profile"));
           profile_mode.has_value()) {
@@ -1695,6 +1857,30 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
       return Status::internal_error("MPSGraph warmup failed: " + warmup_status.message());
     }
     std::cout << "MPSGraph warmup complete" << std::endl;
+  }
+  std::optional<Qwen35MmprojMetadata> mmproj_metadata;
+  if (!config.mmproj_path.empty()) {
+    const auto metadata = load_qwen35_mmproj_metadata(config.mmproj_path);
+    if (!metadata.is_ok()) {
+      return Status::invalid_argument("failed to load --mmproj: " +
+                                      metadata.status().message());
+    }
+    mmproj_metadata = metadata.value();
+    const auto bundle = load_model_bundle(config.model_dir);
+    if (!bundle.is_ok()) {
+      return Status::invalid_argument("failed to load model metadata for --mmproj: " +
+                                      bundle.status().message());
+    }
+    if (!bundle.value().model.gguf || bundle.value().model.architecture != "qwen35") {
+      return Status::invalid_argument(
+        "--mmproj image input requires a qwen35 GGUF text model");
+    }
+    const auto compatibility =
+      validate_qwen35_mmproj_text_embedding_compatibility(
+        *mmproj_metadata, bundle.value().model.hidden_size);
+    if (!compatibility.is_ok()) {
+      return compatibility;
+    }
   }
   (void)::signal(SIGPIPE, SIG_IGN);
 
@@ -1737,6 +1923,20 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
     std::cout << "gguf backend: native Qwen3.5 Metal runtime\n";
     if (!config.mmproj_path.empty()) {
       std::cout << "mmproj: " << config.mmproj_path.string() << '\n';
+      if (mmproj_metadata.has_value()) {
+        std::cout << "mmproj projector_type: "
+                  << mmproj_metadata->projector_type << '\n';
+        std::cout << "mmproj vision_projector_type: "
+                  << mmproj_metadata->vision_projector_type << '\n';
+        std::cout << "mmproj qwen3vl_required_tensors_present: "
+                  << (mmproj_metadata->qwen3vl_required_tensors_present ? "true"
+                                                                         : "false")
+                  << '\n';
+        std::cout << "mmproj deepstack_layer_count: "
+                  << mmproj_metadata->deepstack_layer_count << '\n';
+        std::cout << "mmproj projector_output_width: "
+                  << mmproj_metadata->projector_output_width << '\n';
+      }
     }
     std::cout << "mtp: " << (config.enable_mtp ? "enabled" : "disabled") << '\n';
   }
@@ -1757,8 +1957,16 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
 #ifdef SO_NOSIGPIPE
     (void)::setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
 #endif
-    handle_client(client_fd, config);
-    ::close(client_fd);
+    try {
+      std::thread{
+        [client_fd, &config]() {
+          handle_client(client_fd, config);
+          ::close(client_fd);
+        },
+      }.detach();
+    } catch (const std::exception&) {
+      ::close(client_fd);
+    }
   }
 }
 

@@ -64,6 +64,10 @@ Result<CpuGenerationResult> generate_cpu(const CpuGenerationRequest& request) {
   if (resolve_gguf_model_path(request.model_dir).is_ok()) {
     return generate_qwen35_metal(request);
   }
+  if (chat_messages_have_image_content(request.messages)) {
+    return Status::unavailable(
+      "image input is only wired for the native Qwen3.5 GGUF path");
+  }
   if (request.prompt.empty() && request.messages.empty()) {
     return Status::invalid_argument("prompt must not be empty");
   }

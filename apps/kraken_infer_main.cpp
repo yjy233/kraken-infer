@@ -72,6 +72,7 @@ void print_usage(std::string_view program) {
   std::cout << "  " << program
             << " chat [model_dir] [--max-new-tokens N] [--enable-thinking] [--dump-dir DIR]"
                " [--prefill-chunk-tokens N]"
+               " [--mmproj PATH]"
                " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
                " [--stream] [--kv-cache-stats] [--verify-kv-cache]"
@@ -427,9 +428,13 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
              bool print_kv_cache_stats, bool verify_kv_cache,
              std::size_t prefill_chunk_tokens, toyllm::Device compute_device,
              const toyllm::CpuSamplingConfig& sampling, bool stream,
-             const toyllm::ObservabilityConfig& observability) {
+             const toyllm::ObservabilityConfig& observability,
+             const std::filesystem::path& mmproj_path) {
   std::cout << "kraken-infer chat\n";
   std::cout << "model: " << model_path.string() << '\n';
+  if (!mmproj_path.empty()) {
+    std::cout << "mmproj: " << mmproj_path.string() << '\n';
+  }
   std::cout << "device: " << compute_device.to_string() << '\n';
   std::cout << "max_new_tokens: " << max_new_tokens << '\n';
   std::cout << "type /exit to quit\n\n";
@@ -457,6 +462,7 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
     request.prefill_chunk_tokens = prefill_chunk_tokens;
     request.enable_thinking = enable_thinking;
     request.messages = messages;
+    request.mmproj_path = mmproj_path;
     request.debug_dump_dir = debug_dump_dir;
     request.verify_kv_cache = verify_kv_cache;
     request.compute_device = compute_device;
@@ -966,6 +972,7 @@ int main(int argc, char** argv) {
     toyllm::Device compute_device = toyllm::Device::cpu();
     toyllm::CpuSamplingConfig sampling;
     toyllm::ObservabilityConfig observability;
+    std::filesystem::path mmproj_path;
     std::filesystem::path debug_dump_dir;
     bool model_path_set = false;
     for (int index = 2; index < argc; ++index) {
@@ -990,6 +997,10 @@ int main(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         prefill_chunk_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--mmproj") && index + 1 < argc) {
+        mmproj_path = std::filesystem::path{argv[++index]};
         continue;
       }
       if (arg_equals(argv[index], "--enable-thinking")) {
@@ -1106,7 +1117,7 @@ int main(int argc, char** argv) {
     }
     return run_chat(model_path, max_new_tokens, enable_thinking, debug_dump_dir,
                     print_kv_cache_stats, verify_kv_cache, prefill_chunk_tokens,
-                    compute_device, sampling, stream, observability);
+                    compute_device, sampling, stream, observability, mmproj_path);
   }
 
   const bool explicit_generation = arg_equals(argv[1], "run") || arg_equals(argv[1], "infer");

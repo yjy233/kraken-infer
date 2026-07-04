@@ -47,6 +47,24 @@ macOS 是唯一目标平台。Qwen3.5 runtime 不做 CPU fallback，不以 CPU r
 - 已新增 `kraken-infer bench-qwen35-gdn` 原生诊断入口，用 Qwen3.5 标准形状的 synthetic F32 Q/K/V/gate/beta/state buffer 调用当前 fused GDN backend。Apple M4 上 `tokens=1024,key_heads=value_heads=16,head_dim=128` 的 `qwen35_simdgroup_4rows` dispatch 约 4.98ms；760-token final chunk 形状约 4.13ms。这个入口用于拆分 recurrent layer 的 GDN 成本，不依赖 llama.cpp/libllama，也不改变默认推理路径。
 - 已新增 `kraken-infer bench-qwen35-attention` 原生诊断入口，用 Qwen3.5 full-attention 标准形状的 synthetic Q/K/V cache buffer 调用当前 `attention_f32_batched_f16_kv` 默认路径。Apple M4 上 `tokens=1024,start=0,key_count=1024,heads=8,kv_heads=2,head_dim=256` 的 `flash256_f16_kv` dispatch 约 5.59ms；11k final chunk 形状 `tokens=760,start=10240,capacity=11000,key_count=11000` 在 reusable flash-tail scratch 后约 50.06ms，并显示 `flash256_f16_kv+tail`。这个入口会把 backend 内部的非 64 对齐 tail padding 计入 attention 耗时，用于后续逐项对照 llama.cpp Metal flash-attn kernel，不依赖 llama.cpp/libllama，也不改变默认推理路径。
 - 最新同机 11k prompt 对比：`llama-bench -p 11000 -n 0 -ngl 99` 测得 `pp11000=814.58 ± 8.05 tok/s`，纯 prefill 约 13.50s；本仓库默认 native 路径同一模型 `--max-new-tokens 1 --profile summary` 测得 `prefill_ms=14407`，约 14.41s、763.5 tok/s。按纯 prefill 口径，当前 native 约慢 1.07x，耗时多约 0.90s，吞吐低约 6.3%。端到端 wall-clock 因包含 decode、logits、CLI 和 profile 开销，不和 `llama-bench -n 0` 直接等价。
+- OpenAI gateway 已支持 `messages[].content` content array 中的 `text` /
+  `image_url` 解析，并保留结构化 `ChatContentPart`；`data:image/...;base64,...`
+  会解析出 MIME type 和 image bytes。`serve --mmproj PATH` 已能读取 mmproj GGUF
+  metadata，校验 `general.architecture = "clip"`，并在 `qwen3vl_merger` projector
+  下校验 patch embedding、position embedding、`mm.0/mm.2` projector 和 deepstack
+  张量完整性；同时按 llama.cpp `clip_n_mmproj_embd()` 语义计算
+  `projector_output_width = mm.2.bias[0] * (1 + deepstack_layers)`，并在启动期校验
+  该宽度等于 text GGUF 的 `embedding_length`。图片请求在缺少 mmproj、mmproj 无法
+  加载、projector 不是 `qwen3vl_merger` 或 mmproj/text 维度不匹配时返回 OpenAI
+  兼容 400，在识别到 `qwen3vl_merger` 后返回 OpenAI 兼容 501，作为 native vision
+  graph 尚未接入前的显式边界。
+- image part 已带稳定 `image_fingerprint`：data URL 使用 MIME/detail/image bytes
+  计算，远程 URL 在 fetch 尚未实现前使用 URL/detail source fingerprint。这个字段
+  是后续多模态 block cache key 纳入 image bytes、preprocess grid 和 mmproj
+  fingerprint 的前置能力；当前不会启用图片请求的真实 KV cache hit。
+- data URL 图片会尽量从 PNG IHDR 或 JPEG SOF header 推断 `image_width` /
+  `image_height`，作为后续 resize、grid、MRoPE position 和 cache key 的输入
+  metadata；这一步只读 header，不做像素 decode。
 
 ## llama.cpp 参考点
 
@@ -83,6 +101,7 @@ macOS 是唯一目标平台。Qwen3.5 runtime 不做 CPU fallback，不以 CPU r
 - `~/code/llama.cpp/conversion/qwen3vl.py`
   - `Qwen3VLVisionModel`
   - `Qwen3OmniMmprojModel`
+  - `Qwen3_5ForConditionalGeneration` 的 mmproj converter 复用该文件
   - `Qwen3VLTextModel`
   - `Qwen3VLMoeTextModel`
   - `Qwen3OmniMoeTextModel`
@@ -97,6 +116,12 @@ macOS 是唯一目标平台。Qwen3.5 runtime 不做 CPU fallback，不以 CPU r
 - `~/code/llama.cpp/gguf-py/gguf/constants.py`
 - `~/code/llama.cpp/src/llama-quant.cpp`
 - `~/code/llama.cpp/gguf-py/tests/test_quants.py`
+
+Qwen3.5 0.8B 图片输入的详细调研见
+`docs/qwen3-5-0-8b-image-input-llama-cpp.md`。需要特别注意：llama.cpp 对
+`Qwen3_5ForConditionalGeneration` 的 image side 复用了 `qwen3vl_merger` /
+`PROJECTOR_TYPE_QWEN3VL` 等 projector 命名，但 text decoder 仍是 `qwen35`，不能把
+本任务等同于实现 Qwen3VL text model。
 
 本仓库预计新增或改造入口：
 
@@ -146,14 +171,15 @@ Qwen3.5 dense/MoE 文本模型是 hybrid decoder：
 
 - `general.architecture = "qwen35"` 的 Qwen3.5 dense text GGUF。
 - `general.architecture = "qwen35moe"` 的 Qwen3.5 MoE text GGUF。
-- Qwen3.5 VL/Omni 的 text GGUF：
+- Qwen3.5 conditional 的 text GGUF：
   - `qwen35` / `qwen35moe`，用于 Qwen3.5 conditional text decoder。
-  - `qwen3vl` / `qwen3vlmoe`，用于 Qwen3 VL/Omni text decoder。
-- Qwen3.5 VL/Omni 的 mmproj GGUF：
+- Qwen3.5 conditional 的 mmproj GGUF：
   - `general.architecture = "clip"`。
   - `clip.projector_type = "qwen3vl_merger"`。
   - `clip.vision.projector_type = "qwen3vl_merger"`。
   - `clip.audio.projector_type = "qwen3a"`。
+- 后续 Qwen3 VL/Omni text decoder 可再支持 `qwen3vl` / `qwen3vlmoe`，
+  但不属于 Qwen3.5 0.8B 图片输入的第一实现目标。
 - full attention + recurrent linear attention hybrid stack。
 - dense SwiGLU FFN 和 Qwen3.5 MoE FFN。
 - MTP/NextN speculative decoding。
@@ -1116,7 +1142,8 @@ rollback re-prefill count
 
 7. Multimodal VL/Omni
    - 加载 mmproj GGUF。
-   - 实现 Qwen3VL vision preprocessing/tower/merger/deepstack。
+   - 实现 Qwen3.5 conditional image side 在 llama.cpp 中复用的
+     `qwen3vl_merger` preprocessing/tower/merger/deepstack。
    - 实现 Qwen3A audio preprocessing/tower/projector。
    - 实现 media embedding injection 和 multimodal MRoPE position。
    - 接入 chat CLI/API。

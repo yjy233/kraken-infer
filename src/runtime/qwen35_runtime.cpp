@@ -4,6 +4,7 @@
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/gguf_tokenizer.hpp"
+#include "toyllm/runtime/qwen35_multimodal.hpp"
 #include "toyllm/runtime/qwen_tokenizer.hpp"
 #include "toyllm/runtime/qwen35_prefix_cache.hpp"
 #include "toyllm/runtime/qwen35_weight_map.hpp"
@@ -4275,6 +4276,22 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (request.max_new_tokens == 0) {
     return Status::invalid_argument("max_new_tokens must be greater than zero");
   }
+  std::optional<Qwen35MmprojMetadata> image_mmproj_metadata;
+  if (chat_messages_have_image_content(request.messages)) {
+    if (request.mmproj_path.empty()) {
+      return Status::invalid_argument(
+        "image input requires a Qwen3.5 conditional mmproj GGUF");
+    }
+    const auto metadata = load_qwen35_mmproj_metadata(request.mmproj_path);
+    if (!metadata.is_ok()) {
+      return metadata.status();
+    }
+    if (!qwen35_mmproj_is_qwen3vl_merger(metadata.value())) {
+      return Status::invalid_argument(
+        "Qwen3.5 image input requires a qwen3vl_merger mmproj");
+    }
+    image_mmproj_metadata = metadata.value();
+  }
   std::unique_lock<std::mutex> prompt_cache_lock(
     qwen35_host_prefix_cache_mutex(), std::defer_lock);
   if (request.cache_prompt) {
@@ -4302,6 +4319,20 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (bundle.value().model.architecture != "qwen35") {
     return Status::unavailable("native Qwen3.5 Metal runtime currently supports dense qwen35; got " +
                                bundle.value().model.architecture);
+  }
+  if (image_mmproj_metadata.has_value()) {
+    const auto compatibility =
+      validate_qwen35_mmproj_text_embedding_compatibility(
+        *image_mmproj_metadata, bundle.value().model.hidden_size);
+    if (!compatibility.is_ok()) {
+      return compatibility;
+    }
+    return Status::unavailable(
+      "Qwen3.5 image input parsed qwen3vl_merger mmproj metadata, but native "
+      "vision graph execution is not implemented yet; projector_output_width=" +
+      std::to_string(image_mmproj_metadata->projector_output_width) +
+      " text_embedding_length=" +
+      std::to_string(bundle.value().model.hidden_size));
   }
   auto sampling = make_qwen35_effective_sampling(bundle.value().generation,
                                                  request.sampling);

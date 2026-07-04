@@ -55,6 +55,7 @@ target_sources(
     src/runtime/profiling.cpp
     src/runtime/qwen35_prefix_cache.cpp
     src/runtime/qwen35_runtime.cpp
+    src/runtime/qwen35_multimodal.cpp
     src/runtime/qwen35_weight_map.cpp
     src/runtime/qwen_tokenizer.cpp
     src/runtime/reasoning_parser.cpp
