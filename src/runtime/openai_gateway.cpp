@@ -958,13 +958,7 @@ std::optional<std::pair<int, std::string>> chat_multimodal_error(
         metadata.value().vision_projector_type,
     };
   }
-  return std::pair<int, std::string>{
-    501,
-    "Qwen3.5 image input was parsed and the qwen3vl_merger mmproj metadata was "
-    "recognized with projector_output_width=" +
-      std::to_string(metadata.value().projector_output_width) +
-      ", but native vision graph execution is not implemented yet",
-  };
+  return std::nullopt;
 }
 
 std::string models_body(const OpenAIGatewayConfig& config) {

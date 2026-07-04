@@ -3,6 +3,9 @@ BUILD_DIR ?= build/manual
 MODEL ?= models/qwen3-0.6b
 PROMPT ?= hello
 CHAT_TOKENS ?= 16
+QWEN35_MODEL ?= models/qwen3.5-0.8b
+QWEN35_MMPROJ ?= models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
+QWEN35_IMAGE ?= /Users/bill/code/llama.cpp/tools/mtmd/test-1.jpeg
 BINARY := kraken-infer
 SMOKE_TEST := kraken-infer-smoke-test
 
@@ -24,10 +27,18 @@ CORE_SRCS := \
 	src/runtime/cpu/safetensors.cpp \
 	src/runtime/cpu/tokenizer.cpp \
 	src/runtime/cpu_inference.cpp \
+	src/runtime/gguf_reader.cpp \
+	src/runtime/gguf_tokenizer.cpp \
 	src/runtime/mpsgraph_inference.cpp \
 	src/runtime/openai_gateway.cpp \
 	src/runtime/profiling.cpp \
+	src/runtime/qwen35_prefix_cache.cpp \
+	src/runtime/qwen35_runtime.cpp \
+	src/runtime/qwen35_multimodal.cpp \
+	src/runtime/qwen35_vl_adapter.cpp \
+	src/runtime/qwen35_weight_map.cpp \
 	src/runtime/qwen_tokenizer.cpp \
+	src/runtime/reasoning_parser.cpp \
 	src/runtime/runtime.cpp \
 	src/backends/mpsgraph/mpsgraph_kv_cache.cpp \
 	src/backends/mpsgraph/qwen_mpsgraph_model.cpp \
@@ -35,7 +46,7 @@ CORE_SRCS := \
 	src/backends/mps/mps_backend.mm \
 	src/backends/mpsgraph/mpsgraph_backend.mm
 
-.PHONY: all debug release test cli inspect weights doctor infer run chat serve compare-transformers mps-info clean
+.PHONY: all debug release test qwen35-vl-test cli inspect weights doctor infer run chat serve compare-transformers mps-info clean
 
 all: debug
 
@@ -55,6 +66,13 @@ $(BUILD_DIR)/$(SMOKE_TEST): $(CORE_SRCS) tests/smoke_test.cpp | $(BUILD_DIR)
 
 test: $(BUILD_DIR)/$(SMOKE_TEST)
 	./$(BUILD_DIR)/$(SMOKE_TEST)
+
+qwen35-vl-test: $(BUILD_DIR)/$(BINARY)
+	python3 scripts/test_qwen35_vl_gateway.py \
+		--binary ./$(BUILD_DIR)/$(BINARY) \
+		--model $(QWEN35_MODEL) \
+		--mmproj $(QWEN35_MMPROJ) \
+		--image $(QWEN35_IMAGE)
 
 cli: $(BUILD_DIR)/$(BINARY)
 	./$(BUILD_DIR)/$(BINARY) help

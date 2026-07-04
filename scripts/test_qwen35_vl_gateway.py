@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Run an end-to-end Qwen3.5 0.8B vision request through the OpenAI gateway."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def image_mime(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def wait_for_health(url: str, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.0) as response:
+                if response.status == 200:
+                    return
+        except Exception as exc:  # noqa: BLE001 - surface the final failure below.
+            last_error = exc
+        time.sleep(0.2)
+    raise RuntimeError(f"gateway did not become healthy: {last_error}")
+
+
+def post_json(url: str, payload: dict, timeout_seconds: float) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"gateway returned HTTP {exc.code}: {error_body}") from exc
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", default="./build/debug/kraken-infer")
+    parser.add_argument("--model", default="models/qwen3.5-0.8b")
+    parser.add_argument(
+        "--mmproj",
+        default="models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf",
+    )
+    parser.add_argument(
+        "--image",
+        default="/Users/bill/code/llama.cpp/tools/mtmd/test-1.jpeg",
+    )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=18183)
+    parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument(
+        "--prompt",
+        default="Describe the image in one sentence.",
+    )
+    parser.add_argument("--timeout", type=float, default=120.0)
+    args = parser.parse_args()
+
+    binary = Path(args.binary)
+    model = Path(args.model)
+    mmproj = Path(args.mmproj)
+    image = Path(args.image)
+    for label, path in {
+        "binary": binary,
+        "model": model,
+        "mmproj": mmproj,
+        "image": image,
+    }.items():
+        if not path.exists():
+            raise FileNotFoundError(f"{label} not found: {path}")
+
+    server = subprocess.Popen(
+        [
+            str(binary),
+            "serve",
+            "--host",
+            args.host,
+            "--port",
+            str(args.port),
+            "--model",
+            str(model),
+            "--model-id",
+            "qwen35-vl-test",
+            "--device",
+            "mps",
+            "--mmproj",
+            str(mmproj),
+            "--max-new-tokens",
+            str(args.max_tokens),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        base_url = f"http://{args.host}:{args.port}"
+        wait_for_health(f"{base_url}/health", 15.0)
+
+        encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+        payload = {
+            "model": "qwen35-vl-test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": args.prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image_mime(image)};base64,{encoded}",
+                                "detail": "auto",
+                            },
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": args.max_tokens,
+            "temperature": 0,
+        }
+        response = post_json(
+            f"{base_url}/v1/chat/completions",
+            payload,
+            args.timeout,
+        )
+        content = response["choices"][0]["message"].get("content", "").strip()
+        if not content:
+            raise RuntimeError(f"empty assistant content: {json.dumps(response)[:1000]}")
+        print(content)
+        if "usage" in response:
+            print(json.dumps(response["usage"], ensure_ascii=False, sort_keys=True))
+        return 0
+    finally:
+        server.terminate()
+        try:
+            stdout, _ = server.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            stdout, _ = server.communicate(timeout=5)
+        if server.returncode not in {0, -15, -2, 1} and stdout:
+            print(stdout, file=sys.stderr)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

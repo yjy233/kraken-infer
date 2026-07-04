@@ -2129,10 +2129,10 @@ void test_qwen35_gguf_model_config() {
   assert(plan.value().prefill.chunk_count == 22);
   assert(plan.value().prefill.final_chunk_tokens == 248);
   assert(plan.value().prefill.output_only_last_token);
-  assert(plan.value().cache.kv_cache_bytes == 270360576ULL);
+  assert(plan.value().cache.kv_cache_bytes == 135180288ULL);
   assert(plan.value().cache.recurrent_r_cache_bytes == 1327104ULL);
   assert(plan.value().cache.recurrent_s_cache_bytes == 18874368ULL);
-  assert(plan.value().cache.total_cache_bytes == 290562048ULL);
+  assert(plan.value().cache.total_cache_bytes == 155381760ULL);
   const auto plan_summary = toyllm::format_qwen35_execution_plan(plan.value());
   assert(plan_summary.find("Qwen3.5 execution plan: ok") != std::string::npos);
   assert(plan_summary.find("prompt_tokens=11000") != std::string::npos);

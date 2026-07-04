@@ -56,6 +56,7 @@ target_sources(
     src/runtime/qwen35_prefix_cache.cpp
     src/runtime/qwen35_runtime.cpp
     src/runtime/qwen35_multimodal.cpp
+    src/runtime/qwen35_vl_adapter.cpp
     src/runtime/qwen35_weight_map.cpp
     src/runtime/qwen_tokenizer.cpp
     src/runtime/reasoning_parser.cpp
@@ -119,4 +120,6 @@ if(KRAKEN_INFER_BUILD_TESTS)
   target_link_libraries(kraken-infer-smoke-test PRIVATE kraken_infer::core)
   kraken_infer_set_project_warnings(kraken-infer-smoke-test)
   add_test(NAME kraken-infer-smoke-test COMMAND kraken-infer-smoke-test)
+  set_tests_properties(kraken-infer-smoke-test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()

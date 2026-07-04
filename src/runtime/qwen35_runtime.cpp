@@ -5,6 +5,7 @@
 #include "toyllm/runtime/gguf_reader.hpp"
 #include "toyllm/runtime/gguf_tokenizer.hpp"
 #include "toyllm/runtime/qwen35_multimodal.hpp"
+#include "toyllm/runtime/qwen35_vl_adapter.hpp"
 #include "toyllm/runtime/qwen_tokenizer.hpp"
 #include "toyllm/runtime/qwen35_prefix_cache.hpp"
 #include "toyllm/runtime/qwen35_weight_map.hpp"
@@ -4327,12 +4328,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     if (!compatibility.is_ok()) {
       return compatibility;
     }
-    return Status::unavailable(
-      "Qwen3.5 image input parsed qwen3vl_merger mmproj metadata, but native "
-      "vision graph execution is not implemented yet; projector_output_width=" +
-      std::to_string(image_mmproj_metadata->projector_output_width) +
-      " text_embedding_length=" +
-      std::to_string(bundle.value().model.hidden_size));
+    return generate_qwen35_vl_with_llama_mtmd(request);
   }
   auto sampling = make_qwen35_effective_sampling(bundle.value().generation,
                                                  request.sampling);
