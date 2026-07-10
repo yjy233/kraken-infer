@@ -60,6 +60,18 @@ struct Q4KMatVecParams {
   uint threads_per_row;
 };
 
+struct KQuantTop1Params {
+  uint cols;
+  uint blocks_per_row;
+  uint rows;
+  uint row_groups;
+};
+
+struct Top1ReduceParams {
+  uint groups;
+  uint threads;
+};
+
 struct QuantGetRowParams {
   uint row;
   uint cols;
@@ -447,6 +459,292 @@ kernel void q6_k_matvec(const device uchar* weight [[buffer(0)]],
 
   if (lane == 0U) {
     output[row] = partials[0];
+  }
+}
+
+static inline float q4_k_dot_block(const device uchar* weight,
+                                   const device float* input,
+                                   constant KQuantTop1Params& params,
+                                   uint row, uint block) {
+  const uint block_size = 144U;
+  const uint row_block = row * params.blocks_per_row;
+  const device uchar* q4 = weight + (row_block + block) * block_size;
+  const float d = f16_to_float(q4);
+  const float dmin = f16_to_float(q4 + 2U);
+  const device uchar* scales = q4 + 4U;
+  const device uchar* qs = q4 + 16U;
+  const uint input_base = block * 256U;
+  float sum = 0.0f;
+  for (uint segment = 0; segment < 4U; ++segment) {
+    const uint packed1 = q4_k_scale_min(segment * 2U, scales);
+    const uint packed2 = q4_k_scale_min(segment * 2U + 1U, scales);
+    const float d1 = d * static_cast<float>(packed1 & 0xFFU);
+    const float m1 = dmin * static_cast<float>((packed1 >> 8U) & 0xFFU);
+    const float d2 = d * static_cast<float>(packed2 & 0xFFU);
+    const float m2 = dmin * static_cast<float>((packed2 >> 8U) & 0xFFU);
+    const device uchar* q = qs + segment * 32U;
+    const uint col_base = input_base + segment * 64U;
+    for (uint i = 0; i < 32U; ++i) {
+      const uint packed = q[i];
+      sum += (d1 * static_cast<float>(packed & 0xFU) - m1) *
+             input[col_base + i];
+      sum += (d2 * static_cast<float>(packed >> 4U) - m2) *
+             input[col_base + 32U + i];
+    }
+  }
+  return sum;
+}
+
+static inline float q5_k_dot_block(const device uchar* weight,
+                                   const device float* input,
+                                   constant KQuantTop1Params& params,
+                                   uint row, uint block) {
+  const uint block_size = 176U;
+  const uint row_block = row * params.blocks_per_row;
+  const device uchar* q5 = weight + (row_block + block) * block_size;
+  const float d = f16_to_float(q5);
+  const float dmin = f16_to_float(q5 + 2U);
+  const device uchar* scales = q5 + 4U;
+  const device uchar* qh = q5 + 16U;
+  const device uchar* qs = q5 + 48U;
+  const uint input_base = block * 256U;
+  uint u1 = 1U;
+  uint u2 = 2U;
+  float sum = 0.0f;
+  for (uint segment = 0; segment < 4U; ++segment) {
+    const uint packed1 = q4_k_scale_min(segment * 2U, scales);
+    const uint packed2 = q4_k_scale_min(segment * 2U + 1U, scales);
+    const float d1 = d * static_cast<float>(packed1 & 0xFFU);
+    const float m1 = dmin * static_cast<float>((packed1 >> 8U) & 0xFFU);
+    const float d2 = d * static_cast<float>(packed2 & 0xFFU);
+    const float m2 = dmin * static_cast<float>((packed2 >> 8U) & 0xFFU);
+    const device uchar* q = qs + segment * 32U;
+    const uint col_base = input_base + segment * 64U;
+    for (uint i = 0; i < 32U; ++i) {
+      const uint packed = q[i];
+      const uint high1 = (qh[i] & u1) != 0U ? 16U : 0U;
+      const uint high2 = (qh[i] & u2) != 0U ? 16U : 0U;
+      sum += (d1 * static_cast<float>((packed & 0xFU) + high1) - m1) *
+             input[col_base + i];
+      sum += (d2 * static_cast<float>((packed >> 4U) + high2) - m2) *
+             input[col_base + 32U + i];
+    }
+    u1 <<= 2U;
+    u2 <<= 2U;
+  }
+  return sum;
+}
+
+static inline float q6_k_dot_block(const device uchar* weight,
+                                   const device float* input,
+                                   constant KQuantTop1Params& params,
+                                   uint row, uint block) {
+  const uint block_size = 210U;
+  const uint row_block = row * params.blocks_per_row;
+  const device uchar* q6 = weight + (row_block + block) * block_size;
+  const device uchar* ql_base = q6;
+  const device uchar* qh_base = q6 + 128U;
+  const device char* scales_base = reinterpret_cast<const device char*>(q6 + 192U);
+  const float d = f16_to_float(q6 + 208U);
+  const uint input_base = block * 256U;
+  float sum = 0.0f;
+  for (uint chunk = 0; chunk < 2U; ++chunk) {
+    const device uchar* ql = ql_base + chunk * 64U;
+    const device uchar* qh = qh_base + chunk * 32U;
+    const device char* scales = scales_base + chunk * 8U;
+    const uint col_base = input_base + chunk * 128U;
+    for (uint i = 0; i < 32U; ++i) {
+      const uint scale_index = i / 16U;
+      const int q1 =
+        static_cast<int>((ql[i] & 0xFU) | (((qh[i] >> 0U) & 3U) << 4U)) - 32;
+      const int q2 =
+        static_cast<int>((ql[i + 32U] & 0xFU) | (((qh[i] >> 2U) & 3U) << 4U)) - 32;
+      const int q3 =
+        static_cast<int>((ql[i] >> 4U) | (((qh[i] >> 4U) & 3U) << 4U)) - 32;
+      const int q4 =
+        static_cast<int>((ql[i + 32U] >> 4U) | (((qh[i] >> 6U) & 3U) << 4U)) - 32;
+      sum += d * static_cast<float>(scales[scale_index + 0U]) *
+             static_cast<float>(q1) * input[col_base + i];
+      sum += d * static_cast<float>(scales[scale_index + 2U]) *
+             static_cast<float>(q2) * input[col_base + i + 32U];
+      sum += d * static_cast<float>(scales[scale_index + 4U]) *
+             static_cast<float>(q3) * input[col_base + i + 64U];
+      sum += d * static_cast<float>(scales[scale_index + 6U]) *
+             static_cast<float>(q4) * input[col_base + i + 96U];
+    }
+  }
+  return sum;
+}
+
+static inline void k_quant_top1_group_reduce(
+  threadgroup float* partials, threadgroup float* row_logits,
+  device int* candidate_indices, device float* candidate_logits,
+  device float* candidate_sums, constant KQuantTop1Params& params,
+  uint group, uint lane) {
+  constexpr uint rows_per_group = 32U;
+  const uint row_start = group * rows_per_group;
+  const uint rows_this =
+    min(rows_per_group, params.rows > row_start ? params.rows - row_start : 0U);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (lane == 0U) {
+    float local_max = -INFINITY;
+    uint local_index = row_start;
+    for (uint row = 0U; row < rows_this; ++row) {
+      float logit = 0.0f;
+      for (uint block = 0U; block < params.blocks_per_row; ++block) {
+        logit += partials[row * params.blocks_per_row + block];
+      }
+      row_logits[row] = logit;
+      const uint token = row_start + row;
+      if (logit > local_max || (logit == local_max && token < local_index)) {
+        local_max = logit;
+        local_index = token;
+      }
+    }
+    float local_sum = 0.0f;
+    for (uint row = 0U; row < rows_this; ++row) {
+      local_sum += exp(row_logits[row] - local_max);
+    }
+    candidate_indices[group] = static_cast<int>(local_index);
+    candidate_logits[group] = local_max;
+    candidate_sums[group] = local_sum;
+  }
+}
+
+kernel void q4_k_matvec_top1(const device uchar* weight [[buffer(0)]],
+                             const device float* input [[buffer(1)]],
+                             device int* candidate_indices [[buffer(2)]],
+                             device float* candidate_logits [[buffer(3)]],
+                             device float* candidate_sums [[buffer(4)]],
+                             constant KQuantTop1Params& params [[buffer(5)]],
+                             uint3 group_id [[threadgroup_position_in_grid]],
+                             uint lane [[thread_index_in_threadgroup]]) {
+  threadgroup float partials[512];
+  threadgroup float row_logits[32];
+  constexpr uint rows_per_group = 32U;
+  const uint row_start = group_id.x * rows_per_group;
+  const uint rows_this =
+    min(rows_per_group, params.rows > row_start ? params.rows - row_start : 0U);
+  const uint tasks = rows_this * params.blocks_per_row;
+  for (uint task = lane; task < tasks; task += 256U) {
+    const uint local_row = task / params.blocks_per_row;
+    const uint block = task - local_row * params.blocks_per_row;
+    partials[task] =
+      q4_k_dot_block(weight, input, params, row_start + local_row, block);
+  }
+  k_quant_top1_group_reduce(partials, row_logits, candidate_indices,
+                            candidate_logits, candidate_sums, params,
+                            group_id.x, lane);
+}
+
+kernel void q5_k_matvec_top1(const device uchar* weight [[buffer(0)]],
+                             const device float* input [[buffer(1)]],
+                             device int* candidate_indices [[buffer(2)]],
+                             device float* candidate_logits [[buffer(3)]],
+                             device float* candidate_sums [[buffer(4)]],
+                             constant KQuantTop1Params& params [[buffer(5)]],
+                             uint3 group_id [[threadgroup_position_in_grid]],
+                             uint lane [[thread_index_in_threadgroup]]) {
+  threadgroup float partials[512];
+  threadgroup float row_logits[32];
+  constexpr uint rows_per_group = 32U;
+  const uint row_start = group_id.x * rows_per_group;
+  const uint rows_this =
+    min(rows_per_group, params.rows > row_start ? params.rows - row_start : 0U);
+  const uint tasks = rows_this * params.blocks_per_row;
+  for (uint task = lane; task < tasks; task += 256U) {
+    const uint local_row = task / params.blocks_per_row;
+    const uint block = task - local_row * params.blocks_per_row;
+    partials[task] =
+      q5_k_dot_block(weight, input, params, row_start + local_row, block);
+  }
+  k_quant_top1_group_reduce(partials, row_logits, candidate_indices,
+                            candidate_logits, candidate_sums, params,
+                            group_id.x, lane);
+}
+
+kernel void q6_k_matvec_top1(const device uchar* weight [[buffer(0)]],
+                             const device float* input [[buffer(1)]],
+                             device int* candidate_indices [[buffer(2)]],
+                             device float* candidate_logits [[buffer(3)]],
+                             device float* candidate_sums [[buffer(4)]],
+                             constant KQuantTop1Params& params [[buffer(5)]],
+                             uint3 group_id [[threadgroup_position_in_grid]],
+                             uint lane [[thread_index_in_threadgroup]]) {
+  threadgroup float partials[512];
+  threadgroup float row_logits[32];
+  constexpr uint rows_per_group = 32U;
+  const uint row_start = group_id.x * rows_per_group;
+  const uint rows_this =
+    min(rows_per_group, params.rows > row_start ? params.rows - row_start : 0U);
+  const uint tasks = rows_this * params.blocks_per_row;
+  for (uint task = lane; task < tasks; task += 256U) {
+    const uint local_row = task / params.blocks_per_row;
+    const uint block = task - local_row * params.blocks_per_row;
+    partials[task] =
+      q6_k_dot_block(weight, input, params, row_start + local_row, block);
+  }
+  k_quant_top1_group_reduce(partials, row_logits, candidate_indices,
+                            candidate_logits, candidate_sums, params,
+                            group_id.x, lane);
+}
+
+kernel void k_quant_top1_reduce(const device int* candidate_indices [[buffer(0)]],
+                                const device float* candidate_logits [[buffer(1)]],
+                                const device float* candidate_sums [[buffer(2)]],
+                                device int* token_output [[buffer(3)]],
+                                device float* probability_output [[buffer(4)]],
+                                constant Top1ReduceParams& params [[buffer(5)]],
+                                uint lane [[thread_index_in_threadgroup]]) {
+  threadgroup float best_values[256];
+  threadgroup uint best_indices[256];
+  threadgroup float sums[256];
+  float best_value = -INFINITY;
+  uint best_index = 0U;
+  for (uint group = lane; group < params.groups; group += params.threads) {
+    const float value = candidate_logits[group];
+    const uint index = static_cast<uint>(candidate_indices[group]);
+    if (value > best_value || (value == best_value && index < best_index)) {
+      best_value = value;
+      best_index = index;
+    }
+  }
+  best_values[lane] = best_value;
+  best_indices[lane] = best_index;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint stride = params.threads >> 1U; stride > 0U; stride >>= 1U) {
+    if (lane < stride) {
+      const float rhs_value = best_values[lane + stride];
+      const uint rhs_index = best_indices[lane + stride];
+      if (rhs_value > best_values[lane] ||
+          (rhs_value == best_values[lane] && rhs_index < best_indices[lane])) {
+        best_values[lane] = rhs_value;
+        best_indices[lane] = rhs_index;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  const float global_max = best_values[0];
+  float denominator = 0.0f;
+  for (uint group = lane; group < params.groups; group += params.threads) {
+    denominator += candidate_sums[group] *
+                   exp(candidate_logits[group] - global_max);
+  }
+  sums[lane] = denominator;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint stride = params.threads >> 1U; stride > 0U; stride >>= 1U) {
+    if (lane < stride) {
+      sums[lane] += sums[lane + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  if (lane == 0U) {
+    token_output[0] = static_cast<int>(best_indices[0]);
+    probability_output[0] = sums[0] > 0.0f ? 1.0f / sums[0] : 0.0f;
   }
 }
 
@@ -3355,6 +3653,9 @@ struct QuantMatVecLayout {
   std::size_t output_bytes{0};
 };
 
+constexpr std::size_t kKQuantTop1RowsPerGroup = 32U;
+constexpr std::size_t kKQuantTop1MaxBlocksPerRow = 16U;
+
 struct SizeParams {
   std::uint32_t size{0};
   std::uint32_t threads{0};
@@ -3369,6 +3670,18 @@ struct Q4KMatVecParams {
   std::uint32_t cols{0};
   std::uint32_t blocks_per_row{0};
   std::uint32_t threads_per_row{0};
+};
+
+struct KQuantTop1Params {
+  std::uint32_t cols{0};
+  std::uint32_t blocks_per_row{0};
+  std::uint32_t rows{0};
+  std::uint32_t row_groups{0};
+};
+
+struct Top1ReduceParams {
+  std::uint32_t groups{0};
+  std::uint32_t threads{0};
 };
 
 struct QuantGetRowParams {
@@ -3875,6 +4188,10 @@ struct MpsContext::Impl {
   id<MTLComputePipelineState> q4_k_matvec_pipeline{nil};
   id<MTLComputePipelineState> q5_k_matvec_pipeline{nil};
   id<MTLComputePipelineState> q6_k_matvec_pipeline{nil};
+  id<MTLComputePipelineState> q4_k_matvec_top1_pipeline{nil};
+  id<MTLComputePipelineState> q5_k_matvec_top1_pipeline{nil};
+  id<MTLComputePipelineState> q6_k_matvec_top1_pipeline{nil};
+  id<MTLComputePipelineState> k_quant_top1_reduce_pipeline{nil};
   id<MTLComputePipelineState> q4_k_matmul_pipeline{nil};
   id<MTLComputePipelineState> q5_k_matmul_pipeline{nil};
   id<MTLComputePipelineState> q6_k_matmul_pipeline{nil};
@@ -4138,6 +4455,18 @@ struct MpsContext::Impl {
     if (q6_k_matvec_pipeline != nil) {
       [q6_k_matvec_pipeline release];
     }
+    if (q4_k_matvec_top1_pipeline != nil) {
+      [q4_k_matvec_top1_pipeline release];
+    }
+    if (q5_k_matvec_top1_pipeline != nil) {
+      [q5_k_matvec_top1_pipeline release];
+    }
+    if (q6_k_matvec_top1_pipeline != nil) {
+      [q6_k_matvec_top1_pipeline release];
+    }
+    if (k_quant_top1_reduce_pipeline != nil) {
+      [k_quant_top1_reduce_pipeline release];
+    }
     if (q4_k_matmul_pipeline != nil) {
       [q4_k_matmul_pipeline release];
     }
@@ -4278,8 +4607,8 @@ std::size_t k_quant_mul_mv_ext_r1ptg(std::size_t tokens) {
 }
 
 Status encode_k_quant_mul_mm_simd(id<MTLCommandBuffer> command_buffer,
-                                  id<MTLComputePipelineState> pipeline,
-                                  id<MTLBuffer> weight,
+                                 id<MTLComputePipelineState> pipeline,
+                                 id<MTLBuffer> weight,
                                   id<MTLBuffer> input,
                                   id<MTLBuffer> output,
                                   const QuantMatVecLayout& layout,
@@ -4329,6 +4658,99 @@ Status encode_k_quant_mul_mm_simd(id<MTLCommandBuffer> command_buffer,
     MTLSizeMake(kThreadsPerSimdgroup, kSimdgroupsPerThreadgroup, 1);
   [encoder dispatchThreadgroups:group_count threadsPerThreadgroup:threadgroup_size];
   [encoder endEncoding];
+  return Status::ok();
+}
+
+Status encode_k_quant_top1(id<MTLCommandBuffer> command_buffer,
+                           id<MTLComputePipelineState> top1_pipeline,
+                           id<MTLComputePipelineState> reduce_pipeline,
+                           id<MTLBuffer> weight,
+                           id<MTLBuffer> input,
+                           id<MTLBuffer> candidate_indices,
+                           id<MTLBuffer> candidate_logits,
+                           id<MTLBuffer> candidate_sums,
+                           id<MTLBuffer> token_output,
+                           id<MTLBuffer> probability_output,
+                           const QuantMatVecLayout& layout,
+                           std::size_t rows,
+                           std::size_t cols,
+                           std::size_t groups,
+                           const char* name) {
+  constexpr NSUInteger kTop1Threads = 256;
+  if ([top1_pipeline maxTotalThreadsPerThreadgroup] < kTop1Threads) {
+    return Status::internal_error(std::string{"MPS "} + name +
+                                  " top1 pipeline cannot run 256 threads");
+  }
+  if ([reduce_pipeline maxTotalThreadsPerThreadgroup] < kTop1Threads) {
+    return Status::internal_error(
+      "MPS K-quant top1 reduce pipeline cannot run 256 threads");
+  }
+
+  auto rows_u32 = checked_u32(rows, "K-quant top1 rows");
+  auto cols_u32 = checked_u32(cols, "K-quant top1 cols");
+  auto blocks_u32 = checked_u32(layout.blocks_per_row, "K-quant top1 blocks");
+  auto groups_u32 = checked_u32(groups, "K-quant top1 groups");
+  if (!rows_u32.is_ok()) {
+    return rows_u32.status();
+  }
+  if (!cols_u32.is_ok()) {
+    return cols_u32.status();
+  }
+  if (!blocks_u32.is_ok()) {
+    return blocks_u32.status();
+  }
+  if (!groups_u32.is_ok()) {
+    return groups_u32.status();
+  }
+
+  {
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (encoder == nil) {
+      return Status::unavailable("failed to create Metal compute encoder");
+    }
+    KQuantTop1Params params{
+      cols_u32.value(),
+      blocks_u32.value(),
+      rows_u32.value(),
+      groups_u32.value(),
+    };
+    [encoder setComputePipelineState:top1_pipeline];
+    [encoder setBuffer:weight offset:0 atIndex:0];
+    [encoder setBuffer:input offset:0 atIndex:1];
+    [encoder setBuffer:candidate_indices offset:0 atIndex:2];
+    [encoder setBuffer:candidate_logits offset:0 atIndex:3];
+    [encoder setBuffer:candidate_sums offset:0 atIndex:4];
+    [encoder setBytes:&params length:sizeof(params) atIndex:5];
+    const MTLSize group_count =
+      MTLSizeMake(static_cast<NSUInteger>(groups), 1, 1);
+    const MTLSize threadgroup_size = MTLSizeMake(kTop1Threads, 1, 1);
+    [encoder dispatchThreadgroups:group_count
+             threadsPerThreadgroup:threadgroup_size];
+    [encoder endEncoding];
+  }
+
+  {
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (encoder == nil) {
+      return Status::unavailable("failed to create Metal compute encoder");
+    }
+    Top1ReduceParams params{
+      groups_u32.value(),
+      static_cast<std::uint32_t>(kTop1Threads),
+    };
+    [encoder setComputePipelineState:reduce_pipeline];
+    [encoder setBuffer:candidate_indices offset:0 atIndex:0];
+    [encoder setBuffer:candidate_logits offset:0 atIndex:1];
+    [encoder setBuffer:candidate_sums offset:0 atIndex:2];
+    [encoder setBuffer:token_output offset:0 atIndex:3];
+    [encoder setBuffer:probability_output offset:0 atIndex:4];
+    [encoder setBytes:&params length:sizeof(params) atIndex:5];
+    const MTLSize group_count = MTLSizeMake(static_cast<NSUInteger>(1), 1, 1);
+    const MTLSize threadgroup_size = MTLSizeMake(kTop1Threads, 1, 1);
+    [encoder dispatchThreadgroups:group_count
+             threadsPerThreadgroup:threadgroup_size];
+    [encoder endEncoding];
+  }
   return Status::ok();
 }
 
@@ -4444,6 +4866,34 @@ Result<MpsContext> MpsContext::create() {
       return q6_k_matvec_pipeline.status();
     }
     impl->q6_k_matvec_pipeline = q6_k_matvec_pipeline.value();
+
+    auto q4_k_matvec_top1_pipeline = make_pipeline("q4_k_matvec_top1");
+    if (!q4_k_matvec_top1_pipeline.is_ok()) {
+      [library release];
+      return q4_k_matvec_top1_pipeline.status();
+    }
+    impl->q4_k_matvec_top1_pipeline = q4_k_matvec_top1_pipeline.value();
+
+    auto q5_k_matvec_top1_pipeline = make_pipeline("q5_k_matvec_top1");
+    if (!q5_k_matvec_top1_pipeline.is_ok()) {
+      [library release];
+      return q5_k_matvec_top1_pipeline.status();
+    }
+    impl->q5_k_matvec_top1_pipeline = q5_k_matvec_top1_pipeline.value();
+
+    auto q6_k_matvec_top1_pipeline = make_pipeline("q6_k_matvec_top1");
+    if (!q6_k_matvec_top1_pipeline.is_ok()) {
+      [library release];
+      return q6_k_matvec_top1_pipeline.status();
+    }
+    impl->q6_k_matvec_top1_pipeline = q6_k_matvec_top1_pipeline.value();
+
+    auto k_quant_top1_reduce_pipeline = make_pipeline("k_quant_top1_reduce");
+    if (!k_quant_top1_reduce_pipeline.is_ok()) {
+      [library release];
+      return k_quant_top1_reduce_pipeline.status();
+    }
+    impl->k_quant_top1_reduce_pipeline = k_quant_top1_reduce_pipeline.value();
 
     auto q4_k_matmul_pipeline = make_pipeline("q4_k_matmul");
     if (!q4_k_matmul_pipeline.is_ok()) {
@@ -4915,6 +5365,10 @@ bool MpsContext::valid() const {
   return impl_ != nullptr && impl_->device != nil && impl_->queue != nil &&
          impl_->matvec_pipeline != nil && impl_->q4_k_matvec_pipeline != nil &&
          impl_->q5_k_matvec_pipeline != nil && impl_->q6_k_matvec_pipeline != nil &&
+         impl_->q4_k_matvec_top1_pipeline != nil &&
+         impl_->q5_k_matvec_top1_pipeline != nil &&
+         impl_->q6_k_matvec_top1_pipeline != nil &&
+         impl_->k_quant_top1_reduce_pipeline != nil &&
          impl_->q4_k_matmul_pipeline != nil && impl_->q5_k_matmul_pipeline != nil &&
          impl_->q6_k_matmul_pipeline != nil &&
          impl_->q4_k_mul_mv_ext_r1_3_pipeline != nil &&
@@ -5465,6 +5919,80 @@ Status MpsContext::matvec_q4_k_f32_device(const MpsBuffer& weight,
   return Status::ok();
 }
 
+Status MpsContext::matvec_q4_k_f32_top1(const MpsBuffer& weight,
+                                        std::size_t rows, std::size_t cols,
+                                        const MpsBuffer& input,
+                                        MpsBuffer& token_output,
+                                        MpsBuffer& probability_output) const {
+  if (!valid()) {
+    return Status::unavailable("MPS context is not initialized");
+  }
+  if (!weight.valid()) {
+    return Status::invalid_argument("MPS Q4_K top1 weight buffer is not initialized");
+  }
+  auto layout_result = make_q4_k_matvec_layout(rows, cols);
+  if (!layout_result.is_ok()) {
+    return layout_result.status();
+  }
+  const auto& layout = layout_result.value();
+  if (layout.blocks_per_row > kKQuantTop1MaxBlocksPerRow) {
+    return Status::invalid_argument("MPS Q4_K top1 block count exceeds kernel limit");
+  }
+  if (weight.byte_size() < layout.weight_bytes) {
+    return Status::invalid_argument("MPS Q4_K top1 weight buffer is too small");
+  }
+  auto input_status = validate_f32_buffer(input, cols, "Q4_K top1 input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto token_status = validate_i32_buffer(token_output, 1, "Q4_K top1 token output");
+  if (!token_status.is_ok()) {
+    return token_status;
+  }
+  auto probability_status =
+    validate_f32_buffer(probability_output, 1, "Q4_K top1 probability output");
+  if (!probability_status.is_ok()) {
+    return probability_status;
+  }
+  const auto groups = (rows + kKQuantTop1RowsPerGroup - 1U) /
+                      kKQuantTop1RowsPerGroup;
+  auto candidate_indices = make_buffer(groups * sizeof(std::int32_t));
+  auto candidate_logits = make_buffer(groups * sizeof(float));
+  auto candidate_sums = make_buffer(groups * sizeof(float));
+  if (!candidate_indices.is_ok()) {
+    return candidate_indices.status();
+  }
+  if (!candidate_logits.is_ok()) {
+    return candidate_logits.status();
+  }
+  if (!candidate_sums.is_ok()) {
+    return candidate_sums.status();
+  }
+
+  @autoreleasepool {
+    id<MTLCommandBuffer> command_buffer = impl_->command_buffer();
+    if (command_buffer == nil) {
+      return Status::unavailable("failed to create Metal command buffer");
+    }
+    auto status = encode_k_quant_top1(
+      command_buffer, impl_->q4_k_matvec_top1_pipeline,
+      impl_->k_quant_top1_reduce_pipeline, weight.impl_->buffer,
+      input.impl_->buffer, candidate_indices.value().impl_->buffer,
+      candidate_logits.value().impl_->buffer,
+      candidate_sums.value().impl_->buffer, token_output.impl_->buffer,
+      probability_output.impl_->buffer, layout, rows, cols, groups, "Q4_K");
+    if (!status.is_ok()) {
+      return status;
+    }
+    auto finish_status = impl_->finish_command_buffer(
+      command_buffer, "MPS Q4_K top1 command failed: ");
+    if (!finish_status.is_ok()) {
+      return finish_status;
+    }
+  }
+  return Status::ok();
+}
+
 Status MpsContext::matmul_q4_k_f32_device(const MpsBuffer& weight,
                                           std::size_t rows, std::size_t cols,
                                           std::size_t tokens,
@@ -5689,6 +6217,80 @@ Status MpsContext::matvec_q5_k_f32_device(const MpsBuffer& weight,
   return Status::ok();
 }
 
+Status MpsContext::matvec_q5_k_f32_top1(const MpsBuffer& weight,
+                                        std::size_t rows, std::size_t cols,
+                                        const MpsBuffer& input,
+                                        MpsBuffer& token_output,
+                                        MpsBuffer& probability_output) const {
+  if (!valid()) {
+    return Status::unavailable("MPS context is not initialized");
+  }
+  if (!weight.valid()) {
+    return Status::invalid_argument("MPS Q5_K top1 weight buffer is not initialized");
+  }
+  auto layout_result = make_q5_k_matvec_layout(rows, cols);
+  if (!layout_result.is_ok()) {
+    return layout_result.status();
+  }
+  const auto& layout = layout_result.value();
+  if (layout.blocks_per_row > kKQuantTop1MaxBlocksPerRow) {
+    return Status::invalid_argument("MPS Q5_K top1 block count exceeds kernel limit");
+  }
+  if (weight.byte_size() < layout.weight_bytes) {
+    return Status::invalid_argument("MPS Q5_K top1 weight buffer is too small");
+  }
+  auto input_status = validate_f32_buffer(input, cols, "Q5_K top1 input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto token_status = validate_i32_buffer(token_output, 1, "Q5_K top1 token output");
+  if (!token_status.is_ok()) {
+    return token_status;
+  }
+  auto probability_status =
+    validate_f32_buffer(probability_output, 1, "Q5_K top1 probability output");
+  if (!probability_status.is_ok()) {
+    return probability_status;
+  }
+  const auto groups = (rows + kKQuantTop1RowsPerGroup - 1U) /
+                      kKQuantTop1RowsPerGroup;
+  auto candidate_indices = make_buffer(groups * sizeof(std::int32_t));
+  auto candidate_logits = make_buffer(groups * sizeof(float));
+  auto candidate_sums = make_buffer(groups * sizeof(float));
+  if (!candidate_indices.is_ok()) {
+    return candidate_indices.status();
+  }
+  if (!candidate_logits.is_ok()) {
+    return candidate_logits.status();
+  }
+  if (!candidate_sums.is_ok()) {
+    return candidate_sums.status();
+  }
+
+  @autoreleasepool {
+    id<MTLCommandBuffer> command_buffer = impl_->command_buffer();
+    if (command_buffer == nil) {
+      return Status::unavailable("failed to create Metal command buffer");
+    }
+    auto status = encode_k_quant_top1(
+      command_buffer, impl_->q5_k_matvec_top1_pipeline,
+      impl_->k_quant_top1_reduce_pipeline, weight.impl_->buffer,
+      input.impl_->buffer, candidate_indices.value().impl_->buffer,
+      candidate_logits.value().impl_->buffer,
+      candidate_sums.value().impl_->buffer, token_output.impl_->buffer,
+      probability_output.impl_->buffer, layout, rows, cols, groups, "Q5_K");
+    if (!status.is_ok()) {
+      return status;
+    }
+    auto finish_status = impl_->finish_command_buffer(
+      command_buffer, "MPS Q5_K top1 command failed: ");
+    if (!finish_status.is_ok()) {
+      return finish_status;
+    }
+  }
+  return Status::ok();
+}
+
 Status MpsContext::matmul_q5_k_f32_device(const MpsBuffer& weight,
                                           std::size_t rows, std::size_t cols,
                                           std::size_t tokens,
@@ -5906,6 +6508,80 @@ Status MpsContext::matvec_q6_k_f32_device(const MpsBuffer& weight,
     [encoder dispatchThreadgroups:group_count threadsPerThreadgroup:threadgroup_size];
     [encoder endEncoding];
     auto finish_status = impl_->finish_command_buffer(command_buffer, "MPS Q6_K matvec command failed: ");
+    if (!finish_status.is_ok()) {
+      return finish_status;
+    }
+  }
+  return Status::ok();
+}
+
+Status MpsContext::matvec_q6_k_f32_top1(const MpsBuffer& weight,
+                                        std::size_t rows, std::size_t cols,
+                                        const MpsBuffer& input,
+                                        MpsBuffer& token_output,
+                                        MpsBuffer& probability_output) const {
+  if (!valid()) {
+    return Status::unavailable("MPS context is not initialized");
+  }
+  if (!weight.valid()) {
+    return Status::invalid_argument("MPS Q6_K top1 weight buffer is not initialized");
+  }
+  auto layout_result = make_q6_k_matvec_layout(rows, cols);
+  if (!layout_result.is_ok()) {
+    return layout_result.status();
+  }
+  const auto& layout = layout_result.value();
+  if (layout.blocks_per_row > kKQuantTop1MaxBlocksPerRow) {
+    return Status::invalid_argument("MPS Q6_K top1 block count exceeds kernel limit");
+  }
+  if (weight.byte_size() < layout.weight_bytes) {
+    return Status::invalid_argument("MPS Q6_K top1 weight buffer is too small");
+  }
+  auto input_status = validate_f32_buffer(input, cols, "Q6_K top1 input");
+  if (!input_status.is_ok()) {
+    return input_status;
+  }
+  auto token_status = validate_i32_buffer(token_output, 1, "Q6_K top1 token output");
+  if (!token_status.is_ok()) {
+    return token_status;
+  }
+  auto probability_status =
+    validate_f32_buffer(probability_output, 1, "Q6_K top1 probability output");
+  if (!probability_status.is_ok()) {
+    return probability_status;
+  }
+  const auto groups = (rows + kKQuantTop1RowsPerGroup - 1U) /
+                      kKQuantTop1RowsPerGroup;
+  auto candidate_indices = make_buffer(groups * sizeof(std::int32_t));
+  auto candidate_logits = make_buffer(groups * sizeof(float));
+  auto candidate_sums = make_buffer(groups * sizeof(float));
+  if (!candidate_indices.is_ok()) {
+    return candidate_indices.status();
+  }
+  if (!candidate_logits.is_ok()) {
+    return candidate_logits.status();
+  }
+  if (!candidate_sums.is_ok()) {
+    return candidate_sums.status();
+  }
+
+  @autoreleasepool {
+    id<MTLCommandBuffer> command_buffer = impl_->command_buffer();
+    if (command_buffer == nil) {
+      return Status::unavailable("failed to create Metal command buffer");
+    }
+    auto status = encode_k_quant_top1(
+      command_buffer, impl_->q6_k_matvec_top1_pipeline,
+      impl_->k_quant_top1_reduce_pipeline, weight.impl_->buffer,
+      input.impl_->buffer, candidate_indices.value().impl_->buffer,
+      candidate_logits.value().impl_->buffer,
+      candidate_sums.value().impl_->buffer, token_output.impl_->buffer,
+      probability_output.impl_->buffer, layout, rows, cols, groups, "Q6_K");
+    if (!status.is_ok()) {
+      return status;
+    }
+    auto finish_status = impl_->finish_command_buffer(
+      command_buffer, "MPS Q6_K top1 command failed: ");
     if (!finish_status.is_ok()) {
       return finish_status;
     }

@@ -29,20 +29,26 @@ llama.cpp 的 Qwen3.5 MTP 不是把主 decoder 一次输出多个 token，而是
 - 主推理现在导出 target `h_nextn`，prefill 会同步推进 MTP cache。
 - 已实现 MTP KV cache、`nextn.eh_proj/enorm/hnorm` forward、shared head fallback
   和 draft logits。
-- 已实现 greedy speculative loop：target 产出 token，MTP 连续 draft，target 逐个验证并
-  接受匹配 token。
+- 已实现 greedy speculative loop：target 产出 token，MTP 连续 draft，target batch
+  verify 后逐行接受匹配 token。
 - Gateway/CLI 已支持 `--mtp|--no-mtp`、`--mtp-draft-tokens`、request `mtp` 和
   `mtp_draft_tokens`。
+- Gateway/CLI 已支持 `mtp_p_min` / `--mtp-p-min` 置信度门控。
 - 非 streaming gateway 响应会返回 `X-Kraken-MTP-*` headers。
 - 新增 `scripts/test_qwen35_mtp_gateway.py` 做端到端测试。
 - MTP GGUF 中的 Q8_0 projector 和 F32 2D 小矩阵通过 dense F32 transpose fallback
   接入现有 Metal matmul。
+- MPS backend 已增加 Q4_K/Q5_K/Q6_K fused top-1 LM head，MTP draft 可以直接产出
+  top-1 token 和 exact top-1 probability，不再 materialize 完整 vocab logits。
 
 当前限制：
 
 - 只在 greedy 路径启用；request 设置 `temperature/top_p/top_k/seed` 会视为 sampling，
   第一版自动禁用 MTP。
-- target verify 目前是逐 token 顺序验证，不是 llama.cpp 的一次 batch verify。
+- target verify 已经 batch decode；但 sampler/accept 仍是逐行 greedy argmax 对比，
+  尚未接入 llama.cpp common sampler 风格的 top-k/top-p accept。
+- `p_min=0` 仍走同一个 fused probability head；后续可加 token-only argmax head，
+  避免不需要置信度时计算 softmax denominator。
 - `cache_prompt` 与 MTP 暂不同时启用；attention KV cache 仍正常使用。
 - 图片请求仍通过 `llama-mtmd-cli` 桥接完成 VL，MTP headers 会标记 MTP 未启用。
   llama.cpp 自身的 draft-mtp 代码也仍有 vision token TODO，因此这里不伪装成原生
@@ -786,15 +792,23 @@ python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
 
 ### 2026-07-10 性能测量
 
-Release build，Apple Metal path，`KRAKEN_QWEN35_F16_KV=1`，同一 prompt，
-`max-new-tokens=64`：
+同一 prompt，Apple Metal path，`max-new-tokens=64`。
+
+旧 full-logits draft head 结果：
 
 | 模式 | wall time | 说明 |
 | --- | ---: | --- |
-| `--no-mtp` | 12.06s | baseline greedy decode |
-| `--mtp --mtp-draft-tokens 1` | 13.87s | drafted=41 accepted=22 |
-| `--mtp --mtp-draft-tokens 3` | 15.18s | drafted=98 accepted=30 |
-| `--mtp --mtp-draft-tokens 4` | 约 16.7s | earlier sweep: drafted=128 accepted=30 |
+| `--no-mtp` | 10.98s | baseline greedy decode |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 15.80s | full vocab logits draft head |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 12.80s | device argmax/probability, still materialized logits |
+
+本轮 fused top-1 draft head 结果：
+
+| 模式 | wall time | 说明 |
+| --- | ---: | --- |
+| `--no-mtp` | 14.70s | baseline greedy decode |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 14.70s | drafted=96 accepted=31 verify_steps=62 |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 11.50s | drafted=46 accepted=29 verify_steps=38 confidence_stops=28 |
 
 已实现 batch target verify 和 device-side draft chain：
 
@@ -803,19 +817,14 @@ Release build，Apple Metal path，`KRAKEN_QWEN35_F16_KV=1`，同一 prompt，
 - partial reject 会恢复 recurrent snapshot，再 batch commit accepted prefix。
 - MTP draft chain 会在单个 Metal command buffer 内把上一步 argmax 作为下一步
   embedding row id，避免每个 draft token 都做 CPU readback 再启动下一图。
+- Q4_K/Q5_K/Q6_K fused top-1 head 让 draft 不再 materialize 完整 vocab logits。
 
-当前仍未加速，原因是 MTP draft block 自身成本较高：
+现在 `p_min=0.20` 已能快于 no-MTP；`p_min=0` 仍基本持平，原因是低置信 draft
+数量更多，MTP block 额外计算容易抵消 target verify step 的减少。后续要继续提速，
+优先方向是：
 
-```text
-qwen35.mtp.draft_chain: k=3 时约 3.68s / 64 generated tokens
-request.decode:        batch verify 后约 9.72s，baseline 约 10.42s
-```
-
-也就是说 target batch verify 已经省掉一部分主模型 decode 时间，但 MTP block +
-vocab head 的额外计算成本更高。后续要继续提速，优先方向是：
-
-1. 优化 MTP block 内 `nextn.eh_proj`、full-attention block 和 vocab head。
-2. 避免每个 draft step 都完整跑 vocab head，例如设备端 top-1 fused head 或小批量 head。
+1. 优化 MTP block 内 `nextn.eh_proj` 和 full-attention block。
+2. 增加 `p_min=0` 专用 token-only argmax head，避免计算 softmax denominator。
 3. 提高 target verify 的小 batch kernel 效率。
 4. 做运行时自适应：acceptance/cost 不划算时自动关闭 MTP。
 

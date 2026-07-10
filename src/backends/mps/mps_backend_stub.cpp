@@ -204,6 +204,20 @@ Status MpsContext::matvec_q4_k_f32_device(const MpsBuffer& weight,
   return Status::unavailable("MPS backend was not compiled for this build");
 }
 
+Status MpsContext::matvec_q4_k_f32_top1(const MpsBuffer& weight,
+                                        std::size_t rows, std::size_t cols,
+                                        const MpsBuffer& input,
+                                        MpsBuffer& token_output,
+                                        MpsBuffer& probability_output) const {
+  (void)weight;
+  (void)rows;
+  (void)cols;
+  (void)input;
+  (void)token_output;
+  (void)probability_output;
+  return Status::unavailable("MPS backend was not compiled for this build");
+}
+
 Status MpsContext::matmul_q4_k_f32_device(const MpsBuffer& weight,
                                           std::size_t rows, std::size_t cols,
                                           std::size_t tokens,
@@ -240,6 +254,20 @@ Status MpsContext::matvec_q5_k_f32_device(const MpsBuffer& weight,
   return Status::unavailable("MPS backend was not compiled for this build");
 }
 
+Status MpsContext::matvec_q5_k_f32_top1(const MpsBuffer& weight,
+                                        std::size_t rows, std::size_t cols,
+                                        const MpsBuffer& input,
+                                        MpsBuffer& token_output,
+                                        MpsBuffer& probability_output) const {
+  (void)weight;
+  (void)rows;
+  (void)cols;
+  (void)input;
+  (void)token_output;
+  (void)probability_output;
+  return Status::unavailable("MPS backend was not compiled for this build");
+}
+
 Status MpsContext::matmul_q5_k_f32_device(const MpsBuffer& weight,
                                           std::size_t rows, std::size_t cols,
                                           std::size_t tokens,
@@ -273,6 +301,20 @@ Status MpsContext::matvec_q6_k_f32_device(const MpsBuffer& weight,
   (void)cols;
   (void)input;
   (void)output;
+  return Status::unavailable("MPS backend was not compiled for this build");
+}
+
+Status MpsContext::matvec_q6_k_f32_top1(const MpsBuffer& weight,
+                                        std::size_t rows, std::size_t cols,
+                                        const MpsBuffer& input,
+                                        MpsBuffer& token_output,
+                                        MpsBuffer& probability_output) const {
+  (void)weight;
+  (void)rows;
+  (void)cols;
+  (void)input;
+  (void)token_output;
+  (void)probability_output;
   return Status::unavailable("MPS backend was not compiled for this build");
 }
 

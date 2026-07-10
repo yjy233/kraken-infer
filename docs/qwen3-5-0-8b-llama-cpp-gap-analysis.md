@@ -3,7 +3,7 @@
 调研对象：
 
 - llama.cpp：`~/code/llama.cpp`，HEAD `be4a6a63e`
-- kraken-infer：`feat/mtp`，HEAD `2f72487`
+- kraken-infer：`feat/mtp`
 
 ## llama.cpp 的 Qwen3.5 dense 文本路径
 
@@ -151,18 +151,29 @@ mmproj/vision graph、image embedding injection、image MRoPE position 与多模
 
 ## 性能差距判断
 
-当前 kraken MTP 实测仍慢于 no-MTP：
+本轮 fused top-1 draft head 后，MTP greedy 路径已经不再总是慢于 no-MTP。Debug build
+在同一 prompt、`Qwen3.5-0.8B-Q4_K_M.gguf`、64 completion tokens 下实测：
 
-- no-MTP：约 12.06s / 64 tokens。
-- MTP k=1：约 13.87s。
-- MTP k=3：约 15.18s。
+- no-MTP：`real 14.70s`。
+- MTP `draft_tokens=3, p_min=0`：`real 14.70s`，
+  drafted=96、accepted=31、verify_steps=62。
+- MTP `draft_tokens=3, p_min=0.20`：`real 11.50s`，
+  drafted=46、accepted=29、verify_steps=38、confidence_stops=28。
 
-从 llama.cpp 对照看，可能的性能差距来源不是 MTP 公式本身，而是：
+对比上一轮 full-logits draft head：
 
-1. `p_min > 0` 可以提前停止低置信 draft，当前 top-1 probability 已在 GPU 端并行
-   reduction，不再回读整条 logits；但 LM head 仍会 materialize 完整 vocab logits，
-   尚未变成低成本 fused top-1 head。
-2. MTP draft 每步仍完整跑 MTP block + full vocab head。
+- no-MTP：约 10.98s / 64 tokens。
+- MTP `p_min=0`：约 15.80s。
+- MTP `p_min=0.20`：约 12.80s。
+
+因此 fused top-1 head 解决了 draft LM head materialize 完整 vocab logits 的主要开销。
+剩余性能差距主要来自：
+
+1. MTP draft 每步仍完整跑 MTP block；当 `p_min=0` 时会产生更多低质量 draft，
+   extra draft compute 容易抵消 verify step 减少。
+2. `p_min > 0` 的概率 gate 现在在 fused head 内完成 exact top-1 probability，
+   仍会为 softmax denominator 做全 vocab exp/reduction；可再补 token-only argmax
+   variant 专门优化 `p_min=0`。
 3. kraken 的 custom Metal kernels 没有 ggml/llama.cpp 那套成熟 scheduler 与 memory
    复用能力。
 4. kraken 当前没有多 token/多 seq 的统一 speculative 调度，很多状态管理在请求 loop 内。
@@ -189,12 +200,14 @@ mmproj/vision graph、image embedding injection、image MRoPE position 与多模
   - greedy argmax 不再由单 GPU 线程串行扫描 vocab logits。
   - `mtp_p_min > 0` 只回读 top-1 token/probability 两个标量，不再把整条 draft logits
     拷回 CPU。
+- MPS backend 增加 Q4_K/Q5_K/Q6_K fused top-1 LM head：
+  - MTP draft 每步直接产出 top-1 token 和 exact top-1 probability。
+  - draft 路径不再 materialize 完整 vocab logits buffer。
 
 仍未完成：
 
 - MTP draft top-k/common sampler parity。
-- fused top-1 draft head。当前概率 gate 已无 CPU logits readback，但仍需要完整 vocab
-  logits buffer。
+- `p_min=0` 专用 token-only argmax head，避免不需要置信度时仍计算 softmax denominator。
 - native VL + native MTP 共用同一个 kraken context。当前图片请求仍走
   `llama-mtmd-cli` bridge，进入 bridge 后会禁用 kraken MTP。
 
@@ -210,8 +223,7 @@ mmproj/vision graph、image embedding injection、image MRoPE position 与多模
    - 记录 wall time、prefill、decode、draft。
 2. 用 `scripts/test_qwen35_mtp_gateway.py --p-min` 做阈值 sweep，记录
    no-MTP、MTP `p_min=0`、MTP `p_min=0.10/0.20/0.30` 的 wall time 和 acceptance。
-3. 对 MTP vocab head 做 fused top-1/argmax path，避免完整 vocab logits
-   materialization 成为 draft 成本瓶颈。
+3. 对 MTP vocab head 继续做 token-only argmax path，降低 `p_min=0` 的 draft 成本。
 
 中期：
 

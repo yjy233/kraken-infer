@@ -3374,7 +3374,7 @@ Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
   const mps::MpsContext& context, const mps::MpsBuffer& h_nextn,
   std::size_t rows, std::size_t hidden_size, const Qwen35MetalWeight& output_weight,
   cpu::DebugDumper* dumper, std::string_view debug_prefix, bool compute_argmax,
-  bool compute_top1_probability = false) {
+  bool compute_top1_probability = false, bool prefer_top1_only = false) {
   if (rows == 0 || hidden_size == 0) {
     return Status::invalid_argument("Qwen3.5 LM head dimensions must be positive");
   }
@@ -3384,6 +3384,53 @@ Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
         static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return Status::invalid_argument("Qwen3.5 output weight shape mismatch");
   }
+  const auto logits_values = static_cast<std::size_t>(output_weight.shape[1]);
+  if (prefer_top1_only && compute_argmax && rows == 1 && dumper == nullptr &&
+      !output_weight.dense_f32_transposed.valid() &&
+      (output_weight.type == 12U || output_weight.type == 13U ||
+       output_weight.type == 14U)) {
+    auto argmax_output = context.make_buffer(sizeof(std::int32_t));
+    if (!argmax_output.is_ok()) {
+      return argmax_output.status();
+    }
+    auto top1_probability = context.make_buffer(sizeof(float));
+    if (!top1_probability.is_ok()) {
+      return top1_probability.status();
+    }
+    Status status = Status::ok();
+    switch (output_weight.type) {
+      case 12:
+        status = context.matvec_q4_k_f32_top1(
+          output_weight.buffer, logits_values, hidden_size, h_nextn,
+          argmax_output.value(), top1_probability.value());
+        break;
+      case 13:
+        status = context.matvec_q5_k_f32_top1(
+          output_weight.buffer, logits_values, hidden_size, h_nextn,
+          argmax_output.value(), top1_probability.value());
+        break;
+      case 14:
+        status = context.matvec_q6_k_f32_top1(
+          output_weight.buffer, logits_values, hidden_size, h_nextn,
+          argmax_output.value(), top1_probability.value());
+        break;
+      default:
+        status = Status::invalid_argument(
+          "Qwen3.5 top1 LM head weight type is not a K-quant type: " +
+          output_weight.name);
+        break;
+    }
+    if (!status.is_ok()) {
+      return status;
+    }
+    Qwen35LogitsOutput output;
+    output.rows = rows;
+    output.argmax_output = std::move(argmax_output.value());
+    output.top1_probability = std::move(top1_probability.value());
+    output.logits_values = logits_values;
+    return output;
+  }
+
   Result<mps::MpsBuffer> logits{Status::ok()};
   if (rows == 1) {
     logits = run_qwen35_quant_matvec(context, output_weight, h_nextn, hidden_size);
@@ -3394,7 +3441,6 @@ Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
   if (!logits.is_ok()) {
     return logits.status();
   }
-  const auto logits_values = static_cast<std::size_t>(output_weight.shape[1]);
   auto status = dump_qwen35_mps_f32(
     context, dumper, qwen35_step_tensor_name(debug_prefix, "logits"),
     rows == 1 ? std::vector<std::uint64_t>{static_cast<std::uint64_t>(logits_values)}
@@ -3893,7 +3939,7 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens_from_id_buffer(
   }
   auto logits = run_qwen35_lm_head_logits(
     context, output.h_nextn, token_count, plan.hidden_size, *head_weight,
-    nullptr, "mtp", compute_argmax, compute_top1_probability);
+    nullptr, "mtp", compute_argmax, compute_top1_probability, compute_argmax);
   if (!logits.is_ok()) {
     return logits.status();
   }
@@ -4028,7 +4074,7 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens(
   }
   auto logits = run_qwen35_lm_head_logits(
     context, output.h_nextn, token_ids.size(), plan.hidden_size, *head_weight,
-    nullptr, "mtp", compute_argmax, compute_top1_probability);
+    nullptr, "mtp", compute_argmax, compute_top1_probability, compute_argmax);
   if (!logits.is_ok()) {
     return logits.status();
   }
