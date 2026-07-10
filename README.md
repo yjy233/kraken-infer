@@ -148,6 +148,7 @@ Profile 支持 `off|summary|trace|flamegraph|all`，可以通过 CLI `--profile`
 
 ```text
 models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf
+models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
 ```
 
 构建和测试：
@@ -185,20 +186,7 @@ ctest --preset debug
   --stream
 ```
 
-启动本地 HTTP gateway：
-
-```bash
-./build/debug/kraken-infer serve \
-  --host 127.0.0.1 \
-  --port 18080 \
-  --model models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
-  --model-id qwen3.5-0.8b \
-  --device mps \
-  --max-new-tokens 128 \
-  --profile summary
-```
-
-启用 Qwen3.5 图片输入时增加 mmproj：
+启动本地 HTTP gateway（Qwen3.5 0.8B VL + prompt KV cache）：
 
 ```bash
 ./build/debug/kraken-infer serve \
@@ -206,10 +194,20 @@ ctest --preset debug
   --port 18080 \
   --model models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
   --mmproj models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf \
-  --model-id qwen3.5-0.8b \
+  --model-id qwen3.5-0.8b-vl \
   --device mps \
-  --max-new-tokens 128
+  --max-new-tokens 128 \
+  --prefill-chunk-tokens 32 \
+  --cache-prompt \
+  --cache-reuse 32 \
+  --cache-block-tokens 32 \
+  --cache-capacity-blocks 16 \
+  --profile summary
 ```
+
+该命令同时启用 OpenAI `image_url` 图片输入和本仓库原生 Qwen3.5 prompt prefix
+cache。当前图片请求通过 llama.cpp `llama-mtmd-cli` 桥接完成视觉理解；原生 KV cache
+主要用于文本请求或相同文本前缀的复用。
 
 浏览器对话页：
 
@@ -231,7 +229,7 @@ Chat completion：
 curl http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b",
+    "model": "qwen3.5-0.8b-vl",
     "messages": [{"role": "user", "content": "用一句话介绍你自己"}],
     "max_completion_tokens": 128,
     "chat_template_kwargs": {"enable_thinking": false},
@@ -245,7 +243,7 @@ Streaming thinking：
 curl -N http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b",
+    "model": "qwen3.5-0.8b-vl",
     "messages": [{"role": "user", "content": "计算 23 * 19，并给出答案"}],
     "max_completion_tokens": 128,
     "stream": true,
@@ -261,7 +259,7 @@ Text completion：
 curl http://127.0.0.1:18080/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b",
+    "model": "qwen3.5-0.8b-vl",
     "prompt": "hello",
     "max_tokens": 32,
     "device": "mps"
@@ -274,7 +272,7 @@ Forced tool call protocol compatibility：
 curl http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b",
+    "model": "qwen3.5-0.8b-vl",
     "messages": [{"role": "user", "content": "weather?"}],
     "tools": [{
       "type": "function",
@@ -290,19 +288,22 @@ curl http://127.0.0.1:18080/v1/chat/completions \
 
 ## Prefix Cache Example
 
-Start gateway with prompt cache enabled. Keep `--cache-block-tokens` aligned with
-`--prefill-chunk-tokens` for the current implementation.
+Start gateway with Qwen3.5 0.8B VL and prompt cache enabled. Keep
+`--cache-block-tokens` aligned with `--prefill-chunk-tokens` for the current
+implementation.
 
 ```bash
 ./build/debug/kraken-infer serve \
   --host 127.0.0.1 \
   --port 18080 \
   --model models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
-  --model-id qwen3.5-0.8b \
+  --mmproj models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf \
+  --model-id qwen3.5-0.8b-vl \
   --device mps \
   --max-new-tokens 32 \
   --prefill-chunk-tokens 32 \
   --cache-prompt \
+  --cache-reuse 32 \
   --cache-block-tokens 32 \
   --cache-capacity-blocks 16
 ```
@@ -313,7 +314,7 @@ Run the same request twice:
 curl -i http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b",
+    "model": "qwen3.5-0.8b-vl",
     "messages": [{"role": "user", "content": "请用三段话解释 KV cache 的作用、prefill 和 decode 的区别，以及为什么相同 system prompt 能复用 cache。每段都要包含一个具体例子。"}],
     "max_completion_tokens": 32,
     "prefill_chunk_tokens": 32,
