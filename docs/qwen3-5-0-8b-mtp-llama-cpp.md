@@ -842,6 +842,8 @@ draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。
 - 新增 `scripts/compare_qwen35_llamacpp.py` 用于同 prompt / 同 GGUF 记录
   kraken no-MTP、kraken MTP、llama.cpp no-MTP 的 wall time、文本尾部和 stats；
   可用 `--include-llama-mtp` 额外尝试 llama.cpp `--spec-type draft-mtp`。
+- 新增 `scripts/sweep_qwen35_mtp.py` 用于批量扫描 `mtp_draft_tokens` 和
+  `mtp_p_min`，输出 aggregate table、JSON 和可选 CSV，帮助选择默认参数。
 
 示例：
 
@@ -850,6 +852,13 @@ python3 scripts/compare_qwen35_llamacpp.py \
   --max-tokens 64 \
   --p-min 0.20 \
   --json-out build/qwen35-compare.json
+
+python3 scripts/sweep_qwen35_mtp.py \
+  --max-tokens 64 \
+  --draft-tokens 1,2,3 \
+  --p-min 0,0.1,0.2,0.3 \
+  --json-out build/qwen35-mtp-sweep.json \
+  --csv-out build/qwen35-mtp-sweep.csv
 ```
 
 ## 验收标准
@@ -865,6 +874,7 @@ python3 scripts/compare_qwen35_llamacpp.py \
 - `ctest --preset debug` 通过。
 - 新增 `scripts/test_qwen35_mtp_gateway.py` 能在真实 MTP GGUF 存在时跑通。
 - 新增 `scripts/compare_qwen35_llamacpp.py` 能生成 kraken/llama.cpp 对照 JSON。
+- 新增 `scripts/sweep_qwen35_mtp.py` 能生成 MTP 参数 sweep JSON/CSV。
 
 第二阶段：
 

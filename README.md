@@ -458,6 +458,17 @@ python3 scripts/compare_qwen35_llamacpp.py \
   --json-out build/qwen35-compare.json
 ```
 
+Qwen3.5 MTP 参数 sweep：
+
+```bash
+python3 scripts/sweep_qwen35_mtp.py \
+  --max-tokens 64 \
+  --draft-tokens 1,2,3 \
+  --p-min 0,0.1,0.2,0.3 \
+  --json-out build/qwen35-mtp-sweep.json \
+  --csv-out build/qwen35-mtp-sweep.csv
+```
+
 ## Project Layout
 
 ```text
