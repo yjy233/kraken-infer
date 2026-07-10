@@ -784,6 +784,41 @@ python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
 {"accepted_tokens": 4, "drafted_tokens": 9, "mtp_enabled": 1, "mtp_layers": 1, "verify_steps": 6}
 ```
 
+### 2026-07-10 性能测量
+
+Release build，Apple Metal path，`KRAKEN_QWEN35_F16_KV=1`，同一 prompt，
+`max-new-tokens=64`：
+
+| 模式 | wall time | 说明 |
+| --- | ---: | --- |
+| `--no-mtp` | 12.06s | baseline greedy decode |
+| `--mtp --mtp-draft-tokens 1` | 13.87s | drafted=41 accepted=22 |
+| `--mtp --mtp-draft-tokens 3` | 15.18s | drafted=98 accepted=30 |
+| `--mtp --mtp-draft-tokens 4` | 约 16.7s | earlier sweep: drafted=128 accepted=30 |
+
+已实现 batch target verify 和 device-side draft chain：
+
+- target verify 会一次 decode `[sampled_token + draft_tokens]`。
+- full-accepted draft span 直接保留 verify 写入的 KV/recurrent state。
+- partial reject 会恢复 recurrent snapshot，再 batch commit accepted prefix。
+- MTP draft chain 会在单个 Metal command buffer 内把上一步 argmax 作为下一步
+  embedding row id，避免每个 draft token 都做 CPU readback 再启动下一图。
+
+当前仍未加速，原因是 MTP draft block 自身成本较高：
+
+```text
+qwen35.mtp.draft_chain: k=3 时约 3.68s / 64 generated tokens
+request.decode:        batch verify 后约 9.72s，baseline 约 10.42s
+```
+
+也就是说 target batch verify 已经省掉一部分主模型 decode 时间，但 MTP block +
+vocab head 的额外计算成本更高。后续要继续提速，优先方向是：
+
+1. 优化 MTP block 内 `nextn.eh_proj`、full-attention block 和 vocab head。
+2. 避免每个 draft step 都完整跑 vocab head，例如设备端 top-1 fused head 或小批量 head。
+3. 提高 target verify 的小 batch kernel 效率。
+4. 做运行时自适应：acceptance/cost 不划算时自动关闭 MTP。
+
 对齐策略：
 
 - 第一阶段只对齐 greedy deterministic output。
