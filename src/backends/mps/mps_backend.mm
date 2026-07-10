@@ -46,6 +46,7 @@ static inline float f16_to_float(const device uchar* data) {
 
 struct SizeParams {
   uint size;
+  uint threads;
 };
 
 struct RowwiseParams {
@@ -2243,20 +2244,101 @@ kernel void copy_f16_rows(const device half* source [[buffer(0)]],
 kernel void argmax_f32_i32(const device float* values [[buffer(0)]],
                            device int* output [[buffer(1)]],
                            constant SizeParams& params [[buffer(2)]],
-                           uint index [[thread_position_in_grid]]) {
-  if (index != 0U || params.size == 0U) {
+                           uint lane [[thread_index_in_threadgroup]]) {
+  if (params.size == 0U || lane >= params.threads) {
     return;
   }
-  uint best_index = 0U;
-  float best_value = values[0];
-  for (uint i = 1U; i < params.size; ++i) {
+  threadgroup float best_values[256];
+  threadgroup uint best_indices[256];
+
+  uint best_index = params.size;
+  float best_value = -INFINITY;
+  for (uint i = lane; i < params.size; i += params.threads) {
     const float value = values[i];
-    if (value > best_value) {
+    if (value > best_value || (value == best_value && i < best_index)) {
       best_value = value;
       best_index = i;
     }
   }
-  output[0] = static_cast<int>(best_index);
+  best_values[lane] = best_value;
+  best_indices[lane] = best_index;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint stride = params.threads >> 1U; stride > 0U; stride >>= 1U) {
+    if (lane < stride) {
+      const float rhs_value = best_values[lane + stride];
+      const uint rhs_index = best_indices[lane + stride];
+      if (rhs_value > best_values[lane] ||
+          (rhs_value == best_values[lane] && rhs_index < best_indices[lane])) {
+        best_values[lane] = rhs_value;
+        best_indices[lane] = rhs_index;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  if (lane == 0U) {
+    output[0] = static_cast<int>(best_indices[0]);
+  }
+}
+
+kernel void argmax_prob_f32_i32(const device float* values [[buffer(0)]],
+                                device int* token_output [[buffer(1)]],
+                                device float* probability_output [[buffer(2)]],
+                                constant SizeParams& params [[buffer(3)]],
+                                uint lane [[thread_index_in_threadgroup]]) {
+  if (params.size == 0U || lane >= params.threads) {
+    return;
+  }
+  threadgroup float best_values[256];
+  threadgroup uint best_indices[256];
+  threadgroup float sums[256];
+
+  uint best_index = params.size;
+  float best_value = -INFINITY;
+  for (uint i = lane; i < params.size; i += params.threads) {
+    const float value = values[i];
+    if (value > best_value || (value == best_value && i < best_index)) {
+      best_value = value;
+      best_index = i;
+    }
+  }
+  best_values[lane] = best_value;
+  best_indices[lane] = best_index;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint stride = params.threads >> 1U; stride > 0U; stride >>= 1U) {
+    if (lane < stride) {
+      const float rhs_value = best_values[lane + stride];
+      const uint rhs_index = best_indices[lane + stride];
+      if (rhs_value > best_values[lane] ||
+          (rhs_value == best_values[lane] && rhs_index < best_indices[lane])) {
+        best_values[lane] = rhs_value;
+        best_indices[lane] = rhs_index;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  const float max_value = best_values[0];
+  float sum = 0.0f;
+  for (uint i = lane; i < params.size; i += params.threads) {
+    sum += exp(values[i] - max_value);
+  }
+  sums[lane] = sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint stride = params.threads >> 1U; stride > 0U; stride >>= 1U) {
+    if (lane < stride) {
+      sums[lane] += sums[lane + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  if (lane == 0U) {
+    token_output[0] = static_cast<int>(best_indices[0]);
+    probability_output[0] = sums[0] > 0.0f ? 1.0f / sums[0] : 0.0f;
+  }
 }
 
 kernel void attention_f32(const device float* query [[buffer(0)]],
@@ -3275,6 +3357,7 @@ struct QuantMatVecLayout {
 
 struct SizeParams {
   std::uint32_t size{0};
+  std::uint32_t threads{0};
 };
 
 struct RowwiseParams {
@@ -3845,6 +3928,7 @@ struct MpsContext::Impl {
   id<MTLComputePipelineState> copy_rows_to_f16_pipeline{nil};
   id<MTLComputePipelineState> copy_f16_rows_pipeline{nil};
   id<MTLComputePipelineState> argmax_pipeline{nil};
+  id<MTLComputePipelineState> argmax_prob_pipeline{nil};
   id<MTLComputePipelineState> attention_pipeline{nil};
   id<MTLComputePipelineState> attention_f16_kv_pipeline{nil};
   id<MTLComputePipelineState> attention_batched_pipeline{nil};
@@ -3948,6 +4032,9 @@ struct MpsContext::Impl {
     }
     if (argmax_pipeline != nil) {
       [argmax_pipeline release];
+    }
+    if (argmax_prob_pipeline != nil) {
+      [argmax_prob_pipeline release];
     }
     if (copy_region_pipeline != nil) {
       [copy_region_pipeline release];
@@ -4748,6 +4835,13 @@ Result<MpsContext> MpsContext::create() {
       return argmax_pipeline.status();
     }
     impl->argmax_pipeline = argmax_pipeline.value();
+
+    auto argmax_prob_pipeline = make_pipeline("argmax_prob_f32_i32");
+    if (!argmax_prob_pipeline.is_ok()) {
+      [library release];
+      return argmax_prob_pipeline.status();
+    }
+    impl->argmax_prob_pipeline = argmax_prob_pipeline.value();
 
     auto attention_pipeline = make_pipeline("attention_f32");
     if (!attention_pipeline.is_ok()) {
@@ -8798,16 +8892,84 @@ Status MpsContext::argmax_f32_i32(const MpsBuffer& values, std::size_t size,
       return Status::unavailable("failed to create Metal compute encoder");
     }
 
-    SizeParams params{size_u32.value()};
+    const NSUInteger max_threads =
+      [impl_->argmax_pipeline maxTotalThreadsPerThreadgroup];
+    const NSUInteger threads_per_group = choose_threadgroup_width(max_threads);
+    SizeParams params{size_u32.value(),
+                      static_cast<std::uint32_t>(threads_per_group)};
     [encoder setComputePipelineState:impl_->argmax_pipeline];
     [encoder setBuffer:values.impl_->buffer offset:0 atIndex:0];
     [encoder setBuffer:output.impl_->buffer offset:0 atIndex:1];
     [encoder setBytes:&params length:sizeof(params) atIndex:2];
-    const MTLSize grid_size = MTLSizeMake(static_cast<NSUInteger>(1), 1, 1);
-    const MTLSize threadgroup_size = MTLSizeMake(static_cast<NSUInteger>(1), 1, 1);
-    [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+    const MTLSize group_count = MTLSizeMake(static_cast<NSUInteger>(1), 1, 1);
+    const MTLSize threadgroup_size = MTLSizeMake(threads_per_group, 1, 1);
+    [encoder dispatchThreadgroups:group_count threadsPerThreadgroup:threadgroup_size];
     [encoder endEncoding];
     auto finish_status = impl_->finish_command_buffer(command_buffer, "MPS argmax command failed: ");
+    if (!finish_status.is_ok()) {
+      return finish_status;
+    }
+  }
+  return Status::ok();
+}
+
+Status MpsContext::argmax_prob_f32_i32(const MpsBuffer& values, std::size_t size,
+                                       MpsBuffer& token_output,
+                                       MpsBuffer& probability_output) const {
+  if (!valid()) {
+    return Status::unavailable("MPS context is not initialized");
+  }
+  if (size == 0) {
+    return Status::invalid_argument("MPS argmax probability size must be positive");
+  }
+  auto size_u32 = checked_u32(size, "argmax probability size");
+  if (!size_u32.is_ok()) {
+    return size_u32.status();
+  }
+  auto values_status = validate_f32_buffer(values, size, "argmax probability values");
+  if (!values_status.is_ok()) {
+    return values_status;
+  }
+  if (!token_output.valid()) {
+    return Status::invalid_argument(
+      "MPS argmax probability token output buffer is not initialized");
+  }
+  if (token_output.byte_size() < sizeof(std::int32_t)) {
+    return Status::invalid_argument("MPS argmax probability token output buffer is too small");
+  }
+  auto probability_status =
+    validate_f32_buffer(probability_output, 1, "argmax probability output");
+  if (!probability_status.is_ok()) {
+    return probability_status;
+  }
+
+  @autoreleasepool {
+    id<MTLCommandBuffer> command_buffer = impl_->command_buffer();
+    if (command_buffer == nil) {
+      return Status::unavailable("failed to create Metal command buffer");
+    }
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (encoder == nil) {
+      return Status::unavailable("failed to create Metal compute encoder");
+    }
+
+    const NSUInteger max_threads =
+      [impl_->argmax_prob_pipeline maxTotalThreadsPerThreadgroup];
+    const NSUInteger threads_per_group = choose_threadgroup_width(max_threads);
+    SizeParams params{size_u32.value(),
+                      static_cast<std::uint32_t>(threads_per_group)};
+    [encoder setComputePipelineState:impl_->argmax_prob_pipeline];
+    [encoder setBuffer:values.impl_->buffer offset:0 atIndex:0];
+    [encoder setBuffer:token_output.impl_->buffer offset:0 atIndex:1];
+    [encoder setBuffer:probability_output.impl_->buffer offset:0 atIndex:2];
+    [encoder setBytes:&params length:sizeof(params) atIndex:3];
+    const MTLSize group_count = MTLSizeMake(static_cast<NSUInteger>(1), 1, 1);
+    const MTLSize threadgroup_size = MTLSizeMake(threads_per_group, 1, 1);
+    [encoder dispatchThreadgroups:group_count threadsPerThreadgroup:threadgroup_size];
+    [encoder endEncoding];
+    auto finish_status =
+      impl_->finish_command_buffer(command_buffer,
+                                   "MPS argmax probability command failed: ");
     if (!finish_status.is_ok()) {
       return finish_status;
     }

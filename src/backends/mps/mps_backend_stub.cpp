@@ -800,6 +800,16 @@ Status MpsContext::argmax_f32_i32(const MpsBuffer& values, std::size_t size,
   return Status::unavailable("MPS backend was not compiled for this build");
 }
 
+Status MpsContext::argmax_prob_f32_i32(const MpsBuffer& values, std::size_t size,
+                                       MpsBuffer& token_output,
+                                       MpsBuffer& probability_output) const {
+  (void)values;
+  (void)size;
+  (void)token_output;
+  (void)probability_output;
+  return Status::unavailable("MPS backend was not compiled for this build");
+}
+
 Status MpsContext::attention_f32(const MpsBuffer& query,
                                  const MpsBuffer& key_cache,
                                  const MpsBuffer& value_cache,

@@ -357,6 +357,10 @@ class MpsContext {
   [[nodiscard]] Status argmax_f32_i32(const MpsBuffer& values,
                                       std::size_t size,
                                       MpsBuffer& output) const;
+  [[nodiscard]] Status argmax_prob_f32_i32(const MpsBuffer& values,
+                                           std::size_t size,
+                                           MpsBuffer& token_output,
+                                           MpsBuffer& probability_output) const;
   [[nodiscard]] Status attention_f32(const MpsBuffer& query,
                                      const MpsBuffer& key_cache,
                                      const MpsBuffer& value_cache,

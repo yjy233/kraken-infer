@@ -1606,6 +1606,23 @@ void test_mps_full_forward_operators() {
   std::int32_t argmax = -1;
   assert(context.copy_from_buffer(argmax_output, &argmax, sizeof(argmax)).is_ok());
   assert(argmax == 1);
+  auto argmax_prob_output_result = context.make_buffer(sizeof(std::int32_t));
+  assert(argmax_prob_output_result.is_ok());
+  auto argmax_prob_output = std::move(argmax_prob_output_result.value());
+  auto argmax_probability_result = context.make_buffer(sizeof(float));
+  assert(argmax_probability_result.is_ok());
+  auto argmax_probability = std::move(argmax_probability_result.value());
+  assert(context.argmax_prob_f32_i32(argmax_values, 3, argmax_prob_output,
+                                     argmax_probability)
+           .is_ok());
+  argmax = -1;
+  float probability = 0.0F;
+  assert(context.copy_from_buffer(argmax_prob_output, &argmax, sizeof(argmax)).is_ok());
+  assert(context.copy_from_buffer(argmax_probability, &probability,
+                                  sizeof(probability))
+           .is_ok());
+  assert(argmax == 1);
+  assert(std::abs(probability - 0.950330F) < 1.0e-4F);
 
   auto query = make_f32_buffer(context, {1.0F, 0.0F});
   auto key_cache = make_f32_buffer(context, {1.0F, 0.0F});

@@ -139,6 +139,7 @@ struct Qwen35LogitsOutput {
   mps::MpsBuffer h_nextn;
   mps::MpsBuffer logits;
   mps::MpsBuffer argmax_output;
+  mps::MpsBuffer top1_probability;
   std::size_t logits_values{0};
   std::size_t rows{1};
 };
@@ -147,6 +148,7 @@ struct Qwen35MtpForwardOutput {
   mps::MpsBuffer h_nextn;
   mps::MpsBuffer logits;
   mps::MpsBuffer argmax_output;
+  mps::MpsBuffer top1_probability;
   std::size_t logits_values{0};
   std::size_t rows{0};
 };
@@ -3371,7 +3373,8 @@ Result<mps::MpsBuffer> run_qwen35_output_norm(
 Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
   const mps::MpsContext& context, const mps::MpsBuffer& h_nextn,
   std::size_t rows, std::size_t hidden_size, const Qwen35MetalWeight& output_weight,
-  cpu::DebugDumper* dumper, std::string_view debug_prefix, bool compute_argmax) {
+  cpu::DebugDumper* dumper, std::string_view debug_prefix, bool compute_argmax,
+  bool compute_top1_probability = false) {
   if (rows == 0 || hidden_size == 0) {
     return Status::invalid_argument("Qwen3.5 LM head dimensions must be positive");
   }
@@ -3412,12 +3415,29 @@ Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
     if (!argmax_output.is_ok()) {
       return argmax_output.status();
     }
-    status = context.argmax_f32_i32(logits.value(), logits_values,
-                                    argmax_output.value());
+    Result<mps::MpsBuffer> top1_probability{Status::ok()};
+    if (compute_top1_probability) {
+      top1_probability = context.make_buffer(sizeof(float));
+      if (!top1_probability.is_ok()) {
+        return top1_probability.status();
+      }
+      status = context.argmax_prob_f32_i32(logits.value(), logits_values,
+                                           argmax_output.value(),
+                                           top1_probability.value());
+    } else {
+      status = context.argmax_f32_i32(logits.value(), logits_values,
+                                      argmax_output.value());
+    }
     if (!status.is_ok()) {
       return status;
     }
     output.argmax_output = std::move(argmax_output.value());
+    if (compute_top1_probability) {
+      output.top1_probability = std::move(top1_probability.value());
+    }
+  } else if (compute_top1_probability) {
+    return Status::invalid_argument(
+      "Qwen3.5 top1 probability requires device argmax");
   }
   output.logits = std::move(logits.value());
   output.logits_values = logits_values;
@@ -3490,73 +3510,6 @@ Result<std::vector<float>> read_qwen35_logits_row_host(
     return status;
   }
   return logits_host;
-}
-
-struct Qwen35GreedyToken {
-  std::int64_t token{0};
-  double probability{0.0};
-};
-
-Result<Qwen35GreedyToken> select_qwen35_greedy_token_with_probability(
-  const std::vector<float>& logits) {
-  if (logits.empty()) {
-    return Status::invalid_argument("Qwen3.5 greedy selection requires logits");
-  }
-
-  std::size_t best_index = 0;
-  double best_logit = -std::numeric_limits<double>::infinity();
-  bool found = false;
-  for (std::size_t index = 0; index < logits.size(); ++index) {
-    const auto logit = static_cast<double>(logits[index]);
-    if (std::isnan(logit)) {
-      continue;
-    }
-    if (!found || logit > best_logit) {
-      best_index = index;
-      best_logit = logit;
-      found = true;
-    }
-  }
-  if (!found) {
-    return Status::internal_error("Qwen3.5 greedy selection found no valid logits");
-  }
-
-  if (std::isinf(best_logit) && best_logit > 0.0) {
-    std::size_t positive_inf_count = 0;
-    for (const auto logit : logits) {
-      if (std::isinf(static_cast<double>(logit)) &&
-          static_cast<double>(logit) > 0.0) {
-        ++positive_inf_count;
-      }
-    }
-    if (positive_inf_count == 0) {
-      return Status::internal_error("Qwen3.5 greedy selection has invalid inf logits");
-    }
-    return Qwen35GreedyToken{
-      static_cast<std::int64_t>(best_index),
-      1.0 / static_cast<double>(positive_inf_count),
-    };
-  }
-
-  double total_weight = 0.0;
-  for (const auto logit_f32 : logits) {
-    const auto logit = static_cast<double>(logit_f32);
-    if (std::isnan(logit) || (std::isinf(logit) && logit > 0.0)) {
-      continue;
-    }
-    if (std::isinf(logit) && logit < 0.0) {
-      continue;
-    }
-    total_weight += std::exp(logit - best_logit);
-  }
-  if (!(total_weight > 0.0)) {
-    return Status::internal_error(
-      "Qwen3.5 greedy selection produced zero probability mass");
-  }
-  return Qwen35GreedyToken{
-    static_cast<std::int64_t>(best_index),
-    1.0 / total_weight,
-  };
 }
 
 std::string qwen35_join_size_values(const std::vector<std::size_t>& values) {
@@ -3830,7 +3783,8 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens_from_id_buffer(
   std::size_t token_count, const mps::MpsBuffer& token_id_buffer,
   const mps::MpsBuffer& h_rows, std::size_t start_position,
   const Qwen35ExecutionPlan& plan, float rope_theta, float rms_eps,
-  bool compute_logits, bool compute_argmax, RequestProfiler* profiler = nullptr) {
+  bool compute_logits, bool compute_argmax, bool compute_top1_probability = false,
+  RequestProfiler* profiler = nullptr) {
   if (layer.kind != Qwen35LayerKind::mtp) {
     return Status::invalid_argument("Qwen3.5 MTP runner requires an MTP layer");
   }
@@ -3939,12 +3893,13 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens_from_id_buffer(
   }
   auto logits = run_qwen35_lm_head_logits(
     context, output.h_nextn, token_count, plan.hidden_size, *head_weight,
-    nullptr, "mtp", compute_argmax);
+    nullptr, "mtp", compute_argmax, compute_top1_probability);
   if (!logits.is_ok()) {
     return logits.status();
   }
   output.logits = std::move(logits.value().logits);
   output.argmax_output = std::move(logits.value().argmax_output);
+  output.top1_probability = std::move(logits.value().top1_probability);
   output.logits_values = logits.value().logits_values;
   return output;
 }
@@ -3959,7 +3914,7 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens(
   const std::vector<std::int64_t>& token_ids, const mps::MpsBuffer& h_rows,
   std::size_t start_position, const Qwen35ExecutionPlan& plan,
   float rope_theta, float rms_eps, bool compute_logits, bool compute_argmax,
-  RequestProfiler* profiler = nullptr) {
+  bool compute_top1_probability = false, RequestProfiler* profiler = nullptr) {
   if (layer.kind != Qwen35LayerKind::mtp) {
     return Status::invalid_argument("Qwen3.5 MTP runner requires an MTP layer");
   }
@@ -4073,12 +4028,13 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens(
   }
   auto logits = run_qwen35_lm_head_logits(
     context, output.h_nextn, token_ids.size(), plan.hidden_size, *head_weight,
-    nullptr, "mtp", compute_argmax);
+    nullptr, "mtp", compute_argmax, compute_top1_probability);
   if (!logits.is_ok()) {
     return logits.status();
   }
   output.logits = std::move(logits.value().logits);
   output.argmax_output = std::move(logits.value().argmax_output);
+  output.top1_probability = std::move(logits.value().top1_probability);
   output.logits_values = logits.value().logits_values;
   return output;
 }
@@ -5505,7 +5461,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
         chunk_token_ids, shifted_h.value(), chunk_start, plan.value(),
         static_cast<float>(bundle.value().model.rope_theta),
         static_cast<float>(bundle.value().model.rms_norm_eps),
-        false, false, &profiler);
+        false, false, false, &profiler);
       if (!mtp_process.is_ok()) {
         return mtp_process.status();
       }
@@ -5740,34 +5696,30 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
 
   auto read_mtp_draft_token =
     [&](const mps::MpsBuffer& argmax_output,
-        const mps::MpsBuffer* logits,
-        std::size_t logits_values) -> Result<std::optional<std::int64_t>> {
+        const mps::MpsBuffer* probability) -> Result<std::optional<std::int64_t>> {
+    auto draft_token = read_qwen35_argmax_token(context.value(), argmax_output);
+    if (!draft_token.is_ok()) {
+      return draft_token.status();
+    }
     if (mtp_state.p_min <= 0.0) {
-      auto draft_token = read_qwen35_argmax_token(context.value(), argmax_output);
-      if (!draft_token.is_ok()) {
-        return draft_token.status();
-      }
       return std::optional<std::int64_t>{draft_token.value()};
     }
-
-    if (logits == nullptr || !logits->valid()) {
+    if (probability == nullptr || !probability->valid()) {
       return Status::internal_error(
-        "Qwen3.5 MTP p_min requires draft logits readback");
+        "Qwen3.5 MTP p_min requires draft top1 probability");
     }
-    auto logits_host = read_qwen35_logits_host(
-      context.value(), *logits, logits_values);
-    if (!logits_host.is_ok()) {
-      return logits_host.status();
+    float top1_probability = 0.0F;
+    auto probability_status =
+      context.value().copy_from_buffer(*probability, &top1_probability,
+                                       sizeof(top1_probability));
+    if (!probability_status.is_ok()) {
+      return probability_status;
     }
-    auto greedy = select_qwen35_greedy_token_with_probability(logits_host.value());
-    if (!greedy.is_ok()) {
-      return greedy.status();
-    }
-    if (greedy.value().probability < mtp_state.p_min) {
+    if (static_cast<double>(top1_probability) < mtp_state.p_min) {
       ++mtp_state.confidence_stops;
       return std::optional<std::int64_t>{};
     }
-    return std::optional<std::int64_t>{greedy.value().token};
+    return std::optional<std::int64_t>{draft_token.value()};
   };
 
   auto decode_target_tokens_logits =
@@ -5867,13 +5819,11 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       const mps::MpsBuffer* h_input = &mtp_state.pending_h;
       std::vector<mps::MpsBuffer> draft_argmax_buffers;
       std::vector<mps::MpsBuffer> draft_h_buffers;
-      std::vector<mps::MpsBuffer> draft_logits_buffers;
-      std::vector<std::size_t> draft_logits_values;
+      std::vector<mps::MpsBuffer> draft_probability_buffers;
       draft_argmax_buffers.reserve(budget);
       draft_h_buffers.reserve(budget);
       if (mtp_state.p_min > 0.0) {
-        draft_logits_buffers.reserve(budget);
-        draft_logits_values.reserve(budget);
+        draft_probability_buffers.reserve(budget);
       }
       for (std::size_t index = 0; index < budget; ++index) {
         auto mtp_out = run_qwen35_mtp_tokens_from_id_buffer(
@@ -5882,15 +5832,14 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
           1, *token_input, *h_input, start_position + index, plan.value(),
           static_cast<float>(bundle.value().model.rope_theta),
           static_cast<float>(bundle.value().model.rms_norm_eps),
-          true, true, &profiler);
+          true, true, mtp_state.p_min > 0.0, &profiler);
         if (!mtp_out.is_ok()) {
           return mtp_out.status();
         }
         auto output = std::move(mtp_out.value());
         draft_argmax_buffers.push_back(std::move(output.argmax_output));
         if (mtp_state.p_min > 0.0) {
-          draft_logits_values.push_back(output.logits_values);
-          draft_logits_buffers.push_back(std::move(output.logits));
+          draft_probability_buffers.push_back(std::move(output.top1_probability));
         }
         draft_h_buffers.push_back(std::move(output.h_nextn));
         token_input = &draft_argmax_buffers.back();
@@ -5906,12 +5855,10 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
         return draft_status;
       }
       for (std::size_t index = 0; index < draft_argmax_buffers.size(); ++index) {
-        const mps::MpsBuffer* logits =
-          mtp_state.p_min > 0.0 ? &draft_logits_buffers[index] : nullptr;
-        const auto logits_values =
-          mtp_state.p_min > 0.0 ? draft_logits_values[index] : std::size_t{0};
+        const mps::MpsBuffer* probability =
+          mtp_state.p_min > 0.0 ? &draft_probability_buffers[index] : nullptr;
         auto draft_token = read_mtp_draft_token(
-          draft_argmax_buffers[index], logits, logits_values);
+          draft_argmax_buffers[index], probability);
         if (!draft_token.is_ok()) {
           return draft_token.status();
         }
@@ -5944,7 +5891,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
         token_ids, *h_input, start_position + index, plan.value(),
         static_cast<float>(bundle.value().model.rope_theta),
         static_cast<float>(bundle.value().model.rms_norm_eps),
-        true, true, &profiler);
+        true, true, mtp_state.p_min > 0.0, &profiler);
       if (!mtp_out.is_ok()) {
         return mtp_out.status();
       }
@@ -5957,12 +5904,10 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       if (!draft_status.is_ok()) {
         return draft_status;
       }
-      const mps::MpsBuffer* logits =
-        mtp_state.p_min > 0.0 ? &mtp_out.value().logits : nullptr;
-      const auto logits_values =
-        mtp_state.p_min > 0.0 ? mtp_out.value().logits_values : std::size_t{0};
+      const mps::MpsBuffer* probability =
+        mtp_state.p_min > 0.0 ? &mtp_out.value().top1_probability : nullptr;
       auto draft_token = read_mtp_draft_token(
-        mtp_out.value().argmax_output, logits, logits_values);
+        mtp_out.value().argmax_output, probability);
       if (!draft_token.is_ok()) {
         return draft_token.status();
       }

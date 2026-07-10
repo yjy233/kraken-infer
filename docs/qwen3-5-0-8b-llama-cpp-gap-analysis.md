@@ -159,8 +159,9 @@ mmproj/vision graph、image embedding injection、image MRoPE position 与多模
 
 从 llama.cpp 对照看，可能的性能差距来源不是 MTP 公式本身，而是：
 
-1. `p_min > 0` 可以提前停止低置信 draft，但需要 logits readback，尚未变成低成本
-   fused top-1 head。
+1. `p_min > 0` 可以提前停止低置信 draft，当前 top-1 probability 已在 GPU 端并行
+   reduction，不再回读整条 logits；但 LM head 仍会 materialize 完整 vocab logits，
+   尚未变成低成本 fused top-1 head。
 2. MTP draft 每步仍完整跑 MTP block + full vocab head。
 3. kraken 的 custom Metal kernels 没有 ggml/llama.cpp 那套成熟 scheduler 与 memory
    复用能力。
@@ -184,11 +185,16 @@ mmproj/vision graph、image embedding injection、image MRoPE position 与多模
   - `verified_by_position`
   - `accepted_by_position`
 - `scripts/test_qwen35_mtp_gateway.py` 支持 `--p-min`，可用于测 no-gate 与 gated MTP。
+- MPS backend 增加并行 `argmax_f32_i32` 和 `argmax_prob_f32_i32`：
+  - greedy argmax 不再由单 GPU 线程串行扫描 vocab logits。
+  - `mtp_p_min > 0` 只回读 top-1 token/probability 两个标量，不再把整条 draft logits
+    拷回 CPU。
 
 仍未完成：
 
 - MTP draft top-k/common sampler parity。
-- fused top-1 draft head，当前 `p_min > 0` 仍需要 logits readback。
+- fused top-1 draft head。当前概率 gate 已无 CPU logits readback，但仍需要完整 vocab
+  logits buffer。
 - native VL + native MTP 共用同一个 kraken context。当前图片请求仍走
   `llama-mtmd-cli` bridge，进入 bridge 后会禁用 kraken MTP。
 
@@ -204,8 +210,8 @@ mmproj/vision graph、image embedding injection、image MRoPE position 与多模
    - 记录 wall time、prefill、decode、draft。
 2. 用 `scripts/test_qwen35_mtp_gateway.py --p-min` 做阈值 sweep，记录
    no-MTP、MTP `p_min=0`、MTP `p_min=0.10/0.20/0.30` 的 wall time 和 acceptance。
-3. 对 MTP vocab head 做 fused top-1/argmax path，避免完整 logits/readback 成为 draft
-   成本瓶颈。
+3. 对 MTP vocab head 做 fused top-1/argmax path，避免完整 vocab logits
+   materialization 成为 draft 成本瓶颈。
 
 中期：
 
