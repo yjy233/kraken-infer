@@ -839,6 +839,18 @@ draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。
   request sampling 字段缺省以启用 greedy MTP。
 - 验证最终文本一致或 token 序列一致。
 - 记录 draft acceptance rate，不要求完全等同 llama.cpp 的 backend sampler。
+- 新增 `scripts/compare_qwen35_llamacpp.py` 用于同 prompt / 同 GGUF 记录
+  kraken no-MTP、kraken MTP、llama.cpp no-MTP 的 wall time、文本尾部和 stats；
+  可用 `--include-llama-mtp` 额外尝试 llama.cpp `--spec-type draft-mtp`。
+
+示例：
+
+```bash
+python3 scripts/compare_qwen35_llamacpp.py \
+  --max-tokens 64 \
+  --p-min 0.20 \
+  --json-out build/qwen35-compare.json
+```
 
 ## 验收标准
 
@@ -852,6 +864,7 @@ draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。
 - gateway 响应暴露 MTP stats。
 - `ctest --preset debug` 通过。
 - 新增 `scripts/test_qwen35_mtp_gateway.py` 能在真实 MTP GGUF 存在时跑通。
+- 新增 `scripts/compare_qwen35_llamacpp.py` 能生成 kraken/llama.cpp 对照 JSON。
 
 第二阶段：
 

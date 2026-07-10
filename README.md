@@ -449,6 +449,15 @@ Qwen3.5 MTP gateway smoke test：
 python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --p-min 0.20
 ```
 
+Qwen3.5 kraken/llama.cpp 对照基准：
+
+```bash
+python3 scripts/compare_qwen35_llamacpp.py \
+  --max-tokens 64 \
+  --p-min 0.20 \
+  --json-out build/qwen35-compare.json
+```
+
 ## Project Layout
 
 ```text
