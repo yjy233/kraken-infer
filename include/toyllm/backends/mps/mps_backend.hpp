@@ -143,6 +143,10 @@ class MpsContext {
                                             const MpsBuffer& input,
                                             MpsBuffer& token_output,
                                             MpsBuffer& probability_output) const;
+  [[nodiscard]] Status matvec_q4_k_f32_argmax(const MpsBuffer& weight,
+                                              std::size_t rows, std::size_t cols,
+                                              const MpsBuffer& input,
+                                              MpsBuffer& token_output) const;
   [[nodiscard]] Status matmul_q4_k_f32_device(const MpsBuffer& weight,
                                               std::size_t rows, std::size_t cols,
                                               std::size_t tokens,
@@ -160,6 +164,10 @@ class MpsContext {
                                             const MpsBuffer& input,
                                             MpsBuffer& token_output,
                                             MpsBuffer& probability_output) const;
+  [[nodiscard]] Status matvec_q5_k_f32_argmax(const MpsBuffer& weight,
+                                              std::size_t rows, std::size_t cols,
+                                              const MpsBuffer& input,
+                                              MpsBuffer& token_output) const;
   [[nodiscard]] Status matmul_q5_k_f32_device(const MpsBuffer& weight,
                                               std::size_t rows, std::size_t cols,
                                               std::size_t tokens,
@@ -177,6 +185,10 @@ class MpsContext {
                                             const MpsBuffer& input,
                                             MpsBuffer& token_output,
                                             MpsBuffer& probability_output) const;
+  [[nodiscard]] Status matvec_q6_k_f32_argmax(const MpsBuffer& weight,
+                                              std::size_t rows, std::size_t cols,
+                                              const MpsBuffer& input,
+                                              MpsBuffer& token_output) const;
   [[nodiscard]] Status matmul_q6_k_f32_device(const MpsBuffer& weight,
                                               std::size_t rows, std::size_t cols,
                                               std::size_t tokens,

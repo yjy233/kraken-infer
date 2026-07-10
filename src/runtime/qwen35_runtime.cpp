@@ -3393,32 +3393,54 @@ Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
     if (!argmax_output.is_ok()) {
       return argmax_output.status();
     }
-    auto top1_probability = context.make_buffer(sizeof(float));
-    if (!top1_probability.is_ok()) {
-      return top1_probability.status();
+    Result<mps::MpsBuffer> top1_probability{Status::ok()};
+    if (compute_top1_probability) {
+      top1_probability = context.make_buffer(sizeof(float));
+      if (!top1_probability.is_ok()) {
+        return top1_probability.status();
+      }
     }
     Status status = Status::ok();
-    switch (output_weight.type) {
-      case 12:
-        status = context.matvec_q4_k_f32_top1(
-          output_weight.buffer, logits_values, hidden_size, h_nextn,
-          argmax_output.value(), top1_probability.value());
-        break;
-      case 13:
-        status = context.matvec_q5_k_f32_top1(
-          output_weight.buffer, logits_values, hidden_size, h_nextn,
-          argmax_output.value(), top1_probability.value());
-        break;
-      case 14:
-        status = context.matvec_q6_k_f32_top1(
-          output_weight.buffer, logits_values, hidden_size, h_nextn,
-          argmax_output.value(), top1_probability.value());
-        break;
-      default:
-        status = Status::invalid_argument(
-          "Qwen3.5 top1 LM head weight type is not a K-quant type: " +
-          output_weight.name);
-        break;
+    if (compute_top1_probability) {
+      switch (output_weight.type) {
+        case 12:
+          status = context.matvec_q4_k_f32_top1(
+            output_weight.buffer, logits_values, hidden_size, h_nextn,
+            argmax_output.value(), top1_probability.value());
+          break;
+        case 13:
+          status = context.matvec_q5_k_f32_top1(
+            output_weight.buffer, logits_values, hidden_size, h_nextn,
+            argmax_output.value(), top1_probability.value());
+          break;
+        case 14:
+          status = context.matvec_q6_k_f32_top1(
+            output_weight.buffer, logits_values, hidden_size, h_nextn,
+            argmax_output.value(), top1_probability.value());
+          break;
+        default:
+          break;
+      }
+    } else {
+      switch (output_weight.type) {
+        case 12:
+          status = context.matvec_q4_k_f32_argmax(
+            output_weight.buffer, logits_values, hidden_size, h_nextn,
+            argmax_output.value());
+          break;
+        case 13:
+          status = context.matvec_q5_k_f32_argmax(
+            output_weight.buffer, logits_values, hidden_size, h_nextn,
+            argmax_output.value());
+          break;
+        case 14:
+          status = context.matvec_q6_k_f32_argmax(
+            output_weight.buffer, logits_values, hidden_size, h_nextn,
+            argmax_output.value());
+          break;
+        default:
+          break;
+      }
     }
     if (!status.is_ok()) {
       return status;
@@ -3426,7 +3448,9 @@ Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
     Qwen35LogitsOutput output;
     output.rows = rows;
     output.argmax_output = std::move(argmax_output.value());
-    output.top1_probability = std::move(top1_probability.value());
+    if (compute_top1_probability) {
+      output.top1_probability = std::move(top1_probability.value());
+    }
     output.logits_values = logits_values;
     return output;
   }

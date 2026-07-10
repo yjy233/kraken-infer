@@ -40,6 +40,8 @@ llama.cpp 的 Qwen3.5 MTP 不是把主 decoder 一次输出多个 token，而是
   接入现有 Metal matmul。
 - MPS backend 已增加 Q4_K/Q5_K/Q6_K fused top-1 LM head，MTP draft 可以直接产出
   top-1 token 和 exact top-1 probability，不再 materialize 完整 vocab logits。
+- MPS backend 已增加 Q4_K/Q5_K/Q6_K token-only argmax LM head，`mtp_p_min = 0`
+  时不再计算 softmax denominator。
 
 当前限制：
 
@@ -47,8 +49,6 @@ llama.cpp 的 Qwen3.5 MTP 不是把主 decoder 一次输出多个 token，而是
   第一版自动禁用 MTP。
 - target verify 已经 batch decode；但 sampler/accept 仍是逐行 greedy argmax 对比，
   尚未接入 llama.cpp common sampler 风格的 top-k/top-p accept。
-- `p_min=0` 仍走同一个 fused probability head；后续可加 token-only argmax head，
-  避免不需要置信度时计算 softmax denominator。
 - `cache_prompt` 与 MTP 暂不同时启用；attention KV cache 仍正常使用。
 - 图片请求仍通过 `llama-mtmd-cli` 桥接完成 VL，MTP headers 会标记 MTP 未启用。
   llama.cpp 自身的 draft-mtp 代码也仍有 vision token TODO，因此这里不伪装成原生
@@ -802,13 +802,13 @@ python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
 | `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 15.80s | full vocab logits draft head |
 | `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 12.80s | device argmax/probability, still materialized logits |
 
-本轮 fused top-1 draft head 结果：
+fused top-1 / token-only argmax draft head 结果：
 
 | 模式 | wall time | 说明 |
 | --- | ---: | --- |
-| `--no-mtp` | 14.70s | baseline greedy decode |
-| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 14.70s | drafted=96 accepted=31 verify_steps=62 |
-| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 11.50s | drafted=46 accepted=29 verify_steps=38 confidence_stops=28 |
+| `--no-mtp` | 14.38s | baseline greedy decode |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 14.45s | drafted=96 accepted=31 verify_steps=62 |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 11.43s | drafted=46 accepted=29 verify_steps=38 confidence_stops=28 |
 
 已实现 batch target verify 和 device-side draft chain：
 
@@ -818,15 +818,15 @@ python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
 - MTP draft chain 会在单个 Metal command buffer 内把上一步 argmax 作为下一步
   embedding row id，避免每个 draft token 都做 CPU readback 再启动下一图。
 - Q4_K/Q5_K/Q6_K fused top-1 head 让 draft 不再 materialize 完整 vocab logits。
+- Q4_K/Q5_K/Q6_K token-only argmax head 让 `p_min=0` 不再计算 softmax denominator。
 
-现在 `p_min=0.20` 已能快于 no-MTP；`p_min=0` 仍基本持平，原因是低置信 draft
-数量更多，MTP block 额外计算容易抵消 target verify step 的减少。后续要继续提速，
+现在 `p_min=0.20` 已能快于 no-MTP；`p_min=0` 仍基本持平。token-only argmax 后，
+主要瓶颈更明确地落在低置信 draft 带来的 MTP block 额外计算。后续要继续提速，
 优先方向是：
 
 1. 优化 MTP block 内 `nextn.eh_proj` 和 full-attention block。
-2. 增加 `p_min=0` 专用 token-only argmax head，避免计算 softmax denominator。
-3. 提高 target verify 的小 batch kernel 效率。
-4. 做运行时自适应：acceptance/cost 不划算时自动关闭 MTP。
+2. 提高 target verify 的小 batch kernel 效率。
+3. 做运行时自适应：acceptance/cost 不划算时自动关闭或降低 draft budget。
 
 对齐策略：
 
