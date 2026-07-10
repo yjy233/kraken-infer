@@ -69,6 +69,8 @@ Legacy model:
   beta/gate prepare 和 norm-gated 后处理。
 - chunked prefill，默认 `prefill_chunk_tokens = 1024`。
 - greedy multi-token decode。
+- Qwen3.5 MTP/NextN speculative decode，支持 `nextn_predict_layers=1` 的
+  MTP GGUF，在 greedy 路径返回 drafted/accepted/verify 统计。
 - 基础 `top_k` / `top_p` / `temperature` / `seed` host-side sampling。
 - logits top-k readback、debug dump、KV cache stats 和 profile artifacts。
 
@@ -104,6 +106,8 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
   `reasoning_content`。
 - 非标准但实用的 per-request `device`。
 - `prefill_chunk_tokens` request override。
+- `mtp` / `mtp_draft_tokens` request override；非 streaming 响应会返回
+  `X-Kraken-MTP-*` headers。
 - `cache_prompt` / `n_cache_reuse` exact-prefix prompt cache。
 - 基础 tools/tool_choice 协议兼容，返回 OpenAI-style `tool_calls`，但不执行外部工具。
 - 浏览器对话页 `/chat_page`，支持 max new tokens、streaming 和 thinking 开关。
@@ -113,7 +117,8 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
 `llama-mtmd-cli` 完成 Qwen3.5 0.8B VL 推理。这是可测试的端到端视觉理解路径；
 本仓库原生 Metal vision graph 仍是后续工作。默认查找
 `/Users/bill/code/llama.cpp/build/bin/llama-mtmd-cli`，也可以用
-`KRAKEN_LLAMA_MTMD_CLI` 覆盖。
+`KRAKEN_LLAMA_MTMD_CLI` 覆盖。使用带 MTP 的 text GGUF 启动时，文本请求可以走
+原生 MTP；图片请求会走 `llama-mtmd-cli` 桥接，并通过 MTP headers 标记 MTP 未启用。
 
 ### Prefix Cache
 
@@ -149,6 +154,7 @@ Profile 支持 `off|summary|trace|flamegraph|all`，可以通过 CLI `--profile`
 ```text
 models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf
 models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
+models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf
 ```
 
 构建和测试：
@@ -186,28 +192,28 @@ ctest --preset debug
   --stream
 ```
 
-启动本地 HTTP gateway（Qwen3.5 0.8B VL + prompt KV cache）：
+启动本地 HTTP gateway（Qwen3.5 0.8B VL + MTP + F16 KV cache）：
 
 ```bash
-./build/debug/kraken-infer serve \
+KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
   --host 127.0.0.1 \
   --port 18080 \
-  --model models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
+  --model models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf \
   --mmproj models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf \
-  --model-id qwen3.5-0.8b-vl \
+  --model-id qwen3.5-0.8b-vl-mtp \
   --device mps \
   --max-new-tokens 128 \
   --prefill-chunk-tokens 32 \
-  --cache-prompt \
-  --cache-reuse 32 \
-  --cache-block-tokens 32 \
-  --cache-capacity-blocks 16 \
+  --mtp \
+  --mtp-draft-tokens 3 \
+  --no-cache-prompt \
   --profile summary
 ```
 
-该命令同时启用 OpenAI `image_url` 图片输入和本仓库原生 Qwen3.5 prompt prefix
-cache。当前图片请求通过 llama.cpp `llama-mtmd-cli` 桥接完成视觉理解；原生 KV cache
-主要用于文本请求或相同文本前缀的复用。
+该命令同时启用 OpenAI `image_url` 图片输入、文本请求的原生 MTP speculative decode，
+以及 Qwen3.5 full-attention F16 KV cache。当前图片请求通过 llama.cpp
+`llama-mtmd-cli` 桥接完成视觉理解；跨请求 prompt prefix cache 见下方单独示例，
+第一版 MTP 不和 `--cache-prompt` 同时启用。
 
 浏览器对话页：
 
@@ -229,9 +235,11 @@ Chat completion：
 curl http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl",
+    "model": "qwen3.5-0.8b-vl-mtp",
     "messages": [{"role": "user", "content": "用一句话介绍你自己"}],
     "max_completion_tokens": 128,
+    "mtp": true,
+    "mtp_draft_tokens": 3,
     "chat_template_kwargs": {"enable_thinking": false},
     "device": "mps"
   }'
@@ -243,7 +251,7 @@ Streaming thinking：
 curl -N http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl",
+    "model": "qwen3.5-0.8b-vl-mtp",
     "messages": [{"role": "user", "content": "计算 23 * 19，并给出答案"}],
     "max_completion_tokens": 128,
     "stream": true,
@@ -259,9 +267,11 @@ Text completion：
 curl http://127.0.0.1:18080/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl",
+    "model": "qwen3.5-0.8b-vl-mtp",
     "prompt": "hello",
     "max_tokens": 32,
+    "mtp": true,
+    "mtp_draft_tokens": 3,
     "device": "mps"
   }'
 ```
@@ -272,7 +282,7 @@ Forced tool call protocol compatibility：
 curl http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl",
+    "model": "qwen3.5-0.8b-vl-mtp",
     "messages": [{"role": "user", "content": "weather?"}],
     "tools": [{
       "type": "function",
@@ -429,6 +439,12 @@ python3 scripts/test_qwen35_vl_gateway.py --max-tokens 24
 make qwen35-vl-test
 ```
 
+Qwen3.5 MTP gateway smoke test：
+
+```bash
+python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
+```
+
 ## Project Layout
 
 ```text
@@ -454,6 +470,7 @@ web/                     Static browser chat page assets
 - [Qwen3.5 cross-request KV cache](docs/qwen3-5-cross-request-kv-cache.md)
 - [Qwen3.5 OpenAI thinking](docs/qwen3-5-0-8b-openai-thinking.md)
 - [Qwen3.5 image input research](docs/qwen3-5-0-8b-image-input-llama-cpp.md)
+- [Qwen3.5 MTP llama.cpp research](docs/qwen3-5-0-8b-mtp-llama-cpp.md)
 - [CPU forward inference](docs/forward.md)
 - [MPSGraph backend](docs/mpsgraph-backend.md)
 - [Logging and profiling](docs/logging-and-profiling.md)
@@ -461,8 +478,10 @@ web/                     Static browser chat page assets
 ## Current Boundaries
 
 - 当前主线覆盖 dense Qwen3.5 0.8B GGUF 文本路径。
-- Qwen3.5 MoE、MTP/speculative decoding、多 batch、多 sequence、paged KV 和完整
-  原生 VL/Omni 多模态 graph 仍是后续工作。
+- Qwen3.5 0.8B MTP/NextN 当前支持 greedy 文本 speculative decode；
+  batched speculative、多 sequence、paged KV 和完整原生 VL/Omni 多模态 graph
+  仍是后续工作。
+- Qwen3.5 MoE 仍是后续工作。
 - Qwen3.5 VL gateway 当前通过 llama.cpp `llama-mtmd-cli` 桥接完成可测试推理。
 - Qwen3.5 runtime 不以旧 Qwen3 CPU reference path 作为生产 fallback。
 - 采样目前仍会在需要时读回最后一行 logits 到 host。

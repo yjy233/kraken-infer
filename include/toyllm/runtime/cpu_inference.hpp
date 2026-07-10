@@ -35,6 +35,8 @@ struct CpuGenerationRequest {
   std::size_t logits_top_k{0};
   bool parse_special_prompt{false};
   bool enable_thinking{false};
+  bool enable_mtp{true};
+  std::size_t mtp_draft_tokens{3};
   bool cache_prompt{false};
   std::size_t cache_reuse_min_tokens{0};
   std::size_t cache_block_tokens{0};
@@ -73,6 +75,17 @@ struct CpuPromptCacheReport {
   std::size_t evicted_blocks{0};
 };
 
+struct CpuMtpReport {
+  bool available{false};
+  bool enabled{false};
+  std::size_t layers{0};
+  std::size_t draft_tokens{0};
+  std::size_t drafted_tokens{0};
+  std::size_t accepted_tokens{0};
+  std::size_t verify_steps{0};
+  std::string disabled_reason;
+};
+
 struct CpuGenerationResult {
   bool implemented{false};
   std::string text;
@@ -84,6 +97,7 @@ struct CpuGenerationResult {
   std::vector<std::string> missing_dependencies;
   CpuKvCacheReport kv_cache;
   CpuPromptCacheReport prompt_cache;
+  CpuMtpReport mtp;
   bool kv_cache_verified{false};
   struct LogitTopEntry {
     std::int64_t token_id{0};

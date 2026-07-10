@@ -16,6 +16,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
@@ -135,9 +136,36 @@ struct Qwen35FullAttentionLayerStats {
 };
 
 struct Qwen35LogitsOutput {
+  mps::MpsBuffer h_nextn;
   mps::MpsBuffer logits;
   mps::MpsBuffer argmax_output;
   std::size_t logits_values{0};
+  std::size_t rows{1};
+};
+
+struct Qwen35MtpForwardOutput {
+  mps::MpsBuffer h_nextn;
+  mps::MpsBuffer logits;
+  mps::MpsBuffer argmax_output;
+  std::size_t logits_values{0};
+  std::size_t rows{0};
+};
+
+struct Qwen35MainForwardOutput {
+  mps::MpsBuffer hidden;
+  std::size_t rows{0};
+};
+
+struct Qwen35MtpRuntimeState {
+  bool available{false};
+  bool enabled{false};
+  std::string disabled_reason;
+  std::size_t draft_tokens{0};
+  std::size_t drafted_tokens{0};
+  std::size_t accepted_tokens{0};
+  std::size_t verify_steps{0};
+  Qwen35MetalCache cache;
+  mps::MpsBuffer pending_h;
 };
 
 struct Qwen35EffectiveSamplingConfig {
@@ -291,6 +319,9 @@ std::size_t qwen35_mul_mv_ext_r1ptg(std::size_t tokens) {
 
 std::string qwen35_quant_matmul_dispatch_name(std::uint32_t type,
                                               std::size_t tokens) {
+  if (type == 0U || type == 8U) {
+    return "dense_f32_transposed";
+  }
   if (type != 12U && type != 13U && type != 14U) {
     return "unsupported";
   }
@@ -929,6 +960,20 @@ bool should_build_dense_prefill_weight(const GgufTensorInfo& tensor) {
          (tensor.type == 12U || tensor.type == 13U || tensor.type == 14U);
 }
 
+bool should_build_dense_transposed_weight(const GgufTensorInfo& tensor,
+                                          bool build_dense_prefill_weights) {
+  if (tensor.shape.size() != 2U) {
+    return false;
+  }
+  if (tensor.type == 0U && tensor.name.rfind("blk.", 0) == 0) {
+    return true;
+  }
+  if (tensor.type == 8U) {
+    return true;
+  }
+  return build_dense_prefill_weights && should_build_dense_prefill_weight(tensor);
+}
+
 bool dense_prefill_weights_enabled() {
   const char* value = std::getenv("KRAKEN_QWEN35_DENSE_PREFILL");
   if (value == nullptr) {
@@ -1024,16 +1069,18 @@ Status qwen35_prefill_commit_and_rebegin(MpsGraphGuard& graph_guard,
   }
 }
 
-Result<std::vector<float>> dequantize_k_quant_transposed_f32(
+Result<std::vector<float>> dequantize_quantized_transposed_f32(
   const GgufTensorInfo& tensor, const GgufTensorBytes& bytes) {
   if (tensor.shape.size() != 2U) {
-    return Status::invalid_argument("dense prefill dequant requires a 2D tensor: " +
+    return Status::invalid_argument("dense dequant requires a 2D tensor: " +
                                     tensor.name);
   }
   const auto cols_u64 = tensor.shape[0];
   const auto rows_u64 = tensor.shape[1];
-  if (cols_u64 == 0 || rows_u64 == 0 || cols_u64 % 256U != 0) {
-    return Status::invalid_argument("dense prefill dequant tensor shape is invalid: " +
+  const std::uint64_t block_size =
+    tensor.type == 0U ? 1U : (tensor.type == 8U ? 32U : 256U);
+  if (cols_u64 == 0 || rows_u64 == 0 || cols_u64 % block_size != 0) {
+    return Status::invalid_argument("dense dequant tensor shape is invalid: " +
                                     tensor.name);
   }
   auto cols_result = checked_size_t(cols_u64, tensor.name.c_str());
@@ -1046,22 +1093,25 @@ Result<std::vector<float>> dequantize_k_quant_transposed_f32(
   }
   const auto cols = cols_result.value();
   const auto rows = rows_result.value();
-  const auto blocks_per_row = cols / 256U;
+  const auto blocks_per_row = cols / static_cast<std::size_t>(block_size);
   const std::size_t block_bytes =
-    tensor.type == 12U ? 144U : (tensor.type == 13U ? 176U : 210U);
+    tensor.type == 0U ? sizeof(float)
+                      : (tensor.type == 8U ? 34U
+                      : (tensor.type == 12U ? 144U
+                                            : (tensor.type == 13U ? 176U : 210U)));
   std::size_t expected_bytes = 0;
   if (!checked_mul_size(rows, blocks_per_row, expected_bytes) ||
       !checked_mul_size(expected_bytes, block_bytes, expected_bytes)) {
-    return Status::invalid_argument("dense prefill dequant byte count overflow: " +
+    return Status::invalid_argument("dense dequant byte count overflow: " +
                                     tensor.name);
   }
   if (bytes.data == nullptr || bytes.size < expected_bytes) {
-    return Status::invalid_argument("dense prefill dequant tensor bytes are too small: " +
+    return Status::invalid_argument("dense dequant tensor bytes are too small: " +
                                     tensor.name);
   }
   std::size_t values = 0;
   if (!checked_mul_size(rows, cols, values)) {
-    return Status::invalid_argument("dense prefill dequant value count overflow: " +
+    return Status::invalid_argument("dense dequant value count overflow: " +
                                     tensor.name);
   }
 
@@ -1071,8 +1121,19 @@ Result<std::vector<float>> dequantize_k_quant_transposed_f32(
     const auto row_base = row * blocks_per_row * block_bytes;
     for (std::size_t block = 0; block < blocks_per_row; ++block) {
       const auto* block_data = data + row_base + block * block_bytes;
-      const auto col_block = block * 256U;
-      if (tensor.type == 12U) {
+      const auto col_block = block * static_cast<std::size_t>(block_size);
+      if (tensor.type == 0U) {
+        float value = 0.0F;
+        std::memcpy(&value, block_data, sizeof(float));
+        transposed[col_block * rows + row] = value;
+      } else if (tensor.type == 8U) {
+        const float d = f16_to_float_cpu(block_data);
+        const auto* qs = reinterpret_cast<const std::int8_t*>(block_data + 2U);
+        for (std::uint32_t i = 0; i < 32U; ++i) {
+          transposed[(col_block + i) * rows + row] =
+            d * static_cast<float>(qs[i]);
+        }
+      } else if (tensor.type == 12U) {
         const float d = f16_to_float_cpu(block_data);
         const float dmin = f16_to_float_cpu(block_data + 2U);
         const auto* scales = block_data + 4U;
@@ -1256,9 +1317,69 @@ Result<Qwen35MetalCache> allocate_qwen35_metal_cache(const mps::MpsContext& cont
   return cache;
 }
 
+Result<Qwen35MetalCache> allocate_qwen35_mtp_metal_cache(
+  const mps::MpsContext& context, const Qwen35ExecutionPlan& plan,
+  std::size_t mtp_layers) {
+  if (mtp_layers == 0) {
+    return Status::invalid_argument("Qwen3.5 MTP cache requires at least one layer");
+  }
+  if (plan.cache.attention_capacity_tokens == 0 || plan.cache.kv_dim == 0) {
+    return Status::invalid_argument("Qwen3.5 MTP cache dimensions must be positive");
+  }
+
+  Qwen35MetalCache cache;
+  cache.kv_cache_f16 = plan.cache.kv_cache_f16;
+  const auto key_bytes = cache_bytes(mtp_layers, plan.cache.attention_capacity_tokens,
+                                     plan.cache.kv_dim, plan.cache.kv_cache_element_bytes,
+                                     "Qwen3.5 MTP key cache");
+  if (!key_bytes.is_ok()) {
+    return key_bytes.status();
+  }
+  const auto value_bytes = cache_bytes(mtp_layers, plan.cache.attention_capacity_tokens,
+                                       plan.cache.kv_dim, plan.cache.kv_cache_element_bytes,
+                                       "Qwen3.5 MTP value cache");
+  if (!value_bytes.is_ok()) {
+    return value_bytes.status();
+  }
+  cache.key_cache_bytes = key_bytes.value();
+  cache.value_cache_bytes = value_bytes.value();
+
+  auto key_size = checked_size_t(cache.key_cache_bytes, "Qwen3.5 MTP key cache");
+  if (!key_size.is_ok()) {
+    return key_size.status();
+  }
+  auto key = context.make_buffer(key_size.value());
+  if (!key.is_ok()) {
+    return key.status();
+  }
+  cache.key_cache = std::move(key.value());
+  auto status = zero_allocated_buffer(context, cache.key_cache, cache.key_cache_bytes,
+                                      "Qwen3.5 MTP key cache");
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  auto value_size = checked_size_t(cache.value_cache_bytes, "Qwen3.5 MTP value cache");
+  if (!value_size.is_ok()) {
+    return value_size.status();
+  }
+  auto value = context.make_buffer(value_size.value());
+  if (!value.is_ok()) {
+    return value.status();
+  }
+  cache.value_cache = std::move(value.value());
+  status = zero_allocated_buffer(context, cache.value_cache, cache.value_cache_bytes,
+                                 "Qwen3.5 MTP value cache");
+  if (!status.is_ok()) {
+    return status;
+  }
+  return cache;
+}
+
 Status require_supported_qwen35_weight_type(std::uint32_t type, const std::string& name) {
   switch (type) {
     case 0:   // F32
+    case 8:   // Q8_0, uploaded with a dense F32 fallback for MTP projectors.
     case 12:  // Q4_K
     case 13:  // Q5_K
     case 14:  // Q6_K
@@ -1273,6 +1394,8 @@ void count_uploaded_tensor_type(Qwen35MetalWeightStore& store, std::uint32_t typ
   switch (type) {
     case 0:
       ++store.f32_tensors;
+      break;
+    case 8:
       break;
     case 12:
       ++store.q4_k_tensors;
@@ -1347,8 +1470,8 @@ Result<Qwen35MetalWeightStore> upload_qwen35_metal_weights(
     uploaded.byte_size = tensor.byte_size;
     uploaded.buffer = std::move(buffer.value());
 
-    if (build_dense_prefill_weights && should_build_dense_prefill_weight(tensor)) {
-      auto dense = dequantize_k_quant_transposed_f32(tensor, bytes.value());
+    if (should_build_dense_transposed_weight(tensor, build_dense_prefill_weights)) {
+      auto dense = dequantize_quantized_transposed_f32(tensor, bytes.value());
       if (!dense.is_ok()) {
         return dense.status();
       }
@@ -1419,8 +1542,8 @@ Result<mps::MpsBuffer> make_qwen35_token_id_buffer(
   return std::move(buffer.value());
 }
 
-Result<mps::MpsBuffer> run_qwen35_token_embeddings(
-  const mps::MpsContext& context, const Qwen35MetalWeightStore& weights,
+Result<mps::MpsBuffer> run_qwen35_token_embeddings_from_weight(
+  const mps::MpsContext& context, const Qwen35MetalWeight& embedding,
   const std::vector<std::int64_t>& token_ids, const mps::MpsBuffer& token_id_buffer,
   std::size_t hidden_size) {
   if (token_ids.empty()) {
@@ -1429,15 +1552,11 @@ Result<mps::MpsBuffer> run_qwen35_token_embeddings(
   if (hidden_size == 0) {
     return Status::invalid_argument("Qwen3.5 hidden size must be positive");
   }
-  const auto* embedding = find_metal_weight(weights, "token_embd.weight");
-  if (embedding == nullptr) {
-    return Status::invalid_argument("missing Qwen3.5 Metal weight: token_embd.weight");
-  }
-  if (embedding->shape.size() != 2 || embedding->shape[0] != hidden_size ||
-      embedding->shape[1] == 0) {
+  if (embedding.shape.size() != 2 || embedding.shape[0] != hidden_size ||
+      embedding.shape[1] == 0) {
     return Status::invalid_argument("Qwen3.5 token embedding shape does not match plan");
   }
-  const auto embedding_rows = embedding->shape[1];
+  const auto embedding_rows = embedding.shape[1];
   if (embedding_rows > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return Status::invalid_argument("Qwen3.5 token embedding row count exceeds size_t range");
   }
@@ -1468,14 +1587,14 @@ Result<mps::MpsBuffer> run_qwen35_token_embeddings(
 
   const auto rows = static_cast<std::size_t>(embedding_rows);
   Status status = Status::ok();
-  switch (embedding->type) {
+  switch (embedding.type) {
     case 0: {
       for (std::size_t token_index = 0; token_index < token_ids.size(); ++token_index) {
         const auto row = static_cast<std::size_t>(token_ids[token_index]);
         if (row > std::numeric_limits<std::size_t>::max() / hidden_size) {
           return Status::invalid_argument("Qwen3.5 token embedding source offset overflow");
         }
-        status = context.copy_f32_region(embedding->buffer, output.value(),
+        status = context.copy_f32_region(embedding.buffer, output.value(),
                                          row * hidden_size,
                                          token_index * hidden_size, hidden_size);
         if (!status.is_ok()) {
@@ -1485,17 +1604,17 @@ Result<mps::MpsBuffer> run_qwen35_token_embeddings(
       break;
     }
     case 12:
-      status = context.dequantize_rows_q4_k_f32(embedding->buffer, rows,
+      status = context.dequantize_rows_q4_k_f32(embedding.buffer, rows,
                                                 token_id_buffer, token_ids.size(),
                                                 hidden_size, output.value());
       break;
     case 13:
-      status = context.dequantize_rows_q5_k_f32(embedding->buffer, rows,
+      status = context.dequantize_rows_q5_k_f32(embedding.buffer, rows,
                                                 token_id_buffer, token_ids.size(),
                                                 hidden_size, output.value());
       break;
     case 14:
-      status = context.dequantize_rows_q6_k_f32(embedding->buffer, rows,
+      status = context.dequantize_rows_q6_k_f32(embedding.buffer, rows,
                                                 token_id_buffer, token_ids.size(),
                                                 hidden_size, output.value());
       break;
@@ -1508,6 +1627,18 @@ Result<mps::MpsBuffer> run_qwen35_token_embeddings(
   }
 
   return std::move(output.value());
+}
+
+Result<mps::MpsBuffer> run_qwen35_token_embeddings(
+  const mps::MpsContext& context, const Qwen35MetalWeightStore& weights,
+  const std::vector<std::int64_t>& token_ids, const mps::MpsBuffer& token_id_buffer,
+  std::size_t hidden_size) {
+  const auto* embedding = find_metal_weight(weights, "token_embd.weight");
+  if (embedding == nullptr) {
+    return Status::invalid_argument("missing Qwen3.5 Metal weight: token_embd.weight");
+  }
+  return run_qwen35_token_embeddings_from_weight(
+    context, *embedding, token_ids, token_id_buffer, hidden_size);
 }
 
 Result<mps::MpsBuffer> make_qwen35_f32_buffer(const mps::MpsContext& context,
@@ -1611,6 +1742,16 @@ Result<mps::MpsBuffer> run_qwen35_quant_matvec(const mps::MpsContext& context,
     return output.status();
   }
 
+  if (weight.dense_f32_transposed.valid()) {
+    auto status = context.matmul_f32_f32_device(
+      input, weight.dense_f32_transposed, 1, input_values, rows,
+      output.value());
+    if (!status.is_ok()) {
+      return status;
+    }
+    return std::move(output.value());
+  }
+
   Status status = Status::ok();
   switch (weight.type) {
     case 12:
@@ -1679,7 +1820,7 @@ Result<mps::MpsBuffer> run_qwen35_quant_matmul(const mps::MpsContext& context,
     return output.status();
   }
 
-  if (tokens > 1U && weight.dense_f32_transposed.valid()) {
+  if (weight.dense_f32_transposed.valid()) {
     auto status = context.matmul_f32_f32_device(
       input, weight.dense_f32_transposed, tokens, input_values, rows,
       output.value());
@@ -3111,55 +3252,90 @@ Result<Qwen35EffectiveSamplingConfig> make_qwen35_effective_sampling(
   return result;
 }
 
-Result<Qwen35LogitsOutput> run_qwen35_output_logits(
+Result<mps::MpsBuffer> run_qwen35_output_norm(
   const mps::MpsContext& context, const mps::MpsBuffer& hidden,
-  std::size_t hidden_size, float rms_eps, const Qwen35MetalWeight& output_norm,
-  const Qwen35MetalWeight& output_weight, cpu::DebugDumper* dumper,
-  std::string_view debug_prefix, bool compute_argmax) {
+  std::size_t rows, std::size_t hidden_size, float rms_eps,
+  const Qwen35MetalWeight& output_norm, cpu::DebugDumper* dumper,
+  std::string_view debug_prefix) {
   if (hidden_size == 0) {
-    return Status::invalid_argument("Qwen3.5 output logits hidden size must be positive");
+    return Status::invalid_argument("Qwen3.5 output norm hidden size must be positive");
+  }
+  if (rows == 0) {
+    return Status::invalid_argument("Qwen3.5 output norm rows must be positive");
   }
   if (output_norm.type != 0 ||
       output_norm.shape != std::vector<std::uint64_t>{hidden_size}) {
     return Status::invalid_argument("Qwen3.5 output norm shape/type mismatch");
   }
-  if (output_weight.shape.size() != 2 ||
-      output_weight.shape[1] >
-        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-    return Status::invalid_argument("Qwen3.5 output weight shape mismatch");
-  }
 
-  auto final_norm = make_qwen35_f32_buffer(context, hidden_size,
+  auto final_norm = make_qwen35_f32_buffer(context, rows * hidden_size,
                                            "Qwen3.5 final norm");
   if (!final_norm.is_ok()) {
     return final_norm.status();
   }
-  auto status = context.rms_norm_f32_f32(hidden, output_norm.buffer, hidden_size,
-                                         rms_eps, final_norm.value());
+  Status status = Status::ok();
+  if (rows == 1) {
+    status = context.rms_norm_f32_f32(hidden, output_norm.buffer, hidden_size,
+                                      rms_eps, final_norm.value());
+  } else {
+    status = context.rms_norm_f32_f32_batched(
+      hidden, output_norm.buffer, rows, hidden_size, rms_eps, final_norm.value());
+  }
   if (!status.is_ok()) {
     return status;
   }
   status = dump_qwen35_mps_f32(
     context, dumper, qwen35_step_tensor_name(debug_prefix, "output_norm"),
-    {static_cast<std::uint64_t>(hidden_size)}, final_norm.value(), hidden_size);
+    rows == 1 ? std::vector<std::uint64_t>{static_cast<std::uint64_t>(hidden_size)}
+              : std::vector<std::uint64_t>{static_cast<std::uint64_t>(rows),
+                                           static_cast<std::uint64_t>(hidden_size)},
+    final_norm.value(), rows * hidden_size);
   if (!status.is_ok()) {
     return status;
   }
-  auto logits = run_qwen35_quant_matvec(context, output_weight, final_norm.value(),
-                                        hidden_size);
+  return std::move(final_norm.value());
+}
+
+Result<Qwen35LogitsOutput> run_qwen35_lm_head_logits(
+  const mps::MpsContext& context, const mps::MpsBuffer& h_nextn,
+  std::size_t rows, std::size_t hidden_size, const Qwen35MetalWeight& output_weight,
+  cpu::DebugDumper* dumper, std::string_view debug_prefix, bool compute_argmax) {
+  if (rows == 0 || hidden_size == 0) {
+    return Status::invalid_argument("Qwen3.5 LM head dimensions must be positive");
+  }
+  if (output_weight.shape.size() != 2 ||
+      output_weight.shape[0] != hidden_size ||
+      output_weight.shape[1] >
+        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return Status::invalid_argument("Qwen3.5 output weight shape mismatch");
+  }
+  Result<mps::MpsBuffer> logits{Status::ok()};
+  if (rows == 1) {
+    logits = run_qwen35_quant_matvec(context, output_weight, h_nextn, hidden_size);
+  } else {
+    logits = run_qwen35_quant_matmul(context, output_weight, h_nextn, rows,
+                                     hidden_size);
+  }
   if (!logits.is_ok()) {
     return logits.status();
   }
   const auto logits_values = static_cast<std::size_t>(output_weight.shape[1]);
-  status = dump_qwen35_mps_f32(
+  auto status = dump_qwen35_mps_f32(
     context, dumper, qwen35_step_tensor_name(debug_prefix, "logits"),
-    {static_cast<std::uint64_t>(logits_values)}, logits.value(), logits_values);
+    rows == 1 ? std::vector<std::uint64_t>{static_cast<std::uint64_t>(logits_values)}
+              : std::vector<std::uint64_t>{static_cast<std::uint64_t>(rows),
+                                           static_cast<std::uint64_t>(logits_values)},
+    logits.value(), rows * logits_values);
   if (!status.is_ok()) {
     return status;
   }
 
   Qwen35LogitsOutput output;
+  output.rows = rows;
   if (compute_argmax) {
+    if (rows != 1) {
+      return Status::invalid_argument("Qwen3.5 device argmax currently requires one logits row");
+    }
     auto argmax_output = context.make_buffer(sizeof(std::int32_t));
     if (!argmax_output.is_ok()) {
       return argmax_output.status();
@@ -3174,6 +3350,26 @@ Result<Qwen35LogitsOutput> run_qwen35_output_logits(
   output.logits = std::move(logits.value());
   output.logits_values = logits_values;
   return output;
+}
+
+Result<Qwen35LogitsOutput> run_qwen35_output_logits(
+  const mps::MpsContext& context, const mps::MpsBuffer& hidden,
+  std::size_t hidden_size, float rms_eps, const Qwen35MetalWeight& output_norm,
+  const Qwen35MetalWeight& output_weight, cpu::DebugDumper* dumper,
+  std::string_view debug_prefix, bool compute_argmax) {
+  auto h_nextn = run_qwen35_output_norm(context, hidden, 1, hidden_size, rms_eps,
+                                        output_norm, dumper, debug_prefix);
+  if (!h_nextn.is_ok()) {
+    return h_nextn.status();
+  }
+  auto logits = run_qwen35_lm_head_logits(
+    context, h_nextn.value(), 1, hidden_size, output_weight, dumper,
+    debug_prefix, compute_argmax);
+  if (!logits.is_ok()) {
+    return logits.status();
+  }
+  logits.value().h_nextn = std::move(h_nextn.value());
+  return logits;
 }
 
 Result<std::int64_t> read_qwen35_argmax_token(const mps::MpsContext& context,
@@ -3199,6 +3395,25 @@ Result<std::vector<float>> read_qwen35_logits_host(const mps::MpsContext& contex
   std::vector<float> logits_host(logits_values, 0.0F);
   auto status = context.copy_from_buffer(logits, logits_host.data(),
                                          logits_host.size() * sizeof(float));
+  if (!status.is_ok()) {
+    return status;
+  }
+  return logits_host;
+}
+
+Result<std::vector<float>> read_qwen35_logits_row_host(
+  const mps::MpsContext& context, const mps::MpsBuffer& logits,
+  std::size_t row, std::size_t logits_values) {
+  if (logits_values == 0) {
+    return Status::invalid_argument("Qwen3.5 logits row readback requires logits");
+  }
+  if (row > std::numeric_limits<std::size_t>::max() / logits_values) {
+    return Status::invalid_argument("Qwen3.5 logits row offset overflow");
+  }
+  std::vector<float> logits_host(logits_values, 0.0F);
+  const auto byte_offset = row * logits_values * sizeof(float);
+  auto status = context.copy_from_buffer_at(logits, byte_offset, logits_host.data(),
+                                            logits_host.size() * sizeof(float));
   if (!status.is_ok()) {
     return status;
   }
@@ -3337,16 +3552,20 @@ Result<std::int64_t> sample_qwen35_next_token(
   return candidates.back().id;
 }
 
-Result<mps::MpsBuffer> run_qwen35_decode_token(
+Result<Qwen35MainForwardOutput> run_qwen35_decode_tokens(
   const mps::MpsContext& context, const Qwen35MetalWeightStore& weights,
   Qwen35MetalCache& cache, const Qwen35WeightMap& map,
   const ModelConfig& model, const Qwen35ExecutionPlan& plan,
   const std::array<std::size_t, 4>& mrope_sections,
-  std::int64_t token_id, std::size_t position) {
-  if (position >= plan.cache.attention_capacity_tokens) {
+  const std::vector<std::int64_t>& token_ids, std::size_t start_position) {
+  if (token_ids.empty()) {
+    return Status::invalid_argument("Qwen3.5 decode requires at least one token");
+  }
+  if (start_position >= plan.cache.attention_capacity_tokens ||
+      token_ids.size() >
+        plan.cache.attention_capacity_tokens - start_position) {
     return Status::invalid_argument("Qwen3.5 decode position exceeds cache capacity");
   }
-  const std::vector<std::int64_t> token_ids{token_id};
   auto token_buffer = make_qwen35_token_id_buffer(context, token_ids);
   if (!token_buffer.is_ok()) {
     return token_buffer.status();
@@ -3366,13 +3585,13 @@ Result<mps::MpsBuffer> run_qwen35_decode_token(
     switch (layer.kind) {
       case Qwen35LayerKind::linear_attention: {
         auto layer_output = run_qwen35_linear_layer_chunk(
-          context, weights, cache, layer, current_hidden, 1, plan.hidden_size,
+          context, weights, cache, layer, current_hidden, token_ids.size(), plan.hidden_size,
           plan.linear_conv_kernel, plan.linear_conv_channels,
           plan.linear_key_heads, plan.linear_key_head_dim,
           plan.linear_value_heads, plan.linear_inner_size,
           linear_layers_executed, plan.cache.recurrent_r_elements_per_layer,
           plan.cache.recurrent_s_elements_per_layer,
-          nullptr, layer_index, position, static_cast<float>(model.rms_norm_eps),
+          nullptr, layer_index, start_position, static_cast<float>(model.rms_norm_eps),
           nullptr);
         if (!layer_output.is_ok()) {
           return layer_output.status();
@@ -3383,9 +3602,9 @@ Result<mps::MpsBuffer> run_qwen35_decode_token(
       }
       case Qwen35LayerKind::full_attention: {
         auto layer_output = run_qwen35_full_attention_layer_chunk(
-          context, weights, cache, layer, current_hidden, 1, plan.hidden_size,
+          context, weights, cache, layer, current_hidden, token_ids.size(), plan.hidden_size,
           plan.attention_heads, plan.kv_heads, plan.head_dim,
-          full_attention_layers_executed, position,
+          full_attention_layers_executed, start_position,
           plan.cache.attention_capacity_tokens, mrope_sections,
           static_cast<float>(model.rope_theta),
           static_cast<float>(model.rms_norm_eps), nullptr);
@@ -3406,7 +3625,183 @@ Result<mps::MpsBuffer> run_qwen35_decode_token(
       full_attention_layers_executed != plan.cache.full_attention_layers) {
     return Status::internal_error("Qwen3.5 Metal decode layer execution count mismatch");
   }
-  return std::move(current_hidden);
+  return Qwen35MainForwardOutput{std::move(current_hidden), token_ids.size()};
+}
+
+Result<mps::MpsBuffer> run_qwen35_decode_token(
+  const mps::MpsContext& context, const Qwen35MetalWeightStore& weights,
+  Qwen35MetalCache& cache, const Qwen35WeightMap& map,
+  const ModelConfig& model, const Qwen35ExecutionPlan& plan,
+  const std::array<std::size_t, 4>& mrope_sections,
+  std::int64_t token_id, std::size_t position) {
+  const std::vector<std::int64_t> token_ids{token_id};
+  auto output = run_qwen35_decode_tokens(
+    context, weights, cache, map, model, plan, mrope_sections, token_ids, position);
+  if (!output.is_ok()) {
+    return output.status();
+  }
+  return std::move(output.value().hidden);
+}
+
+Result<mps::MpsBuffer> make_qwen35_mtp_shifted_h_rows(
+  const mps::MpsContext& context, const mps::MpsBuffer& previous_h,
+  const mps::MpsBuffer& h_nextn_rows, std::size_t rows, std::size_t hidden_size) {
+  if (rows == 0 || hidden_size == 0) {
+    return Status::invalid_argument("Qwen3.5 MTP shifted h rows require dimensions");
+  }
+  auto shifted = make_qwen35_f32_buffer(context, rows * hidden_size,
+                                        "Qwen3.5 MTP shifted h rows");
+  if (!shifted.is_ok()) {
+    return shifted.status();
+  }
+  auto status = context.copy_f32_region(previous_h, shifted.value(), 0, 0,
+                                        hidden_size);
+  if (!status.is_ok()) {
+    return status;
+  }
+  if (rows > 1) {
+    status = context.copy_f32_rows(h_nextn_rows, shifted.value(), rows - 1U,
+                                   hidden_size, hidden_size, 0,
+                                   hidden_size, hidden_size);
+    if (!status.is_ok()) {
+      return status;
+    }
+  }
+  return std::move(shifted.value());
+}
+
+Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens(
+  const mps::MpsContext& context, const Qwen35MetalWeightStore& weights,
+  Qwen35MetalCache& mtp_cache, const Qwen35LayerBindings& layer,
+  const Qwen35MetalWeight& fallback_token_embedding,
+  const Qwen35MetalWeight& fallback_output_norm,
+  const Qwen35MetalWeight& fallback_output_weight,
+  const std::array<std::size_t, 4>& mrope_sections,
+  const std::vector<std::int64_t>& token_ids, const mps::MpsBuffer& h_rows,
+  std::size_t start_position, const Qwen35ExecutionPlan& plan,
+  float rope_theta, float rms_eps, bool compute_logits, bool compute_argmax,
+  RequestProfiler* profiler = nullptr) {
+  if (layer.kind != Qwen35LayerKind::mtp) {
+    return Status::invalid_argument("Qwen3.5 MTP runner requires an MTP layer");
+  }
+  if (token_ids.empty()) {
+    return Status::invalid_argument("Qwen3.5 MTP runner requires tokens");
+  }
+  if (start_position >= plan.cache.attention_capacity_tokens ||
+      token_ids.size() >
+        plan.cache.attention_capacity_tokens - start_position) {
+    return Status::invalid_argument("Qwen3.5 MTP position exceeds cache capacity");
+  }
+
+  const auto* eh_proj = find_metal_weight(weights, layer.mtp.eh_proj.name);
+  const auto* enorm = find_metal_weight(weights, layer.mtp.enorm.name);
+  const auto* hnorm = find_metal_weight(weights, layer.mtp.hnorm.name);
+  const auto* embed_tokens = layer.mtp.has_embed_tokens
+                               ? find_metal_weight(weights, layer.mtp.embed_tokens.name)
+                               : &fallback_token_embedding;
+  const auto* head_norm = layer.mtp.has_shared_head_norm
+                            ? find_metal_weight(weights, layer.mtp.shared_head_norm.name)
+                            : &fallback_output_norm;
+  const auto* head_weight = layer.mtp.has_shared_head_head
+                              ? find_metal_weight(weights, layer.mtp.shared_head_head.name)
+                              : &fallback_output_weight;
+  if (eh_proj == nullptr || enorm == nullptr || hnorm == nullptr ||
+      embed_tokens == nullptr || head_norm == nullptr || head_weight == nullptr) {
+    return Status::invalid_argument("Qwen3.5 MTP layer is missing weights");
+  }
+  if (enorm->type != 0 || hnorm->type != 0 ||
+      enorm->shape != std::vector<std::uint64_t>{plan.hidden_size} ||
+      hnorm->shape != std::vector<std::uint64_t>{plan.hidden_size}) {
+    return Status::invalid_argument("Qwen3.5 MTP norm shape/type mismatch");
+  }
+
+  auto token_buffer = make_qwen35_token_id_buffer(context, token_ids);
+  if (!token_buffer.is_ok()) {
+    return token_buffer.status();
+  }
+  auto tok_embd = run_qwen35_token_embeddings_from_weight(
+    context, *embed_tokens, token_ids, token_buffer.value(), plan.hidden_size);
+  if (!tok_embd.is_ok()) {
+    return tok_embd.status();
+  }
+
+  auto h_norm = run_qwen35_output_norm(context, h_rows, token_ids.size(),
+                                       plan.hidden_size, rms_eps, *hnorm,
+                                       nullptr, "mtp.hnorm");
+  if (!h_norm.is_ok()) {
+    return h_norm.status();
+  }
+  auto e_norm = run_qwen35_output_norm(context, tok_embd.value(), token_ids.size(),
+                                       plan.hidden_size, rms_eps, *enorm,
+                                       nullptr, "mtp.enorm");
+  if (!e_norm.is_ok()) {
+    return e_norm.status();
+  }
+
+  auto concat = make_qwen35_f32_buffer(context, token_ids.size() * plan.hidden_size * 2U,
+                                       "Qwen3.5 MTP concat");
+  if (!concat.is_ok()) {
+    return concat.status();
+  }
+  Status status = Status::ok();
+  for (std::size_t row = 0; row < token_ids.size(); ++row) {
+    const auto source = row * plan.hidden_size;
+    const auto destination = row * plan.hidden_size * 2U;
+    status = context.copy_f32_region(e_norm.value(), concat.value(),
+                                     source, destination, plan.hidden_size);
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = context.copy_f32_region(h_norm.value(), concat.value(),
+                                     source, destination + plan.hidden_size,
+                                     plan.hidden_size);
+    if (!status.is_ok()) {
+      return status;
+    }
+  }
+
+  auto projected = run_qwen35_quant_matmul(context, *eh_proj, concat.value(),
+                                           token_ids.size(), plan.hidden_size * 2U,
+                                           profiler, "mtp.eh_proj");
+  if (!projected.is_ok()) {
+    return projected.status();
+  }
+
+  Qwen35LayerBindings full_layer = layer;
+  full_layer.kind = Qwen35LayerKind::full_attention;
+  full_layer.full_attention = layer.mtp.attention;
+  auto block_out = run_qwen35_full_attention_layer_chunk(
+    context, weights, mtp_cache, full_layer, projected.value(), token_ids.size(),
+    plan.hidden_size, plan.attention_heads, plan.kv_heads, plan.head_dim, 0,
+    start_position, plan.cache.attention_capacity_tokens, mrope_sections,
+    rope_theta, rms_eps, profiler);
+  if (!block_out.is_ok()) {
+    return block_out.status();
+  }
+
+  auto h_nextn = run_qwen35_output_norm(context, block_out.value(), token_ids.size(),
+                                        plan.hidden_size, rms_eps, *head_norm,
+                                        nullptr, "mtp.shared_head_norm");
+  if (!h_nextn.is_ok()) {
+    return h_nextn.status();
+  }
+
+  Qwen35MtpForwardOutput output;
+  output.rows = token_ids.size();
+  output.h_nextn = std::move(h_nextn.value());
+  if (!compute_logits) {
+    return output;
+  }
+  auto logits = run_qwen35_lm_head_logits(
+    context, output.h_nextn, token_ids.size(), plan.hidden_size, *head_weight,
+    nullptr, "mtp", compute_argmax);
+  if (!logits.is_ok()) {
+    return logits.status();
+  }
+  output.logits = std::move(logits.value().logits);
+  output.argmax_output = std::move(logits.value().argmax_output);
+  output.logits_values = logits.value().logits_values;
+  return output;
 }
 
 }  // namespace
@@ -4328,7 +4723,22 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     if (!compatibility.is_ok()) {
       return compatibility;
     }
-    return generate_qwen35_vl_with_llama_mtmd(request);
+    auto vl_result = generate_qwen35_vl_with_llama_mtmd(request);
+    if (!vl_result.is_ok()) {
+      return vl_result.status();
+    }
+    const auto mtp_layers = bundle.value().model.mtp_num_hidden_layers > 0
+                              ? static_cast<std::size_t>(
+                                  bundle.value().model.mtp_num_hidden_layers)
+                              : std::size_t{0};
+    vl_result.value().mtp.available = mtp_layers > 0;
+    vl_result.value().mtp.enabled = false;
+    vl_result.value().mtp.layers = mtp_layers;
+    vl_result.value().mtp.draft_tokens = request.mtp_draft_tokens;
+    vl_result.value().mtp.disabled_reason =
+      mtp_layers > 0 ? "vl_bridge_uses_llama_mtmd_without_mtp"
+                     : "model_has_no_mtp_layers";
+    return vl_result;
   }
   auto sampling = make_qwen35_effective_sampling(bundle.value().generation,
                                                  request.sampling);
@@ -4406,6 +4816,32 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!plan.is_ok()) {
     return plan.status();
   }
+  Qwen35MtpRuntimeState mtp_state;
+  mtp_state.available = map.value().mtp_layers > 0;
+  mtp_state.draft_tokens = request.mtp_draft_tokens;
+  if (!mtp_state.available) {
+    mtp_state.disabled_reason = "model_has_no_mtp_layers";
+  } else if (!request.enable_mtp) {
+    mtp_state.disabled_reason = "request_disabled";
+  } else if (map.value().mtp_layers != 1U) {
+    mtp_state.disabled_reason = "only_single_mtp_layer_supported";
+  } else if (sampling.value().do_sample) {
+    mtp_state.disabled_reason = "sampling_not_supported_in_first_mtp_pass";
+  } else if (request.mtp_draft_tokens == 0) {
+    mtp_state.disabled_reason = "draft_tokens_zero";
+  } else if (request.cache_prompt) {
+    mtp_state.disabled_reason = "prompt_cache_not_supported_with_mtp_yet";
+  } else {
+    mtp_state.enabled = true;
+  }
+  profiler.set_metadata("qwen35_mtp_available",
+                        std::string{mtp_state.available ? "1" : "0"});
+  profiler.set_metadata("qwen35_mtp_enabled",
+                        std::string{mtp_state.enabled ? "1" : "0"});
+  profiler.set_metadata("qwen35_mtp_draft_tokens", mtp_state.draft_tokens);
+  if (!mtp_state.enabled && !mtp_state.disabled_reason.empty()) {
+    profiler.set_metadata("qwen35_mtp_disabled_reason", mtp_state.disabled_reason);
+  }
   profiler.set_metadata("prefill_chunk_tokens", plan.value().prefill.chunk_tokens);
   profiler.set_metadata("prefill_chunks", plan.value().prefill.chunk_count);
   profiler.set_metadata("qwen35_kv_cache_f16",
@@ -4435,12 +4871,15 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     request.cache_prompt && cache_block_tokens > 0 &&
     cache_capacity_blocks > 0 &&
     cache_block_tokens == plan.value().prefill.chunk_tokens &&
-    prefill_commit_mode == Qwen35PrefillCommitMode::chunk;
+    prefill_commit_mode == Qwen35PrefillCommitMode::chunk &&
+    !mtp_state.enabled;
   if (request.cache_prompt && prefill_commit_mode != Qwen35PrefillCommitMode::chunk) {
     profiler.set_metadata("prompt_cache_disabled_reason", "prefill_commit_mode");
   } else if (request.cache_prompt &&
              cache_block_tokens != plan.value().prefill.chunk_tokens) {
     profiler.set_metadata("prompt_cache_disabled_reason", "block_chunk_mismatch");
+  } else if (request.cache_prompt && mtp_state.enabled) {
+    profiler.set_metadata("prompt_cache_disabled_reason", "mtp_enabled");
   }
 
   Qwen35PrefixCacheLookup prompt_cache_lookup;
@@ -4496,6 +4935,26 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!cache.is_ok()) {
     return cache.status();
   }
+  if (mtp_state.enabled) {
+    auto mtp_cache = allocate_qwen35_mtp_metal_cache(
+      context.value(), plan.value(), map.value().mtp_layers);
+    if (!mtp_cache.is_ok()) {
+      return mtp_cache.status();
+    }
+    mtp_state.cache = std::move(mtp_cache.value());
+    auto pending_h = make_qwen35_f32_buffer(context.value(), plan.value().hidden_size,
+                                            "Qwen3.5 MTP pending h");
+    if (!pending_h.is_ok()) {
+      return pending_h.status();
+    }
+    auto zero_status = zero_allocated_buffer(
+      context.value(), pending_h.value(), plan.value().hidden_size * sizeof(float),
+      "Qwen3.5 MTP pending h");
+    if (!zero_status.is_ok()) {
+      return zero_status;
+    }
+    mtp_state.pending_h = std::move(pending_h.value());
+  }
   if (prompt_cache_enabled && !prompt_cache_lookup.block_hashes.empty()) {
     auto restore_status = qwen35_host_prefix_cache().restore(
       context.value(), cache.value(), plan.value(),
@@ -4515,8 +4974,10 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   }
   const auto* output_norm = find_metal_weight(weights.value(), map.value().output_norm.name);
   const auto* output_weight = find_metal_weight(weights.value(), map.value().output.name);
-  if (output_norm == nullptr || output_weight == nullptr) {
-    return Status::invalid_argument("Qwen3.5 output norm/head weights are missing");
+  const auto* token_embedding =
+    find_metal_weight(weights.value(), map.value().token_embedding.name);
+  if (output_norm == nullptr || output_weight == nullptr || token_embedding == nullptr) {
+    return Status::invalid_argument("Qwen3.5 token/output weights are missing");
   }
   if (map.value().layers.empty()) {
     return Status::invalid_argument("Qwen3.5 weight map has no layers");
@@ -4710,6 +5171,43 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
         full_attention_layers_executed != plan.value().cache.full_attention_layers) {
       return Status::internal_error("Qwen3.5 Metal chunk layer execution count mismatch");
     }
+    if (mtp_state.enabled) {
+      auto h_nextn_rows = run_qwen35_output_norm(
+        context.value(), current_hidden, chunk_tokens, plan.value().hidden_size,
+        static_cast<float>(bundle.value().model.rms_norm_eps), *output_norm,
+        debug_dump, "prefill.mtp_process");
+      if (!h_nextn_rows.is_ok()) {
+        return h_nextn_rows.status();
+      }
+      auto shifted_h = make_qwen35_mtp_shifted_h_rows(
+        context.value(), mtp_state.pending_h, h_nextn_rows.value(),
+        chunk_tokens, plan.value().hidden_size);
+      if (!shifted_h.is_ok()) {
+        return shifted_h.status();
+      }
+      std::vector<std::int64_t> chunk_token_ids(
+        prompt_tokens.value().begin() + static_cast<std::ptrdiff_t>(chunk_start),
+        prompt_tokens.value().begin() +
+          static_cast<std::ptrdiff_t>(chunk_start + chunk_tokens));
+      const auto& mtp_layer = map.value().layers[plan.value().main_layers];
+      auto mtp_process = run_qwen35_mtp_tokens(
+        context.value(), weights.value(), mtp_state.cache, mtp_layer,
+        *token_embedding, *output_norm, *output_weight, mrope_sections.value(),
+        chunk_token_ids, shifted_h.value(), chunk_start, plan.value(),
+        static_cast<float>(bundle.value().model.rope_theta),
+        static_cast<float>(bundle.value().model.rms_norm_eps),
+        false, false, &profiler);
+      if (!mtp_process.is_ok()) {
+        return mtp_process.status();
+      }
+      status = context.value().copy_f32_region(
+        h_nextn_rows.value(), mtp_state.pending_h,
+        (chunk_tokens - 1U) * plan.value().hidden_size, 0,
+        plan.value().hidden_size);
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
     if (prefill_commit_mode == Qwen35PrefillCommitMode::chunk) {
       if (prompt_cache_enabled && chunk_tokens == cache_block_tokens &&
           chunk_start % cache_block_tokens == 0) {
@@ -4802,98 +5300,309 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   std::string finish_reason = "length";
   std::size_t next_decode_position = prompt_token_count;
 
-  for (std::size_t step = 0; step < request.max_new_tokens; ++step) {
-    if (step > 0) {
-      auto decode_span = profiler.scoped(
-        "request.decode", {ProfileField{"step", std::to_string(step)}});
-      MpsGraphGuard decode_guard(context.value());
-      status = decode_guard.begin();
-      if (!status.is_ok()) {
-        return status;
-      }
-      auto decoded_hidden = run_qwen35_decode_token(
-        context.value(), weights.value(), cache.value(), map.value(),
-        bundle.value().model, plan.value(), mrope_sections.value(),
-        generated_tokens.back(), next_decode_position);
-      if (!decoded_hidden.is_ok()) {
-        return decoded_hidden.status();
-      }
-      ++next_decode_position;
-      auto logits_result = run_qwen35_output_logits(
-        context.value(), decoded_hidden.value(), plan.value().hidden_size,
-        static_cast<float>(bundle.value().model.rms_norm_eps), *output_norm,
-        *output_weight, debug_dump,
-        std::string{"decode."} + std::to_string(step), !sampling.value().do_sample);
-      if (!logits_result.is_ok()) {
-        return logits_result.status();
-      }
-      logits_output = std::move(logits_result.value());
-      {
-        auto commit_span = profiler.scoped(
-          "qwen35.decode.commit",
-          {ProfileField{"step", std::to_string(step)}});
-        status = decode_guard.commit();
-      }
-      if (!status.is_ok()) {
-        return status;
-      }
+  auto sample_logits_row =
+    [&](const Qwen35LogitsOutput& output, std::size_t row,
+        bool update_top_entries) -> Result<std::int64_t> {
+    if (row >= output.rows) {
+      return Status::invalid_argument("Qwen3.5 logits row is out of range");
     }
 
-    std::int64_t next_token = 0;
     std::vector<float> logits_host;
     bool logits_host_loaded = false;
-    if (sampling.value().do_sample) {
-      auto logits_host_result = read_qwen35_logits_host(
-        context.value(), logits_output.logits, logits_output.logits_values);
+    std::int64_t sampled_token = 0;
+    if (!sampling.value().do_sample && row == 0 &&
+        output.argmax_output.valid()) {
+      auto argmax_token = read_qwen35_argmax_token(
+        context.value(), output.argmax_output);
+      if (!argmax_token.is_ok()) {
+        return argmax_token.status();
+      }
+      sampled_token = argmax_token.value();
+    } else {
+      Result<std::vector<float>> logits_host_result{
+        std::vector<float>{}};
+      if (output.rows == 1) {
+        logits_host_result = read_qwen35_logits_host(
+          context.value(), output.logits, output.logits_values);
+      } else {
+        logits_host_result = read_qwen35_logits_row_host(
+          context.value(), output.logits, row, output.logits_values);
+      }
       if (!logits_host_result.is_ok()) {
         return logits_host_result.status();
       }
       logits_host = std::move(logits_host_result.value());
       logits_host_loaded = true;
-      auto sampled_token = sample_qwen35_next_token(logits_host, sampling_rng,
-                                                    sampling.value());
-      if (!sampled_token.is_ok()) {
-        return sampled_token.status();
+      auto row_sampling = sampling.value();
+      if (!row_sampling.do_sample) {
+        row_sampling.temperature = 0.0;
       }
-      next_token = sampled_token.value();
-    } else {
-      auto argmax_token = read_qwen35_argmax_token(
-        context.value(), logits_output.argmax_output);
-      if (!argmax_token.is_ok()) {
-        return argmax_token.status();
+      auto token = sample_qwen35_next_token(logits_host, sampling_rng,
+                                            row_sampling);
+      if (!token.is_ok()) {
+        return token.status();
       }
-      next_token = argmax_token.value();
+      sampled_token = token.value();
     }
-    if (request.logits_top_k > 0) {
+
+    if (update_top_entries && request.logits_top_k > 0) {
       Result<std::vector<CpuGenerationResult::LogitTopEntry>> top_entries{
         std::vector<CpuGenerationResult::LogitTopEntry>{}};
       if (logits_host_loaded) {
         top_entries = make_qwen35_logits_top(tokenizer.value(), logits_host,
                                              request.logits_top_k);
-      } else {
+      } else if (output.rows == 1) {
         top_entries = read_qwen35_logits_top(
-          context.value(), tokenizer.value(), logits_output.logits,
-          logits_output.logits_values, request.logits_top_k);
+          context.value(), tokenizer.value(), output.logits,
+          output.logits_values, request.logits_top_k);
+      } else {
+        auto row_logits = read_qwen35_logits_row_host(
+          context.value(), output.logits, row, output.logits_values);
+        if (!row_logits.is_ok()) {
+          return row_logits.status();
+        }
+        top_entries = make_qwen35_logits_top(tokenizer.value(),
+                                             row_logits.value(),
+                                             request.logits_top_k);
       }
       if (!top_entries.is_ok()) {
         return top_entries.status();
       }
       logits_top = std::move(top_entries.value());
     }
-    if (is_qwen35_eos_token(next_token, bundle.value().model,
-                            bundle.value().generation, tokenizer.value())) {
-      finish_reason = "stop";
-      break;
-    }
+    return sampled_token;
+  };
 
-    generated_tokens.push_back(next_token);
+  auto emit_generated_token = [&](std::int64_t token) -> Status {
+    generated_tokens.push_back(token);
     if (request.stream_token) {
       auto token_text = gguf_decode_token_text(tokenizer.value(),
-                                               {next_token}, true);
+                                               {token}, true);
       if (!token_text.is_ok()) {
         return token_text.status();
       }
       request.stream_token(token_text.value());
+    }
+    return Status::ok();
+  };
+
+  auto update_mtp_pending_h = [&](const mps::MpsBuffer& h_nextn) -> Status {
+    if (!mtp_state.enabled) {
+      return Status::ok();
+    }
+    return context.value().copy_f32_region(h_nextn, mtp_state.pending_h, 0, 0,
+                                           plan.value().hidden_size);
+  };
+
+  auto decode_target_token_logits =
+    [&](std::int64_t token, std::size_t position,
+        std::string debug_prefix,
+        std::size_t step) -> Result<Qwen35LogitsOutput> {
+    auto decode_span = profiler.scoped(
+      "request.decode", {ProfileField{"step", std::to_string(step)}});
+    MpsGraphGuard decode_guard(context.value());
+    auto decode_status = decode_guard.begin();
+    if (!decode_status.is_ok()) {
+      return decode_status;
+    }
+    auto decoded_hidden = run_qwen35_decode_token(
+      context.value(), weights.value(), cache.value(), map.value(),
+      bundle.value().model, plan.value(), mrope_sections.value(),
+      token, position);
+    if (!decoded_hidden.is_ok()) {
+      return decoded_hidden.status();
+    }
+    auto logits_result = run_qwen35_output_logits(
+      context.value(), decoded_hidden.value(), plan.value().hidden_size,
+      static_cast<float>(bundle.value().model.rms_norm_eps), *output_norm,
+      *output_weight, debug_dump, debug_prefix, !sampling.value().do_sample);
+    if (!logits_result.is_ok()) {
+      return logits_result.status();
+    }
+    {
+      auto commit_span = profiler.scoped(
+        "qwen35.decode.commit",
+        {ProfileField{"step", std::to_string(step)}});
+      decode_status = decode_guard.commit();
+    }
+    if (!decode_status.is_ok()) {
+      return decode_status;
+    }
+    return std::move(logits_result.value());
+  };
+
+  auto draft_mtp_tokens =
+    [&](std::int64_t first_token, std::size_t start_position,
+        std::size_t budget) -> Result<std::vector<std::int64_t>> {
+    std::vector<std::int64_t> drafted_tokens;
+    if (!mtp_state.enabled || budget == 0) {
+      return drafted_tokens;
+    }
+    drafted_tokens.reserve(budget);
+    const auto& mtp_layer = map.value().layers[plan.value().main_layers];
+    std::int64_t token = first_token;
+    const mps::MpsBuffer* h_input = &mtp_state.pending_h;
+    mps::MpsBuffer draft_h;
+    for (std::size_t index = 0; index < budget; ++index) {
+      auto draft_span = profiler.scoped(
+        "qwen35.mtp.draft",
+        {ProfileField{"index", std::to_string(index)},
+         ProfileField{"position", std::to_string(start_position + index)}});
+      MpsGraphGuard decode_guard(context.value());
+      auto draft_status = decode_guard.begin();
+      if (!draft_status.is_ok()) {
+        return draft_status;
+      }
+      const std::vector<std::int64_t> token_ids{token};
+      auto mtp_out = run_qwen35_mtp_tokens(
+        context.value(), weights.value(), mtp_state.cache, mtp_layer,
+        *token_embedding, *output_norm, *output_weight, mrope_sections.value(),
+        token_ids, *h_input, start_position + index, plan.value(),
+        static_cast<float>(bundle.value().model.rope_theta),
+        static_cast<float>(bundle.value().model.rms_norm_eps),
+        true, true, &profiler);
+      if (!mtp_out.is_ok()) {
+        return mtp_out.status();
+      }
+      {
+        auto commit_span = profiler.scoped(
+          "qwen35.mtp.draft.commit",
+          {ProfileField{"index", std::to_string(index)}});
+        draft_status = decode_guard.commit();
+      }
+      if (!draft_status.is_ok()) {
+        return draft_status;
+      }
+      auto draft_token = read_qwen35_argmax_token(
+        context.value(), mtp_out.value().argmax_output);
+      if (!draft_token.is_ok()) {
+        return draft_token.status();
+      }
+      drafted_tokens.push_back(draft_token.value());
+      ++mtp_state.drafted_tokens;
+      token = draft_token.value();
+      draft_h = std::move(mtp_out.value().h_nextn);
+      h_input = &draft_h;
+    }
+    return drafted_tokens;
+  };
+
+  if (mtp_state.enabled) {
+    std::size_t decode_step = 0;
+    bool stop_generation = false;
+    while (generated_tokens.size() < request.max_new_tokens && !stop_generation) {
+      auto sampled = sample_logits_row(logits_output, 0, true);
+      if (!sampled.is_ok()) {
+        return sampled.status();
+      }
+      const auto next_token = sampled.value();
+      if (is_qwen35_eos_token(next_token, bundle.value().model,
+                              bundle.value().generation, tokenizer.value())) {
+        finish_reason = "stop";
+        break;
+      }
+      status = emit_generated_token(next_token);
+      if (!status.is_ok()) {
+        return status;
+      }
+      if (generated_tokens.size() >= request.max_new_tokens) {
+        break;
+      }
+
+      const auto verified_position = next_decode_position;
+      const auto draft_budget = std::min(
+        mtp_state.draft_tokens,
+        request.max_new_tokens - generated_tokens.size());
+      auto drafted = draft_mtp_tokens(next_token, verified_position, draft_budget);
+      if (!drafted.is_ok()) {
+        return drafted.status();
+      }
+
+      auto target_logits = decode_target_token_logits(
+        next_token, verified_position,
+        std::string{"decode.mtp."} + std::to_string(decode_step),
+        decode_step);
+      if (!target_logits.is_ok()) {
+        return target_logits.status();
+      }
+      ++next_decode_position;
+      ++decode_step;
+      status = update_mtp_pending_h(target_logits.value().h_nextn);
+      if (!status.is_ok()) {
+        return status;
+      }
+      logits_output = std::move(target_logits.value());
+
+      for (const auto draft_token : drafted.value()) {
+        if (generated_tokens.size() >= request.max_new_tokens) {
+          break;
+        }
+        auto target_next = sample_logits_row(logits_output, 0, true);
+        if (!target_next.is_ok()) {
+          return target_next.status();
+        }
+        ++mtp_state.verify_steps;
+        if (is_qwen35_eos_token(target_next.value(), bundle.value().model,
+                                bundle.value().generation, tokenizer.value())) {
+          finish_reason = "stop";
+          stop_generation = true;
+          break;
+        }
+        if (target_next.value() != draft_token) {
+          break;
+        }
+        status = emit_generated_token(draft_token);
+        if (!status.is_ok()) {
+          return status;
+        }
+        ++mtp_state.accepted_tokens;
+        if (generated_tokens.size() >= request.max_new_tokens) {
+          break;
+        }
+        auto accepted_logits = decode_target_token_logits(
+          draft_token, next_decode_position,
+          std::string{"decode.mtp.accept."} + std::to_string(decode_step),
+          decode_step);
+        if (!accepted_logits.is_ok()) {
+          return accepted_logits.status();
+        }
+        ++next_decode_position;
+        ++decode_step;
+        status = update_mtp_pending_h(accepted_logits.value().h_nextn);
+        if (!status.is_ok()) {
+          return status;
+        }
+        logits_output = std::move(accepted_logits.value());
+      }
+    }
+  } else {
+    for (std::size_t step = 0; step < request.max_new_tokens; ++step) {
+      if (step > 0) {
+        auto logits_result = decode_target_token_logits(
+          generated_tokens.back(), next_decode_position,
+          std::string{"decode."} + std::to_string(step), step);
+        if (!logits_result.is_ok()) {
+          return logits_result.status();
+        }
+        ++next_decode_position;
+        logits_output = std::move(logits_result.value());
+      }
+
+      auto sampled = sample_logits_row(logits_output, 0, true);
+      if (!sampled.is_ok()) {
+        return sampled.status();
+      }
+      const auto next_token = sampled.value();
+      if (is_qwen35_eos_token(next_token, bundle.value().model,
+                              bundle.value().generation, tokenizer.value())) {
+        finish_reason = "stop";
+        break;
+      }
+
+      status = emit_generated_token(next_token);
+      if (!status.is_ok()) {
+        return status;
+      }
     }
   }
 
@@ -4920,6 +5629,17 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   result.kv_cache.key_bytes = cache.value().key_cache_bytes;
   result.kv_cache.value_bytes = cache.value().value_cache_bytes;
   result.kv_cache.total_bytes = cache.value().key_cache_bytes + cache.value().value_cache_bytes;
+  result.mtp.available = mtp_state.available;
+  result.mtp.enabled = mtp_state.enabled;
+  result.mtp.layers = map.value().mtp_layers;
+  result.mtp.draft_tokens = mtp_state.draft_tokens;
+  result.mtp.drafted_tokens = mtp_state.drafted_tokens;
+  result.mtp.accepted_tokens = mtp_state.accepted_tokens;
+  result.mtp.verify_steps = mtp_state.verify_steps;
+  result.mtp.disabled_reason = mtp_state.disabled_reason;
+  profiler.set_metadata("qwen35_mtp_drafted_tokens", mtp_state.drafted_tokens);
+  profiler.set_metadata("qwen35_mtp_accepted_tokens", mtp_state.accepted_tokens);
+  profiler.set_metadata("qwen35_mtp_verify_steps", mtp_state.verify_steps);
   if (prompt_cache_enabled) {
     const auto cache_stats = qwen35_host_prefix_cache().stats();
     result.prompt_cache.enabled = true;

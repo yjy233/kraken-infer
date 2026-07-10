@@ -144,6 +144,18 @@ std::string format_cpu_generation_result(const CpuGenerationResult& result) {
                << " text=\"" << escape_debug_text(entry.text) << "\"\n";
       }
     }
+    if (result.mtp.available) {
+      output << "mtp: " << (result.mtp.enabled ? "enabled" : "disabled")
+             << ", layers=" << result.mtp.layers
+             << ", draft_tokens=" << result.mtp.draft_tokens
+             << ", drafted=" << result.mtp.drafted_tokens
+             << ", accepted=" << result.mtp.accepted_tokens
+             << ", verify_steps=" << result.mtp.verify_steps;
+      if (!result.mtp.enabled && !result.mtp.disabled_reason.empty()) {
+        output << ", reason=" << result.mtp.disabled_reason;
+      }
+      output << '\n';
+    }
     return output.str();
   }
 

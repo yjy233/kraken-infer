@@ -514,6 +514,8 @@ struct ChatRequest {
   bool stream{false};
   bool stream_include_usage{false};
   bool enable_thinking{false};
+  bool enable_mtp{true};
+  std::size_t mtp_draft_tokens{3};
   bool cache_prompt{false};
   std::size_t cache_reuse_min_tokens{0};
   std::size_t cache_block_tokens{0};
@@ -533,6 +535,8 @@ struct CompletionRequest {
   bool stream{false};
   bool stream_include_usage{false};
   bool enable_thinking{false};
+  bool enable_mtp{true};
+  std::size_t mtp_draft_tokens{3};
   bool cache_prompt{false};
   std::size_t cache_reuse_min_tokens{0};
   std::size_t cache_block_tokens{0};
@@ -608,6 +612,8 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
                                      std::size_t& prefill_chunk_tokens,
                                      bool& stream, bool& stream_include_usage,
                                      bool& enable_thinking,
+                                     bool& enable_mtp,
+                                     std::size_t& mtp_draft_tokens,
                                      bool& cache_prompt,
                                      std::size_t& cache_reuse_min_tokens,
                                      std::size_t& cache_block_tokens,
@@ -644,6 +650,13 @@ void parse_common_generation_options(const JsonValue& root, const OpenAIGatewayC
     enable_thinking =
       required_bool_value(object_get(*chat_template_kwargs, "enable_thinking"),
                           "chat_template_kwargs.enable_thinking", enable_thinking);
+  }
+  enable_mtp = required_bool_value(object_get(root, "mtp"), "mtp",
+                                   config.enable_mtp);
+  mtp_draft_tokens = config.mtp_draft_tokens;
+  if (const auto parsed = size_value(object_get(root, "mtp_draft_tokens"));
+      parsed.has_value()) {
+    mtp_draft_tokens = *parsed;
   }
   compute_device = config.compute_device;
   const auto device = string_value(object_get(root, "device"));
@@ -754,7 +767,8 @@ ChatRequest parse_chat_request(std::string_view body, const OpenAIGatewayConfig&
   parse_common_generation_options(root, config, request.max_tokens,
                                   request.prefill_chunk_tokens, request.stream,
                                   request.stream_include_usage,
-                                  request.enable_thinking, request.cache_prompt,
+                                  request.enable_thinking, request.enable_mtp,
+                                  request.mtp_draft_tokens, request.cache_prompt,
                                   request.cache_reuse_min_tokens,
                                   request.cache_block_tokens,
                                   request.cache_capacity_blocks,
@@ -775,7 +789,8 @@ CompletionRequest parse_completion_request(std::string_view body,
   parse_common_generation_options(root, config, request.max_tokens,
                                   request.prefill_chunk_tokens, request.stream,
                                   request.stream_include_usage,
-                                  request.enable_thinking, request.cache_prompt,
+                                  request.enable_thinking, request.enable_mtp,
+                                  request.mtp_draft_tokens, request.cache_prompt,
                                   request.cache_reuse_min_tokens,
                                   request.cache_block_tokens,
                                   request.cache_capacity_blocks,
@@ -847,6 +862,24 @@ std::vector<std::pair<std::string, std::string>> request_headers(
                        std::to_string(cache.miss_tokens)});
     headers.push_back({"X-Kraken-Prompt-Cache-Committed-Tokens",
                        std::to_string(cache.committed_tokens)});
+  }
+  return headers;
+}
+
+std::vector<std::pair<std::string, std::string>> request_headers(
+  std::string_view request_id, const CpuPromptCacheReport& cache,
+  const CpuMtpReport& mtp) {
+  auto headers = request_headers(request_id, cache);
+  if (mtp.available) {
+    headers.push_back({"X-Kraken-MTP-Enabled", mtp.enabled ? "1" : "0"});
+    headers.push_back({"X-Kraken-MTP-Layers", std::to_string(mtp.layers)});
+    headers.push_back({"X-Kraken-MTP-Draft-Tokens", std::to_string(mtp.draft_tokens)});
+    headers.push_back({"X-Kraken-MTP-Drafted-Tokens", std::to_string(mtp.drafted_tokens)});
+    headers.push_back({"X-Kraken-MTP-Accepted-Tokens", std::to_string(mtp.accepted_tokens)});
+    headers.push_back({"X-Kraken-MTP-Verify-Steps", std::to_string(mtp.verify_steps)});
+    if (!mtp.enabled && !mtp.disabled_reason.empty()) {
+      headers.push_back({"X-Kraken-MTP-Disabled-Reason", mtp.disabled_reason});
+    }
   }
   return headers;
 }
@@ -1171,6 +1204,7 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"properties\":{\"include_usage\":{\"type\":\"boolean\"}},"
        "\"additionalProperties\":true},\"enable_thinking\":{\"type\":\"boolean\"},"
        "\"chat_template_kwargs\":{\"type\":\"object\"},"
+       "\"mtp\":{\"type\":\"boolean\"},\"mtp_draft_tokens\":{\"type\":\"integer\"},"
        "\"cache_prompt\":{\"type\":\"boolean\"},\"n_cache_reuse\":{\"type\":\"integer\"},"
        "\"cache_block_tokens\":{\"type\":\"integer\"},\"cache_capacity_blocks\":{\"type\":\"integer\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
@@ -1196,6 +1230,7 @@ std::string openapi_body(const OpenAIGatewayConfig& config) {
        "\"chat_template_kwargs\":{\"type\":\"object\",\"properties\":{\"enable_thinking\":"
        "{\"type\":\"boolean\"}},\"additionalProperties\":true},"
        "\"reasoning_format\":{\"type\":\"string\",\"enum\":[\"none\",\"auto\",\"deepseek\"]},"
+       "\"mtp\":{\"type\":\"boolean\"},\"mtp_draft_tokens\":{\"type\":\"integer\"},"
        "\"cache_prompt\":{\"type\":\"boolean\"},\"n_cache_reuse\":{\"type\":\"integer\"},"
        "\"cache_block_tokens\":{\"type\":\"integer\"},\"cache_capacity_blocks\":{\"type\":\"integer\"},"
        "\"seed\":{\"type\":\"integer\"},\"device\":{\"type\":\"string\",\"enum\":[\"cpu\","
@@ -1500,6 +1535,8 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
   generation.max_new_tokens = request.max_tokens;
   generation.prefill_chunk_tokens = request.prefill_chunk_tokens;
   generation.enable_thinking = request.enable_thinking;
+  generation.enable_mtp = request.enable_mtp;
+  generation.mtp_draft_tokens = request.mtp_draft_tokens;
   generation.cache_prompt = request.cache_prompt;
   generation.cache_reuse_min_tokens = request.cache_reuse_min_tokens;
   generation.cache_block_tokens = request.cache_block_tokens;
@@ -1525,7 +1562,8 @@ void send_completion_response(int fd, const OpenAIGatewayConfig& config,
                                        result.value().prompt_tokens,
                                        result.value().generated_tokens,
                                        result.value().prompt_cache.hit_tokens),
-                       request_headers(request_id, result.value().prompt_cache));
+                       request_headers(request_id, result.value().prompt_cache,
+                                       result.value().mtp));
     return;
   }
 
@@ -1574,6 +1612,8 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
   generation.max_new_tokens = request.max_tokens;
   generation.prefill_chunk_tokens = request.prefill_chunk_tokens;
   generation.enable_thinking = request.enable_thinking;
+  generation.enable_mtp = request.enable_mtp;
+  generation.mtp_draft_tokens = request.mtp_draft_tokens;
   generation.cache_prompt = request.cache_prompt;
   generation.cache_reuse_min_tokens = request.cache_reuse_min_tokens;
   generation.cache_block_tokens = request.cache_block_tokens;
@@ -1602,7 +1642,8 @@ void send_chat_response(int fd, const OpenAIGatewayConfig& config, const ChatReq
                                             result.value().prompt_tokens,
                                             result.value().generated_tokens,
                                             result.value().prompt_cache.hit_tokens),
-                       request_headers(request_id, result.value().prompt_cache));
+                       request_headers(request_id, result.value().prompt_cache,
+                                       result.value().mtp));
     return;
   }
 
