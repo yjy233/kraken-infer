@@ -70,7 +70,8 @@ Legacy model:
 - chunked prefill，默认 `prefill_chunk_tokens = 1024`。
 - greedy multi-token decode。
 - Qwen3.5 MTP/NextN speculative decode，支持 `nextn_predict_layers=1` 的
-  MTP GGUF，在 greedy 路径返回 drafted/accepted/verify 统计。
+  MTP GGUF，在 greedy 路径返回 drafted/accepted/verify、`mtp_p_min`
+  置信门控和按 draft 位置统计。
 - 基础 `top_k` / `top_p` / `temperature` / `seed` host-side sampling。
 - logits top-k readback、debug dump、KV cache stats 和 profile artifacts。
 
@@ -106,8 +107,8 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
   `reasoning_content`。
 - 非标准但实用的 per-request `device`。
 - `prefill_chunk_tokens` request override。
-- `mtp` / `mtp_draft_tokens` request override；非 streaming 响应会返回
-  `X-Kraken-MTP-*` headers。
+- `mtp` / `mtp_draft_tokens` / `mtp_p_min` request override；非 streaming
+  响应会返回 `X-Kraken-MTP-*` headers。
 - `cache_prompt` / `n_cache_reuse` exact-prefix prompt cache。
 - 基础 tools/tool_choice 协议兼容，返回 OpenAI-style `tool_calls`，但不执行外部工具。
 - 浏览器对话页 `/chat_page`，支持 max new tokens、streaming 和 thinking 开关。
@@ -206,6 +207,7 @@ KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
   --prefill-chunk-tokens 32 \
   --mtp \
   --mtp-draft-tokens 3 \
+  --mtp-p-min 0.20 \
   --no-cache-prompt \
   --profile summary
 ```
@@ -240,6 +242,7 @@ curl http://127.0.0.1:18080/v1/chat/completions \
     "max_completion_tokens": 128,
     "mtp": true,
     "mtp_draft_tokens": 3,
+    "mtp_p_min": 0.20,
     "chat_template_kwargs": {"enable_thinking": false},
     "device": "mps"
   }'
@@ -272,6 +275,7 @@ curl http://127.0.0.1:18080/v1/completions \
     "max_tokens": 32,
     "mtp": true,
     "mtp_draft_tokens": 3,
+    "mtp_p_min": 0.20,
     "device": "mps"
   }'
 ```
@@ -442,7 +446,7 @@ make qwen35-vl-test
 Qwen3.5 MTP gateway smoke test：
 
 ```bash
-python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
+python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --p-min 0.20
 ```
 
 ## Project Layout

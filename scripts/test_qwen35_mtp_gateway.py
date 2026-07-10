@@ -68,6 +68,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18184)
     parser.add_argument("--max-tokens", type=int, default=8)
     parser.add_argument("--draft-tokens", type=int, default=3)
+    parser.add_argument("--p-min", type=float, default=0.0)
     parser.add_argument(
         "--prompt",
         default="Write one short sentence about Metal acceleration.",
@@ -100,6 +101,8 @@ def main() -> int:
             "--mtp",
             "--mtp-draft-tokens",
             str(args.draft_tokens),
+            "--mtp-p-min",
+            str(args.p_min),
             "--no-cache-prompt",
         ],
         stdout=subprocess.PIPE,
@@ -116,6 +119,7 @@ def main() -> int:
             "max_tokens": args.max_tokens,
             "mtp": True,
             "mtp_draft_tokens": args.draft_tokens,
+            "mtp_p_min": args.p_min,
         }
         response, headers = post_json(
             f"{base_url}/v1/completions",
@@ -130,13 +134,14 @@ def main() -> int:
         layers = int_header(headers, "X-Kraken-MTP-Layers")
         drafted = int_header(headers, "X-Kraken-MTP-Drafted-Tokens")
         verify_steps = int_header(headers, "X-Kraken-MTP-Verify-Steps")
+        confidence_stops = int_header(headers, "X-Kraken-MTP-Confidence-Stops")
         if enabled != 1:
             raise RuntimeError(f"MTP was not enabled; headers={headers}")
         if layers < 1:
             raise RuntimeError(f"MTP layer count was not reported; headers={headers}")
-        if drafted < 1:
-            raise RuntimeError(f"MTP did not draft any tokens; headers={headers}")
-        if verify_steps < 1:
+        if drafted < 1 and confidence_stops < 1:
+            raise RuntimeError(f"MTP did not draft or confidence-stop any tokens; headers={headers}")
+        if drafted > 0 and verify_steps < 1:
             raise RuntimeError(f"MTP verification did not run; headers={headers}")
 
         print(content)
@@ -146,9 +151,17 @@ def main() -> int:
                     "mtp_enabled": enabled,
                     "mtp_layers": layers,
                     "draft_tokens": int_header(headers, "X-Kraken-MTP-Draft-Tokens"),
+                    "p_min": headers.get("x-kraken-mtp-p-min"),
                     "drafted_tokens": drafted,
                     "accepted_tokens": int_header(headers, "X-Kraken-MTP-Accepted-Tokens"),
                     "verify_steps": verify_steps,
+                    "confidence_stops": confidence_stops,
+                    "verified_by_position": headers.get(
+                        "x-kraken-mtp-verified-by-position", ""
+                    ),
+                    "accepted_by_position": headers.get(
+                        "x-kraken-mtp-accepted-by-position", ""
+                    ),
                     "usage": response.get("usage", {}),
                 },
                 ensure_ascii=False,

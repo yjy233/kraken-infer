@@ -27,6 +27,7 @@ struct OpenAIGatewayConfig {
   std::size_t cache_capacity_blocks{16};
   bool enable_mtp{true};
   std::size_t mtp_draft_tokens{3};
+  double mtp_p_min{0.0};
   bool mpsgraph_warmup{false};
   ObservabilityConfig observability;
 };

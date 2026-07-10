@@ -55,7 +55,7 @@ void print_usage(std::string_view program) {
                " [--device cpu|mps|mpsgraph]"
                " [--parse-special]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
-               " [--mtp|--no-mtp] [--mtp-draft-tokens N]"
+               " [--mtp|--no-mtp] [--mtp-draft-tokens N] [--mtp-p-min P]"
                " [--logits-top-k K]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
@@ -66,7 +66,7 @@ void print_usage(std::string_view program) {
                " [--device cpu|mps|mpsgraph]"
                " [--parse-special]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
-               " [--mtp|--no-mtp] [--mtp-draft-tokens N]"
+               " [--mtp|--no-mtp] [--mtp-draft-tokens N] [--mtp-p-min P]"
                " [--logits-top-k K]"
                " [--stream] [--dump-dir DIR] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
@@ -77,7 +77,7 @@ void print_usage(std::string_view program) {
                " [--mmproj PATH]"
                " [--device cpu|mps|mpsgraph]"
                " [--sample] [--temperature T] [--top-k K] [--top-p P] [--seed N]"
-               " [--mtp|--no-mtp] [--mtp-draft-tokens N]"
+               " [--mtp|--no-mtp] [--mtp-draft-tokens N] [--mtp-p-min P]"
                " [--stream] [--kv-cache-stats] [--verify-kv-cache]"
                " [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
                " [--profile-min-us N]\n\n";
@@ -87,7 +87,7 @@ void print_usage(std::string_view program) {
                " [--prefill-chunk-tokens N]"
                " [--mpsgraph-warmup]"
                " [--mmproj PATH] [--ctx-size N] [--parallel N] [--mtp|--no-mtp]"
-               " [--mtp-draft-tokens N]"
+               " [--mtp-draft-tokens N] [--mtp-p-min P]"
                " [--cache-prompt|--no-cache-prompt] [--cache-reuse N]"
                " [--cache-block-tokens N] [--cache-capacity-blocks N]\n\n";
   std::cout << "       [--profile off|summary|trace|flamegraph|all] [--profile-dir DIR]"
@@ -376,6 +376,7 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
                        bool verify_kv_cache, toyllm::Device compute_device,
                        const toyllm::CpuSamplingConfig& sampling, bool stream,
                        bool enable_mtp, std::size_t mtp_draft_tokens,
+                       double mtp_p_min,
                        const toyllm::ObservabilityConfig& observability) {
   if (model_path.empty() || prompt.empty()) {
     std::cerr << "generation requires --prompt and a model path.\n";
@@ -395,6 +396,7 @@ int run_cpu_generation(const std::string& model_path, const std::string& prompt,
   request.compute_device = compute_device;
   request.enable_mtp = enable_mtp;
   request.mtp_draft_tokens = mtp_draft_tokens;
+  request.mtp_p_min = mtp_p_min;
   request.sampling = sampling;
   request.observability = observability;
   if (stream) {
@@ -436,6 +438,7 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
              std::size_t prefill_chunk_tokens, toyllm::Device compute_device,
              const toyllm::CpuSamplingConfig& sampling, bool stream,
              bool enable_mtp, std::size_t mtp_draft_tokens,
+             double mtp_p_min,
              const toyllm::ObservabilityConfig& observability,
              const std::filesystem::path& mmproj_path) {
   std::cout << "kraken-infer chat\n";
@@ -476,6 +479,7 @@ int run_chat(const std::filesystem::path& model_path, std::size_t max_new_tokens
     request.compute_device = compute_device;
     request.enable_mtp = enable_mtp;
     request.mtp_draft_tokens = mtp_draft_tokens;
+    request.mtp_p_min = mtp_p_min;
     request.sampling = sampling;
     request.observability = observability;
     if (stream) {
@@ -920,6 +924,15 @@ int main(int argc, char** argv) {
         config.mtp_draft_tokens = *parsed;
         continue;
       }
+      if (arg_equals(argv[index], "--mtp-p-min") && index + 1 < argc) {
+        const auto parsed = parse_double_arg(argv[++index]);
+        if (!parsed.has_value() || !(*parsed >= 0.0 && *parsed <= 1.0)) {
+          std::cerr << "--mtp-p-min must be a number in [0, 1].\n";
+          return EXIT_FAILURE;
+        }
+        config.mtp_p_min = *parsed;
+        continue;
+      }
       if (arg_equals(argv[index], "--cache-prompt")) {
         config.cache_prompt = true;
         continue;
@@ -994,6 +1007,7 @@ int main(int argc, char** argv) {
     bool stream = false;
     bool enable_mtp = true;
     std::size_t mtp_draft_tokens = 3;
+    double mtp_p_min = 0.0;
     toyllm::Device compute_device = toyllm::Device::cpu();
     toyllm::CpuSamplingConfig sampling;
     toyllm::ObservabilityConfig observability;
@@ -1060,6 +1074,15 @@ int main(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         mtp_draft_tokens = *parsed;
+        continue;
+      }
+      if (arg_equals(argv[index], "--mtp-p-min") && index + 1 < argc) {
+        const auto parsed = parse_double_arg(argv[++index]);
+        if (!parsed.has_value() || !(*parsed >= 0.0 && *parsed <= 1.0)) {
+          std::cerr << "--mtp-p-min must be a number in [0, 1].\n";
+          return EXIT_FAILURE;
+        }
+        mtp_p_min = *parsed;
         continue;
       }
       if (arg_equals(argv[index], "--temperature") && index + 1 < argc) {
@@ -1160,7 +1183,7 @@ int main(int argc, char** argv) {
     return run_chat(model_path, max_new_tokens, enable_thinking, debug_dump_dir,
                     print_kv_cache_stats, verify_kv_cache, prefill_chunk_tokens,
                     compute_device, sampling, stream, enable_mtp, mtp_draft_tokens,
-                    observability, mmproj_path);
+                    mtp_p_min, observability, mmproj_path);
   }
 
   const bool explicit_generation = arg_equals(argv[1], "run") || arg_equals(argv[1], "infer");
@@ -1176,6 +1199,7 @@ int main(int argc, char** argv) {
   bool stream = false;
   bool enable_mtp = true;
   std::size_t mtp_draft_tokens = 3;
+  double mtp_p_min = 0.0;
   toyllm::Device compute_device = toyllm::Device::cpu();
   toyllm::CpuSamplingConfig sampling;
   toyllm::ObservabilityConfig observability;
@@ -1255,6 +1279,15 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
       }
       mtp_draft_tokens = *parsed;
+      continue;
+    }
+    if (arg_equals(argv[index], "--mtp-p-min") && index + 1 < argc) {
+      const auto parsed = parse_double_arg(argv[++index]);
+      if (!parsed.has_value() || !(*parsed >= 0.0 && *parsed <= 1.0)) {
+        std::cerr << "--mtp-p-min must be a number in [0, 1].\n";
+        return EXIT_FAILURE;
+      }
+      mtp_p_min = *parsed;
       continue;
     }
     if (arg_equals(argv[index], "--temperature") && index + 1 < argc) {
@@ -1355,6 +1388,6 @@ int main(int argc, char** argv) {
                             parse_special_prompt, logits_top_k, prefill_chunk_tokens,
                             debug_dump_dir, print_kv_cache_stats, verify_kv_cache,
                             compute_device, sampling, stream,
-                            enable_mtp, mtp_draft_tokens,
+                            enable_mtp, mtp_draft_tokens, mtp_p_min,
                             observability);
 }

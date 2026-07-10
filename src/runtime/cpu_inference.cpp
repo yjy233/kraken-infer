@@ -6,6 +6,7 @@
 #include "toyllm/runtime/qwen35_runtime.hpp"
 #include "cpu/qwen_cpu_model.hpp"
 
+#include <algorithm>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -56,6 +57,30 @@ CpuKvCacheReport to_public_report(const cpu::KvCacheStats& stats) {
     stats.value_bytes,
     stats.total_bytes,
   };
+}
+
+std::string format_mtp_position_counts(const CpuMtpReport& report) {
+  if (report.verified_by_position.empty() && report.accepted_by_position.empty()) {
+    return {};
+  }
+  const auto positions = std::max(report.verified_by_position.size(),
+                                  report.accepted_by_position.size());
+  std::ostringstream output;
+  output << '[';
+  for (std::size_t index = 0; index < positions; ++index) {
+    if (index > 0) {
+      output << ", ";
+    }
+    const auto accepted = index < report.accepted_by_position.size()
+                            ? report.accepted_by_position[index]
+                            : std::size_t{0};
+    const auto verified = index < report.verified_by_position.size()
+                            ? report.verified_by_position[index]
+                            : std::size_t{0};
+    output << accepted << '/' << verified;
+  }
+  output << ']';
+  return output.str();
 }
 
 }  // namespace
@@ -148,9 +173,15 @@ std::string format_cpu_generation_result(const CpuGenerationResult& result) {
       output << "mtp: " << (result.mtp.enabled ? "enabled" : "disabled")
              << ", layers=" << result.mtp.layers
              << ", draft_tokens=" << result.mtp.draft_tokens
+             << ", p_min=" << result.mtp.p_min
              << ", drafted=" << result.mtp.drafted_tokens
              << ", accepted=" << result.mtp.accepted_tokens
-             << ", verify_steps=" << result.mtp.verify_steps;
+             << ", verify_steps=" << result.mtp.verify_steps
+             << ", confidence_stops=" << result.mtp.confidence_stops;
+      const auto position_counts = format_mtp_position_counts(result.mtp);
+      if (!position_counts.empty()) {
+        output << ", accepted_by_position=" << position_counts;
+      }
       if (!result.mtp.enabled && !result.mtp.disabled_reason.empty()) {
         output << ", reason=" << result.mtp.disabled_reason;
       }

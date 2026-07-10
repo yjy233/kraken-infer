@@ -37,6 +37,7 @@ struct CpuGenerationRequest {
   bool enable_thinking{false};
   bool enable_mtp{true};
   std::size_t mtp_draft_tokens{3};
+  double mtp_p_min{0.0};
   bool cache_prompt{false};
   std::size_t cache_reuse_min_tokens{0};
   std::size_t cache_block_tokens{0};
@@ -80,9 +81,13 @@ struct CpuMtpReport {
   bool enabled{false};
   std::size_t layers{0};
   std::size_t draft_tokens{0};
+  double p_min{0.0};
   std::size_t drafted_tokens{0};
   std::size_t accepted_tokens{0};
   std::size_t verify_steps{0};
+  std::size_t confidence_stops{0};
+  std::vector<std::size_t> verified_by_position;
+  std::vector<std::size_t> accepted_by_position;
   std::string disabled_reason;
 };
 

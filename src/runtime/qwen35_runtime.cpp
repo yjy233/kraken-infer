@@ -161,9 +161,13 @@ struct Qwen35MtpRuntimeState {
   bool enabled{false};
   std::string disabled_reason;
   std::size_t draft_tokens{0};
+  double p_min{0.0};
   std::size_t drafted_tokens{0};
   std::size_t accepted_tokens{0};
   std::size_t verify_steps{0};
+  std::size_t confidence_stops{0};
+  std::vector<std::size_t> verified_by_position;
+  std::vector<std::size_t> accepted_by_position;
   Qwen35MetalCache cache;
   mps::MpsBuffer pending_h;
   mps::MpsBuffer recurrent_r_snapshot;
@@ -3488,6 +3492,84 @@ Result<std::vector<float>> read_qwen35_logits_row_host(
   return logits_host;
 }
 
+struct Qwen35GreedyToken {
+  std::int64_t token{0};
+  double probability{0.0};
+};
+
+Result<Qwen35GreedyToken> select_qwen35_greedy_token_with_probability(
+  const std::vector<float>& logits) {
+  if (logits.empty()) {
+    return Status::invalid_argument("Qwen3.5 greedy selection requires logits");
+  }
+
+  std::size_t best_index = 0;
+  double best_logit = -std::numeric_limits<double>::infinity();
+  bool found = false;
+  for (std::size_t index = 0; index < logits.size(); ++index) {
+    const auto logit = static_cast<double>(logits[index]);
+    if (std::isnan(logit)) {
+      continue;
+    }
+    if (!found || logit > best_logit) {
+      best_index = index;
+      best_logit = logit;
+      found = true;
+    }
+  }
+  if (!found) {
+    return Status::internal_error("Qwen3.5 greedy selection found no valid logits");
+  }
+
+  if (std::isinf(best_logit) && best_logit > 0.0) {
+    std::size_t positive_inf_count = 0;
+    for (const auto logit : logits) {
+      if (std::isinf(static_cast<double>(logit)) &&
+          static_cast<double>(logit) > 0.0) {
+        ++positive_inf_count;
+      }
+    }
+    if (positive_inf_count == 0) {
+      return Status::internal_error("Qwen3.5 greedy selection has invalid inf logits");
+    }
+    return Qwen35GreedyToken{
+      static_cast<std::int64_t>(best_index),
+      1.0 / static_cast<double>(positive_inf_count),
+    };
+  }
+
+  double total_weight = 0.0;
+  for (const auto logit_f32 : logits) {
+    const auto logit = static_cast<double>(logit_f32);
+    if (std::isnan(logit) || (std::isinf(logit) && logit > 0.0)) {
+      continue;
+    }
+    if (std::isinf(logit) && logit < 0.0) {
+      continue;
+    }
+    total_weight += std::exp(logit - best_logit);
+  }
+  if (!(total_weight > 0.0)) {
+    return Status::internal_error(
+      "Qwen3.5 greedy selection produced zero probability mass");
+  }
+  return Qwen35GreedyToken{
+    static_cast<std::int64_t>(best_index),
+    1.0 / total_weight,
+  };
+}
+
+std::string qwen35_join_size_values(const std::vector<std::size_t>& values) {
+  std::ostringstream output;
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    if (index > 0) {
+      output << ',';
+    }
+    output << values[index];
+  }
+  return output.str();
+}
+
 Result<std::vector<CpuGenerationResult::LogitTopEntry>> make_qwen35_logits_top(
   const GgufTokenizer& tokenizer, const std::vector<float>& logits_host,
   std::size_t requested_top_k) {
@@ -4869,6 +4951,9 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (request.max_new_tokens == 0) {
     return Status::invalid_argument("max_new_tokens must be greater than zero");
   }
+  if (!(request.mtp_p_min >= 0.0 && request.mtp_p_min <= 1.0)) {
+    return Status::invalid_argument("mtp_p_min must be in [0, 1]");
+  }
   std::optional<Qwen35MmprojMetadata> image_mmproj_metadata;
   if (chat_messages_have_image_content(request.messages)) {
     if (request.mmproj_path.empty()) {
@@ -4932,6 +5017,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     vl_result.value().mtp.enabled = false;
     vl_result.value().mtp.layers = mtp_layers;
     vl_result.value().mtp.draft_tokens = request.mtp_draft_tokens;
+    vl_result.value().mtp.p_min = request.mtp_p_min;
     vl_result.value().mtp.disabled_reason =
       mtp_layers > 0 ? "vl_bridge_uses_llama_mtmd_without_mtp"
                      : "model_has_no_mtp_layers";
@@ -5016,6 +5102,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   Qwen35MtpRuntimeState mtp_state;
   mtp_state.available = map.value().mtp_layers > 0;
   mtp_state.draft_tokens = request.mtp_draft_tokens;
+  mtp_state.p_min = request.mtp_p_min;
   if (!mtp_state.available) {
     mtp_state.disabled_reason = "model_has_no_mtp_layers";
   } else if (!request.enable_mtp) {
@@ -5030,12 +5117,15 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     mtp_state.disabled_reason = "prompt_cache_not_supported_with_mtp_yet";
   } else {
     mtp_state.enabled = true;
+    mtp_state.verified_by_position.assign(mtp_state.draft_tokens, 0);
+    mtp_state.accepted_by_position.assign(mtp_state.draft_tokens, 0);
   }
   profiler.set_metadata("qwen35_mtp_available",
                         std::string{mtp_state.available ? "1" : "0"});
   profiler.set_metadata("qwen35_mtp_enabled",
                         std::string{mtp_state.enabled ? "1" : "0"});
   profiler.set_metadata("qwen35_mtp_draft_tokens", mtp_state.draft_tokens);
+  profiler.set_metadata("qwen35_mtp_p_min", std::to_string(mtp_state.p_min));
   if (!mtp_state.enabled && !mtp_state.disabled_reason.empty()) {
     profiler.set_metadata("qwen35_mtp_disabled_reason", mtp_state.disabled_reason);
   }
@@ -5648,6 +5738,38 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       static_cast<std::size_t>(cache.value().recurrent_s_cache_bytes));
   };
 
+  auto read_mtp_draft_token =
+    [&](const mps::MpsBuffer& argmax_output,
+        const mps::MpsBuffer* logits,
+        std::size_t logits_values) -> Result<std::optional<std::int64_t>> {
+    if (mtp_state.p_min <= 0.0) {
+      auto draft_token = read_qwen35_argmax_token(context.value(), argmax_output);
+      if (!draft_token.is_ok()) {
+        return draft_token.status();
+      }
+      return std::optional<std::int64_t>{draft_token.value()};
+    }
+
+    if (logits == nullptr || !logits->valid()) {
+      return Status::internal_error(
+        "Qwen3.5 MTP p_min requires draft logits readback");
+    }
+    auto logits_host = read_qwen35_logits_host(
+      context.value(), *logits, logits_values);
+    if (!logits_host.is_ok()) {
+      return logits_host.status();
+    }
+    auto greedy = select_qwen35_greedy_token_with_probability(logits_host.value());
+    if (!greedy.is_ok()) {
+      return greedy.status();
+    }
+    if (greedy.value().probability < mtp_state.p_min) {
+      ++mtp_state.confidence_stops;
+      return std::optional<std::int64_t>{};
+    }
+    return std::optional<std::int64_t>{greedy.value().token};
+  };
+
   auto decode_target_tokens_logits =
     [&](const std::vector<std::int64_t>& token_ids, std::size_t position,
         std::string debug_prefix,
@@ -5745,8 +5867,14 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       const mps::MpsBuffer* h_input = &mtp_state.pending_h;
       std::vector<mps::MpsBuffer> draft_argmax_buffers;
       std::vector<mps::MpsBuffer> draft_h_buffers;
+      std::vector<mps::MpsBuffer> draft_logits_buffers;
+      std::vector<std::size_t> draft_logits_values;
       draft_argmax_buffers.reserve(budget);
       draft_h_buffers.reserve(budget);
+      if (mtp_state.p_min > 0.0) {
+        draft_logits_buffers.reserve(budget);
+        draft_logits_values.reserve(budget);
+      }
       for (std::size_t index = 0; index < budget; ++index) {
         auto mtp_out = run_qwen35_mtp_tokens_from_id_buffer(
           context.value(), weights.value(), mtp_state.cache, mtp_layer,
@@ -5758,8 +5886,13 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
         if (!mtp_out.is_ok()) {
           return mtp_out.status();
         }
-        draft_argmax_buffers.push_back(std::move(mtp_out.value().argmax_output));
-        draft_h_buffers.push_back(std::move(mtp_out.value().h_nextn));
+        auto output = std::move(mtp_out.value());
+        draft_argmax_buffers.push_back(std::move(output.argmax_output));
+        if (mtp_state.p_min > 0.0) {
+          draft_logits_values.push_back(output.logits_values);
+          draft_logits_buffers.push_back(std::move(output.logits));
+        }
+        draft_h_buffers.push_back(std::move(output.h_nextn));
         token_input = &draft_argmax_buffers.back();
         h_input = &draft_h_buffers.back();
       }
@@ -5772,12 +5905,20 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       if (!draft_status.is_ok()) {
         return draft_status;
       }
-      for (auto& argmax_output : draft_argmax_buffers) {
-        auto draft_token = read_qwen35_argmax_token(context.value(), argmax_output);
+      for (std::size_t index = 0; index < draft_argmax_buffers.size(); ++index) {
+        const mps::MpsBuffer* logits =
+          mtp_state.p_min > 0.0 ? &draft_logits_buffers[index] : nullptr;
+        const auto logits_values =
+          mtp_state.p_min > 0.0 ? draft_logits_values[index] : std::size_t{0};
+        auto draft_token = read_mtp_draft_token(
+          draft_argmax_buffers[index], logits, logits_values);
         if (!draft_token.is_ok()) {
           return draft_token.status();
         }
-        drafted_tokens.push_back(draft_token.value());
+        if (!draft_token.value().has_value()) {
+          break;
+        }
+        drafted_tokens.push_back(*draft_token.value());
         ++mtp_state.drafted_tokens;
       }
       return drafted_tokens;
@@ -5816,14 +5957,21 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       if (!draft_status.is_ok()) {
         return draft_status;
       }
-      auto draft_token = read_qwen35_argmax_token(
-        context.value(), mtp_out.value().argmax_output);
+      const mps::MpsBuffer* logits =
+        mtp_state.p_min > 0.0 ? &mtp_out.value().logits : nullptr;
+      const auto logits_values =
+        mtp_state.p_min > 0.0 ? mtp_out.value().logits_values : std::size_t{0};
+      auto draft_token = read_mtp_draft_token(
+        mtp_out.value().argmax_output, logits, logits_values);
       if (!draft_token.is_ok()) {
         return draft_token.status();
       }
-      drafted_tokens.push_back(draft_token.value());
+      if (!draft_token.value().has_value()) {
+        break;
+      }
+      drafted_tokens.push_back(*draft_token.value());
       ++mtp_state.drafted_tokens;
-      token = draft_token.value();
+      token = *draft_token.value();
       draft_h = std::move(mtp_out.value().h_nextn);
       h_input = &draft_h;
     }
@@ -5893,6 +6041,9 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
           return target_next.status();
         }
         ++mtp_state.verify_steps;
+        if (draft_index < mtp_state.verified_by_position.size()) {
+          ++mtp_state.verified_by_position[draft_index];
+        }
         if (is_qwen35_eos_token(target_next.value(), bundle.value().model,
                                 bundle.value().generation, tokenizer.value())) {
           finish_reason = "stop";
@@ -5908,6 +6059,9 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
         }
         ++accepted_count;
         ++mtp_state.accepted_tokens;
+        if (draft_index < mtp_state.accepted_by_position.size()) {
+          ++mtp_state.accepted_by_position[draft_index];
+        }
         if (generated_tokens.size() >= request.max_new_tokens) {
           break;
         }
@@ -6017,13 +6171,27 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   result.mtp.enabled = mtp_state.enabled;
   result.mtp.layers = map.value().mtp_layers;
   result.mtp.draft_tokens = mtp_state.draft_tokens;
+  result.mtp.p_min = mtp_state.p_min;
   result.mtp.drafted_tokens = mtp_state.drafted_tokens;
   result.mtp.accepted_tokens = mtp_state.accepted_tokens;
   result.mtp.verify_steps = mtp_state.verify_steps;
+  result.mtp.confidence_stops = mtp_state.confidence_stops;
+  result.mtp.verified_by_position = mtp_state.verified_by_position;
+  result.mtp.accepted_by_position = mtp_state.accepted_by_position;
   result.mtp.disabled_reason = mtp_state.disabled_reason;
   profiler.set_metadata("qwen35_mtp_drafted_tokens", mtp_state.drafted_tokens);
   profiler.set_metadata("qwen35_mtp_accepted_tokens", mtp_state.accepted_tokens);
   profiler.set_metadata("qwen35_mtp_verify_steps", mtp_state.verify_steps);
+  profiler.set_metadata("qwen35_mtp_confidence_stops",
+                        mtp_state.confidence_stops);
+  if (!mtp_state.verified_by_position.empty()) {
+    profiler.set_metadata("qwen35_mtp_verified_by_position",
+                          qwen35_join_size_values(mtp_state.verified_by_position));
+  }
+  if (!mtp_state.accepted_by_position.empty()) {
+    profiler.set_metadata("qwen35_mtp_accepted_by_position",
+                          qwen35_join_size_values(mtp_state.accepted_by_position));
+  }
   if (prompt_cache_enabled) {
     const auto cache_stats = qwen35_host_prefix_cache().stats();
     result.prompt_cache.enabled = true;
