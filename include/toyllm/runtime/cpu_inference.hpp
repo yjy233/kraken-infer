@@ -86,6 +86,8 @@ struct CpuMtpReport {
   std::size_t accepted_tokens{0};
   std::size_t verify_steps{0};
   std::size_t confidence_stops{0};
+  std::size_t adaptive_budget{0};
+  std::size_t adaptive_changes{0};
   std::vector<std::size_t> verified_by_position;
   std::vector<std::size_t> accepted_by_position;
   std::string disabled_reason;

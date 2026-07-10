@@ -904,6 +904,10 @@ std::vector<std::pair<std::string, std::string>> request_headers(
     headers.push_back({"X-Kraken-MTP-Verify-Steps", std::to_string(mtp.verify_steps)});
     headers.push_back({"X-Kraken-MTP-Confidence-Stops",
                        std::to_string(mtp.confidence_stops)});
+    headers.push_back({"X-Kraken-MTP-Adaptive-Budget",
+                       std::to_string(mtp.adaptive_budget)});
+    headers.push_back({"X-Kraken-MTP-Adaptive-Changes",
+                       std::to_string(mtp.adaptive_changes)});
     if (!mtp.verified_by_position.empty()) {
       headers.push_back({"X-Kraken-MTP-Verified-By-Position",
                          join_size_values(mtp.verified_by_position)});

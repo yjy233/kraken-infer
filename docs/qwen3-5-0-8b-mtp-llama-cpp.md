@@ -42,6 +42,8 @@ llama.cpp 的 Qwen3.5 MTP 不是把主 decoder 一次输出多个 token，而是
   top-1 token 和 exact top-1 probability，不再 materialize 完整 vocab logits。
 - MPS backend 已增加 Q4_K/Q5_K/Q6_K token-only argmax LM head，`mtp_p_min = 0`
   时不再计算 softmax denominator。
+- decode loop 已增加 adaptive draft budget：低收益窗口降预算，高收益窗口逐步恢复，
+  并通过 CLI、headers、profiler 暴露 `adaptive_budget` / `adaptive_changes`。
 
 当前限制：
 
@@ -802,13 +804,13 @@ python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
 | `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 15.80s | full vocab logits draft head |
 | `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 12.80s | device argmax/probability, still materialized logits |
 
-fused top-1 / token-only argmax draft head 结果：
+fused top-1 / token-only argmax / adaptive budget 结果：
 
 | 模式 | wall time | 说明 |
 | --- | ---: | --- |
-| `--no-mtp` | 14.38s | baseline greedy decode |
-| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 14.45s | drafted=96 accepted=31 verify_steps=62 |
-| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 11.43s | drafted=46 accepted=29 verify_steps=38 confidence_stops=28 |
+| `--no-mtp` | 15.17s | baseline greedy decode；Debug timing 有负载波动 |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 14.38s | drafted=62 accepted=28 verify_steps=50 adaptive_budget=1 adaptive_changes=4 |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 11.43s | drafted=45 accepted=28 verify_steps=36 confidence_stops=26 adaptive_budget=3 adaptive_changes=2 |
 
 已实现 batch target verify 和 device-side draft chain：
 
@@ -819,9 +821,11 @@ fused top-1 / token-only argmax draft head 结果：
   embedding row id，避免每个 draft token 都做 CPU readback 再启动下一图。
 - Q4_K/Q5_K/Q6_K fused top-1 head 让 draft 不再 materialize 完整 vocab logits。
 - Q4_K/Q5_K/Q6_K token-only argmax head 让 `p_min=0` 不再计算 softmax denominator。
+- adaptive budget 会在低 acceptance 窗口把 draft budget 从请求值逐步降下来，
+  减少低收益深层 draft 的 MTP block 计算。
 
-现在 `p_min=0.20` 已能快于 no-MTP；`p_min=0` 仍基本持平。token-only argmax 后，
-主要瓶颈更明确地落在低置信 draft 带来的 MTP block 额外计算。后续要继续提速，
+现在 `p_min=0.20` 仍是最划算配置；`p_min=0` 通过 adaptive budget 减少了无效
+draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。后续要继续提速，
 优先方向是：
 
 1. 优化 MTP block 内 `nextn.eh_proj` 和 full-attention block。

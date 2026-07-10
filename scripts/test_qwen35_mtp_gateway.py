@@ -156,6 +156,12 @@ def main() -> int:
                     "accepted_tokens": int_header(headers, "X-Kraken-MTP-Accepted-Tokens"),
                     "verify_steps": verify_steps,
                     "confidence_stops": confidence_stops,
+                    "adaptive_budget": int_header(
+                        headers, "X-Kraken-MTP-Adaptive-Budget"
+                    ),
+                    "adaptive_changes": int_header(
+                        headers, "X-Kraken-MTP-Adaptive-Changes"
+                    ),
                     "verified_by_position": headers.get(
                         "x-kraken-mtp-verified-by-position", ""
                     ),

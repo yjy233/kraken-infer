@@ -71,7 +71,7 @@ Legacy model:
 - greedy multi-token decode。
 - Qwen3.5 MTP/NextN speculative decode，支持 `nextn_predict_layers=1` 的
   MTP GGUF，在 greedy 路径返回 drafted/accepted/verify、`mtp_p_min`
-  置信门控和按 draft 位置统计。
+  置信门控、adaptive draft budget 和按 draft 位置统计。
 - 基础 `top_k` / `top_p` / `temperature` / `seed` host-side sampling。
 - logits top-k readback、debug dump、KV cache stats 和 profile artifacts。
 
@@ -108,7 +108,7 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
 - 非标准但实用的 per-request `device`。
 - `prefill_chunk_tokens` request override。
 - `mtp` / `mtp_draft_tokens` / `mtp_p_min` request override；非 streaming
-  响应会返回 `X-Kraken-MTP-*` headers。
+  响应会返回 `X-Kraken-MTP-*` headers，包括 adaptive budget 统计。
 - `cache_prompt` / `n_cache_reuse` exact-prefix prompt cache。
 - 基础 tools/tool_choice 协议兼容，返回 OpenAI-style `tool_calls`，但不执行外部工具。
 - 浏览器对话页 `/chat_page`，支持 max new tokens、streaming 和 thinking 开关。

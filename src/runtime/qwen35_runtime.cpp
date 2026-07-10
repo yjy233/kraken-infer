@@ -168,6 +168,10 @@ struct Qwen35MtpRuntimeState {
   std::size_t accepted_tokens{0};
   std::size_t verify_steps{0};
   std::size_t confidence_stops{0};
+  std::size_t adaptive_budget{0};
+  std::size_t adaptive_changes{0};
+  std::size_t adaptive_window_drafted{0};
+  std::size_t adaptive_window_accepted{0};
   std::vector<std::size_t> verified_by_position;
   std::vector<std::size_t> accepted_by_position;
   Qwen35MetalCache cache;
@@ -5143,6 +5147,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     mtp_state.disabled_reason = "prompt_cache_not_supported_with_mtp_yet";
   } else {
     mtp_state.enabled = true;
+    mtp_state.adaptive_budget = mtp_state.draft_tokens;
     mtp_state.verified_by_position.assign(mtp_state.draft_tokens, 0);
     mtp_state.accepted_by_position.assign(mtp_state.draft_tokens, 0);
   }
@@ -5993,6 +5998,42 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     return drafted_tokens;
   };
 
+  auto update_mtp_adaptive_budget =
+    [&](std::size_t drafted_count, std::size_t accepted_count) {
+    if (!mtp_state.enabled || mtp_state.draft_tokens <= 1U ||
+        drafted_count == 0) {
+      return;
+    }
+    mtp_state.adaptive_window_drafted += drafted_count;
+    mtp_state.adaptive_window_accepted += accepted_count;
+    const auto sample_threshold =
+      std::max<std::size_t>(8U, mtp_state.adaptive_budget * 4U);
+    if (mtp_state.adaptive_window_drafted < sample_threshold) {
+      return;
+    }
+
+    const auto window_drafted = mtp_state.adaptive_window_drafted;
+    const auto window_accepted = mtp_state.adaptive_window_accepted;
+    bool changed = false;
+    if (mtp_state.adaptive_budget > 1U &&
+        window_accepted * 2U < window_drafted) {
+      --mtp_state.adaptive_budget;
+      changed = true;
+    } else if (mtp_state.adaptive_budget < mtp_state.draft_tokens &&
+               window_accepted * 4U >= window_drafted * 3U) {
+      ++mtp_state.adaptive_budget;
+      changed = true;
+    }
+    if (changed) {
+      ++mtp_state.adaptive_changes;
+      mtp_state.adaptive_window_drafted = 0;
+      mtp_state.adaptive_window_accepted = 0;
+    } else if (mtp_state.adaptive_window_drafted >= sample_threshold * 2U) {
+      mtp_state.adaptive_window_drafted = 0;
+      mtp_state.adaptive_window_accepted = 0;
+    }
+  };
+
   std::size_t logits_output_row = 0;
   if (mtp_state.enabled) {
     std::size_t decode_step = 0;
@@ -6019,7 +6060,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
 
       const auto verified_position = next_decode_position;
       const auto draft_budget = std::min(
-        mtp_state.draft_tokens,
+        mtp_state.adaptive_budget,
         request.max_new_tokens - generated_tokens.size());
       auto drafted = draft_mtp_tokens(next_token, verified_position, draft_budget);
       if (!drafted.is_ok()) {
@@ -6081,6 +6122,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
           break;
         }
       }
+      update_mtp_adaptive_budget(drafted.value().size(), accepted_count);
 
       const auto committed_tokens = 1U + accepted_count;
       if (stop_generation) {
@@ -6191,6 +6233,8 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   result.mtp.accepted_tokens = mtp_state.accepted_tokens;
   result.mtp.verify_steps = mtp_state.verify_steps;
   result.mtp.confidence_stops = mtp_state.confidence_stops;
+  result.mtp.adaptive_budget = mtp_state.adaptive_budget;
+  result.mtp.adaptive_changes = mtp_state.adaptive_changes;
   result.mtp.verified_by_position = mtp_state.verified_by_position;
   result.mtp.accepted_by_position = mtp_state.accepted_by_position;
   result.mtp.disabled_reason = mtp_state.disabled_reason;
@@ -6199,6 +6243,10 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   profiler.set_metadata("qwen35_mtp_verify_steps", mtp_state.verify_steps);
   profiler.set_metadata("qwen35_mtp_confidence_stops",
                         mtp_state.confidence_stops);
+  profiler.set_metadata("qwen35_mtp_adaptive_budget",
+                        mtp_state.adaptive_budget);
+  profiler.set_metadata("qwen35_mtp_adaptive_changes",
+                        mtp_state.adaptive_changes);
   if (!mtp_state.verified_by_position.empty()) {
     profiler.set_metadata("qwen35_mtp_verified_by_position",
                           qwen35_join_size_values(mtp_state.verified_by_position));

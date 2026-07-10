@@ -178,6 +178,12 @@ std::string format_cpu_generation_result(const CpuGenerationResult& result) {
              << ", accepted=" << result.mtp.accepted_tokens
              << ", verify_steps=" << result.mtp.verify_steps
              << ", confidence_stops=" << result.mtp.confidence_stops;
+      if (result.mtp.enabled &&
+          (result.mtp.adaptive_budget != result.mtp.draft_tokens ||
+           result.mtp.adaptive_changes != 0U)) {
+        output << ", adaptive_budget=" << result.mtp.adaptive_budget
+               << ", adaptive_changes=" << result.mtp.adaptive_changes;
+      }
       const auto position_counts = format_mtp_position_counts(result.mtp);
       if (!position_counts.empty()) {
         output << ", accepted_by_position=" << position_counts;
