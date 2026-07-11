@@ -2500,6 +2500,28 @@ void test_qwen35_mmproj_metadata_validation() {
   assert(!incompatible.is_ok());
   assert(incompatible.message().find("embedding_length") != std::string::npos);
 
+  const auto tiny_plan = toyllm::plan_qwen35_image_embeddings(metadata.value(), 28, 28);
+  assert(tiny_plan.is_ok());
+  assert(tiny_plan.value().resized_width == 84);
+  assert(tiny_plan.value().resized_height == 84);
+  assert(tiny_plan.value().patch_grid_x == 6);
+  assert(tiny_plan.value().patch_grid_y == 6);
+  assert(tiny_plan.value().merge_grid_x == 3);
+  assert(tiny_plan.value().merge_grid_y == 3);
+  assert(tiny_plan.value().image_tokens == 9);
+
+  const auto photo_plan =
+    toyllm::plan_qwen35_image_embeddings(metadata.value(), 640, 480);
+  assert(photo_plan.is_ok());
+  assert(photo_plan.value().resized_width % 28 == 0);
+  assert(photo_plan.value().resized_height % 28 == 0);
+  assert(photo_plan.value().image_tokens >= photo_plan.value().min_image_tokens);
+  assert(photo_plan.value().image_tokens <= photo_plan.value().max_image_tokens);
+  const auto plan_summary =
+    toyllm::format_qwen35_image_embedding_plan(photo_plan.value());
+  assert(plan_summary.find("image merge_grid:") != std::string::npos);
+  assert(plan_summary.find("image tokens:") != std::string::npos);
+
   auto missing_tensors = tiny_qwen35_mmproj_tensors();
   missing_tensors.erase(
     std::remove_if(missing_tensors.begin(), missing_tensors.end(),

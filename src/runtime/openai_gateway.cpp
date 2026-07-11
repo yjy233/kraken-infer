@@ -2014,6 +2014,18 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
                   << mmproj_metadata->deepstack_layer_count << '\n';
         std::cout << "mmproj projector_output_width: "
                   << mmproj_metadata->projector_output_width << '\n';
+        const auto min_plan = plan_qwen35_image_embeddings(*mmproj_metadata, 28, 28);
+        if (min_plan.is_ok()) {
+          std::cout << "mmproj native_image_patch_size: "
+                    << min_plan.value().patch_size << '\n';
+          std::cout << "mmproj native_image_spatial_merge_size: "
+                    << min_plan.value().spatial_merge_size << '\n';
+          std::cout << "mmproj native_image_token_limits: "
+                    << min_plan.value().min_image_tokens << ".."
+                    << min_plan.value().max_image_tokens << '\n';
+          std::cout << "mmproj native_image_28x28_plan_tokens: "
+                    << min_plan.value().image_tokens << '\n';
+        }
       }
     }
     std::cout << "mtp: " << (config.enable_mtp ? "enabled" : "disabled") << '\n';

@@ -41,6 +41,22 @@ struct Qwen35ImageDimensions {
   std::uint32_t height{0};
 };
 
+struct Qwen35ImageEmbeddingPlan {
+  std::uint32_t original_width{0};
+  std::uint32_t original_height{0};
+  std::uint32_t resized_width{0};
+  std::uint32_t resized_height{0};
+  std::uint32_t patch_grid_x{0};
+  std::uint32_t patch_grid_y{0};
+  std::uint32_t merge_grid_x{0};
+  std::uint32_t merge_grid_y{0};
+  std::uint32_t patch_size{0};
+  std::uint32_t spatial_merge_size{0};
+  std::size_t image_tokens{0};
+  std::size_t min_image_tokens{0};
+  std::size_t max_image_tokens{0};
+};
+
 [[nodiscard]] Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
   const std::filesystem::path& path);
 [[nodiscard]] bool qwen35_mmproj_is_qwen3vl_merger(
@@ -57,5 +73,12 @@ struct Qwen35ImageDimensions {
   std::string_view mime_type, const std::vector<std::uint8_t>& image_bytes);
 [[nodiscard]] Result<Qwen35ImageDataUrl> parse_qwen35_image_data_url(
   std::string_view url);
+[[nodiscard]] Result<Qwen35ImageEmbeddingPlan> plan_qwen35_image_embeddings(
+  const Qwen35MmprojMetadata& metadata, std::uint32_t image_width,
+  std::uint32_t image_height);
+[[nodiscard]] Result<Qwen35ImageEmbeddingPlan> plan_qwen35_image_embeddings(
+  const Qwen35MmprojMetadata& metadata, const Qwen35ImageDataUrl& image);
+[[nodiscard]] std::string format_qwen35_image_embedding_plan(
+  const Qwen35ImageEmbeddingPlan& plan);
 
 }  // namespace toyllm

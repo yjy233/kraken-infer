@@ -267,6 +267,12 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   `projector_output_width`。
 - gateway 启动时会校验 `projector_output_width == text GGUF embedding_length`，
   对齐 llama.cpp `mtmd.cpp` 的 mmproj/text embedding 维度检查。
+- 已新增 Qwen3VL image embedding plan helper，对齐 llama.cpp dynamic-size preprocess：
+  使用 `patch_size * spatial_merge_size` 对齐 resize，默认 token limit 为
+  `8..4096`，并输出 resized size、patch grid、merge grid 和 image token 数。
+  这一步尚不做像素 decode/vision forward，但为 native mixed prefill 明确 image
+  placeholder 长度。
+- gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
 - 图片请求没有 `--mmproj` 时返回 OpenAI 兼容 400。
 - 图片请求带了非 `qwen3vl_merger` mmproj 时返回 OpenAI 兼容 400。
 - 图片请求带了 `qwen3vl_merger` mmproj 时，当前返回 OpenAI 兼容 501，明确说明
@@ -352,7 +358,7 @@ GET http://127.0.0.1:18081/v1/openapi.json
 
 阶段 3：image preprocessing + vision graph
 
-- 实现 dynamic-size preprocess、patch size、spatial merge size 和 token limit。
+- dynamic-size image embedding plan 已实现；下一步是接入真实像素 resize/normalize。
 - 按 `tools/mtmd/models/qwen3vl.cpp` 实现 patch embed、position embedding resize、
   vision MRoPE attention、deepstack 和 projector。
 - 输出 contiguous F32 embeddings，形状为 `[n_image_tokens, n_embd_inp]`。

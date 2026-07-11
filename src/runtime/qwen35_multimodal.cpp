@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <limits>
 #include <sstream>
 #include <string_view>
@@ -16,6 +17,8 @@ namespace {
 
 constexpr std::uint64_t kImageFingerprintRoot = 1469598103934665603ULL;
 constexpr std::uint64_t kImageFingerprintPrime = 1099511628211ULL;
+constexpr std::size_t kQwen35VlDefaultMinImageTokens = 8;
+constexpr std::size_t kQwen35VlDefaultMaxImageTokens = 4096;
 
 std::uint64_t fingerprint_mix(std::uint64_t hash, std::uint64_t value) {
   hash ^= value;
@@ -298,6 +301,89 @@ Result<Qwen35ImageDimensions> infer_jpeg_dimensions(
   return Status::invalid_argument("JPEG image header has no SOF dimensions");
 }
 
+Result<std::uint32_t> positive_u32_from_i64(std::int64_t value,
+                                            std::string_view label) {
+  if (value <= 0) {
+    return Status::invalid_argument(std::string{label} + " must be positive");
+  }
+  if (static_cast<std::uint64_t>(value) >
+      std::numeric_limits<std::uint32_t>::max()) {
+    return Status::invalid_argument(std::string{label} + " exceeds uint32 range");
+  }
+  return static_cast<std::uint32_t>(value);
+}
+
+Result<std::uint64_t> checked_u64_mul(std::uint64_t lhs, std::uint64_t rhs,
+                                      std::string_view label) {
+  if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs) {
+    return Status::invalid_argument(std::string{label} + " overflow");
+  }
+  return lhs * rhs;
+}
+
+std::uint32_t round_by_factor(std::uint32_t value, std::uint32_t factor) {
+  const auto rounded = std::round(static_cast<double>(value) /
+                                  static_cast<double>(factor));
+  return static_cast<std::uint32_t>(rounded) * factor;
+}
+
+std::uint32_t ceil_by_factor(double value, std::uint32_t factor) {
+  const auto ceiled = std::ceil(value / static_cast<double>(factor));
+  return static_cast<std::uint32_t>(ceiled) * factor;
+}
+
+std::uint32_t floor_by_factor(double value, std::uint32_t factor) {
+  const auto floored = std::floor(value / static_cast<double>(factor));
+  return static_cast<std::uint32_t>(floored) * factor;
+}
+
+Result<Qwen35ImageDimensions> qwen35_smart_resize(std::uint32_t width,
+                                                  std::uint32_t height,
+                                                  std::uint32_t align_size,
+                                                  std::uint64_t min_pixels,
+                                                  std::uint64_t max_pixels) {
+  if (width == 0 || height == 0) {
+    return Status::invalid_argument("image dimensions must be non-zero");
+  }
+  if (align_size == 0) {
+    return Status::invalid_argument("Qwen3.5 image align size must be positive");
+  }
+  if (min_pixels == 0 || max_pixels == 0 || min_pixels > max_pixels) {
+    return Status::invalid_argument("Qwen3.5 image pixel limits are invalid");
+  }
+  auto image_pixels = checked_u64_mul(width, height, "Qwen3.5 image pixels");
+  if (!image_pixels.is_ok()) {
+    return image_pixels.status();
+  }
+
+  auto aligned_width = std::max(align_size, round_by_factor(width, align_size));
+  auto aligned_height = std::max(align_size, round_by_factor(height, align_size));
+  auto aligned_pixels =
+    checked_u64_mul(aligned_width, aligned_height, "Qwen3.5 aligned image pixels");
+  if (!aligned_pixels.is_ok()) {
+    return aligned_pixels.status();
+  }
+
+  if (aligned_pixels.value() > max_pixels) {
+    const auto beta =
+      std::sqrt(static_cast<double>(image_pixels.value()) /
+                static_cast<double>(max_pixels));
+    aligned_width = std::max(align_size, floor_by_factor(width / beta, align_size));
+    aligned_height = std::max(align_size, floor_by_factor(height / beta, align_size));
+  } else if (aligned_pixels.value() < min_pixels) {
+    const auto beta =
+      std::sqrt(static_cast<double>(min_pixels) /
+                static_cast<double>(image_pixels.value()));
+    aligned_width = ceil_by_factor(width * beta, align_size);
+    aligned_height = ceil_by_factor(height * beta, align_size);
+  }
+
+  if (aligned_width == 0 || aligned_height == 0) {
+    return Status::invalid_argument("Qwen3.5 image resize produced empty dimensions");
+  }
+  return Qwen35ImageDimensions{aligned_width, aligned_height};
+}
+
 int base64_value(char ch) {
   if (ch >= 'A' && ch <= 'Z') {
     return ch - 'A';
@@ -541,6 +627,109 @@ Result<Qwen35ImageDataUrl> parse_qwen35_image_data_url(std::string_view url) {
     result.height = dimensions.value().height;
   }
   return result;
+}
+
+Result<Qwen35ImageEmbeddingPlan> plan_qwen35_image_embeddings(
+  const Qwen35MmprojMetadata& metadata, std::uint32_t image_width,
+  std::uint32_t image_height) {
+  if (!qwen35_mmproj_is_qwen3vl_merger(metadata)) {
+    return Status::invalid_argument(
+      "Qwen3.5 native image embedding plan requires qwen3vl_merger mmproj");
+  }
+  auto patch_size = positive_u32_from_i64(metadata.patch_size,
+                                          "clip.vision.patch_size");
+  if (!patch_size.is_ok()) {
+    return patch_size.status();
+  }
+  auto spatial_merge_size =
+    metadata.spatial_merge_size > 0
+      ? positive_u32_from_i64(metadata.spatial_merge_size,
+                              "clip.vision.spatial_merge_size")
+      : Result<std::uint32_t>{2U};
+  if (!spatial_merge_size.is_ok()) {
+    return spatial_merge_size.status();
+  }
+  auto align_size = checked_u64_mul(patch_size.value(),
+                                    spatial_merge_size.value(),
+                                    "Qwen3.5 image align size");
+  if (!align_size.is_ok()) {
+    return align_size.status();
+  }
+  if (align_size.value() > std::numeric_limits<std::uint32_t>::max()) {
+    return Status::invalid_argument("Qwen3.5 image align size exceeds uint32 range");
+  }
+  auto patch_area = checked_u64_mul(align_size.value(), align_size.value(),
+                                    "Qwen3.5 image patch area");
+  if (!patch_area.is_ok()) {
+    return patch_area.status();
+  }
+  auto min_pixels = checked_u64_mul(
+    patch_area.value(), kQwen35VlDefaultMinImageTokens,
+    "Qwen3.5 minimum image pixels");
+  if (!min_pixels.is_ok()) {
+    return min_pixels.status();
+  }
+  auto max_pixels = checked_u64_mul(
+    patch_area.value(), kQwen35VlDefaultMaxImageTokens,
+    "Qwen3.5 maximum image pixels");
+  if (!max_pixels.is_ok()) {
+    return max_pixels.status();
+  }
+  auto resized = qwen35_smart_resize(
+    image_width, image_height, static_cast<std::uint32_t>(align_size.value()),
+    min_pixels.value(), max_pixels.value());
+  if (!resized.is_ok()) {
+    return resized.status();
+  }
+  if (resized.value().width % patch_size.value() != 0 ||
+      resized.value().height % patch_size.value() != 0) {
+    return Status::invalid_argument("Qwen3.5 resized image is not patch-aligned");
+  }
+
+  Qwen35ImageEmbeddingPlan plan;
+  plan.original_width = image_width;
+  plan.original_height = image_height;
+  plan.resized_width = resized.value().width;
+  plan.resized_height = resized.value().height;
+  plan.patch_size = patch_size.value();
+  plan.spatial_merge_size = spatial_merge_size.value();
+  plan.patch_grid_x = plan.resized_width / plan.patch_size;
+  plan.patch_grid_y = plan.resized_height / plan.patch_size;
+  plan.merge_grid_x = plan.patch_grid_x / plan.spatial_merge_size;
+  plan.merge_grid_y = plan.patch_grid_y / plan.spatial_merge_size;
+  plan.image_tokens =
+    static_cast<std::size_t>(plan.merge_grid_x) * plan.merge_grid_y;
+  plan.min_image_tokens = kQwen35VlDefaultMinImageTokens;
+  plan.max_image_tokens = kQwen35VlDefaultMaxImageTokens;
+  if (plan.merge_grid_x == 0 || plan.merge_grid_y == 0 ||
+      plan.image_tokens == 0) {
+    return Status::invalid_argument("Qwen3.5 image embedding plan has no tokens");
+  }
+  return plan;
+}
+
+Result<Qwen35ImageEmbeddingPlan> plan_qwen35_image_embeddings(
+  const Qwen35MmprojMetadata& metadata, const Qwen35ImageDataUrl& image) {
+  return plan_qwen35_image_embeddings(metadata, image.width, image.height);
+}
+
+std::string format_qwen35_image_embedding_plan(
+  const Qwen35ImageEmbeddingPlan& plan) {
+  std::ostringstream output;
+  output << "image original_size: " << plan.original_width << 'x'
+         << plan.original_height << '\n';
+  output << "image resized_size: " << plan.resized_width << 'x'
+         << plan.resized_height << '\n';
+  output << "image patch_size: " << plan.patch_size << '\n';
+  output << "image spatial_merge_size: " << plan.spatial_merge_size << '\n';
+  output << "image patch_grid: " << plan.patch_grid_x << 'x'
+         << plan.patch_grid_y << '\n';
+  output << "image merge_grid: " << plan.merge_grid_x << 'x'
+         << plan.merge_grid_y << '\n';
+  output << "image tokens: " << plan.image_tokens << '\n';
+  output << "image token_limits: " << plan.min_image_tokens << ".."
+         << plan.max_image_tokens << '\n';
+  return output.str();
 }
 
 }  // namespace toyllm
