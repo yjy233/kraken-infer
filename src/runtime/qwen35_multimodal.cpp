@@ -817,6 +817,313 @@ Result<std::vector<float>> qwen3vl_patch_embedding_temporal_sum(
   return output;
 }
 
+float qwen35_gelu(float value) {
+  constexpr float kGeluCoefA = 0.044715F;
+  constexpr float kSqrt2OverPi = 0.7978845608028654F;
+  return 0.5F * value *
+         (1.0F + std::tanh(kSqrt2OverPi * value *
+                            (1.0F + kGeluCoefA * value * value)));
+}
+
+void qwen35_gelu_in_place(std::vector<float>& values) {
+  for (auto& value : values) {
+    value = qwen35_gelu(value);
+  }
+}
+
+Result<std::vector<float>> qwen35_layer_norm_token_major(
+  const std::vector<float>& input, std::size_t token_count,
+  std::size_t width, const std::vector<float>& weight,
+  const std::vector<float>& bias, double epsilon, std::string_view label) {
+  const auto expected = token_count * width;
+  if (input.size() != expected || weight.size() != width ||
+      bias.size() != width) {
+    return Status::invalid_argument(
+      std::string{label} + " layer norm shape mismatch");
+  }
+  if (width == 0 || token_count == 0) {
+    return Status::invalid_argument(
+      std::string{label} + " layer norm requires non-empty input");
+  }
+  if (epsilon <= 0.0) {
+    return Status::invalid_argument(
+      std::string{label} + " layer norm epsilon must be positive");
+  }
+  std::vector<float> output(expected);
+  for (std::size_t token = 0; token < token_count; ++token) {
+    const auto offset = token * width;
+    double mean = 0.0;
+    for (std::size_t channel = 0; channel < width; ++channel) {
+      mean += static_cast<double>(input[offset + channel]);
+    }
+    mean /= static_cast<double>(width);
+    double variance = 0.0;
+    for (std::size_t channel = 0; channel < width; ++channel) {
+      const auto centered = static_cast<double>(input[offset + channel]) - mean;
+      variance += centered * centered;
+    }
+    variance /= static_cast<double>(width);
+    const auto inv_std = static_cast<float>(1.0 / std::sqrt(variance + epsilon));
+    const auto mean_f = static_cast<float>(mean);
+    for (std::size_t channel = 0; channel < width; ++channel) {
+      output[offset + channel] =
+        (input[offset + channel] - mean_f) * inv_std * weight[channel] +
+        bias[channel];
+    }
+  }
+  return output;
+}
+
+Result<std::vector<float>> qwen35_linear_token_major(
+  const std::vector<float>& input, std::size_t token_count,
+  std::size_t input_width, std::size_t output_width,
+  const std::vector<float>& weight, const std::vector<float>& bias,
+  std::string_view label) {
+  if (input.size() != token_count * input_width ||
+      weight.size() != input_width * output_width ||
+      bias.size() != output_width) {
+    return Status::invalid_argument(
+      std::string{label} + " linear shape mismatch");
+  }
+  std::vector<float> output(token_count * output_width);
+  for (std::size_t token = 0; token < token_count; ++token) {
+    const auto input_offset = token * input_width;
+    const auto output_offset = token * output_width;
+    for (std::size_t out = 0; out < output_width; ++out) {
+      double sum = static_cast<double>(bias[out]);
+      for (std::size_t in = 0; in < input_width; ++in) {
+        sum += static_cast<double>(input[input_offset + in]) *
+               static_cast<double>(weight[in + input_width * out]);
+      }
+      output[output_offset + out] = static_cast<float>(sum);
+    }
+  }
+  return output;
+}
+
+Status qwen35_add_in_place(std::vector<float>& lhs,
+                           const std::vector<float>& rhs,
+                           std::string_view label) {
+  if (lhs.size() != rhs.size()) {
+    return Status::invalid_argument(std::string{label} + " add shape mismatch");
+  }
+  for (std::size_t index = 0; index < lhs.size(); ++index) {
+    lhs[index] += rhs[index];
+  }
+  return Status::ok();
+}
+
+std::vector<std::int32_t> qwen3vl_vision_positions(std::uint32_t patch_grid_x,
+                                                   std::uint32_t patch_grid_y) {
+  const auto token_count =
+    static_cast<std::size_t>(patch_grid_x) * patch_grid_y;
+  std::vector<std::int32_t> positions(token_count * 4U);
+  std::size_t token = 0;
+  for (std::uint32_t y = 0; y < patch_grid_y; y += 2U) {
+    for (std::uint32_t x = 0; x < patch_grid_x; x += 2U) {
+      for (std::uint32_t dy = 0; dy < 2U; ++dy) {
+        for (std::uint32_t dx = 0; dx < 2U; ++dx) {
+          positions[token] = static_cast<std::int32_t>(y + dy);
+          positions[token_count + token] = static_cast<std::int32_t>(x + dx);
+          positions[2U * token_count + token] = static_cast<std::int32_t>(y + dy);
+          positions[3U * token_count + token] = static_cast<std::int32_t>(x + dx);
+          ++token;
+        }
+      }
+    }
+  }
+  return positions;
+}
+
+void qwen3vl_apply_vision_rope_one(std::vector<float>& values,
+                                   std::size_t token_count,
+                                   std::size_t embedding_width,
+                                   std::size_t head_count,
+                                   std::size_t head_dim,
+                                   const std::vector<std::int32_t>& positions) {
+  constexpr float kFreqBase = 10000.0F;
+  const auto rope_dims = head_dim / 2U;
+  const auto section = head_dim / 4U;
+  const auto section_w = section * 2U;
+  const auto section_e = section * 3U;
+  const auto section_dims = section * 4U;
+  const auto theta_scale =
+    static_cast<float>(std::pow(kFreqBase, -2.0 / static_cast<double>(rope_dims)));
+
+  for (std::size_t token = 0; token < token_count; ++token) {
+    const auto pos_t = static_cast<float>(positions[token]);
+    const auto pos_h = static_cast<float>(positions[token_count + token]);
+    const auto pos_w = static_cast<float>(positions[2U * token_count + token]);
+    const auto pos_e = static_cast<float>(positions[3U * token_count + token]);
+    for (std::size_t head = 0; head < head_count; ++head) {
+      const auto base = token * embedding_width + head * head_dim;
+      float theta_t = pos_t;
+      float theta_h = pos_h;
+      float theta_w = pos_w;
+      float theta_e = pos_e;
+      for (std::size_t i0 = 0; i0 < head_dim; i0 += 2U) {
+        const auto sector = (i0 / 2U) % section_dims;
+        if (sector == 0U) {
+          theta_t = pos_t;
+        } else if (sector == section) {
+          theta_h = pos_h;
+        } else if (sector == section_w) {
+          theta_w = pos_w;
+        } else if (sector == section_e) {
+          theta_e = pos_e;
+        }
+
+        float theta = theta_t;
+        if (sector >= section && sector < section_w) {
+          theta = theta_h;
+        } else if (sector >= section_w && sector < section_e) {
+          theta = theta_w;
+        } else if (sector >= section_e) {
+          theta = theta_e;
+        }
+
+        const auto first = base + i0 / 2U;
+        const auto second = first + rope_dims;
+        const auto cos_theta = std::cos(theta);
+        const auto sin_theta = std::sin(theta);
+        const auto x0 = values[first];
+        const auto x1 = values[second];
+        values[first] = x0 * cos_theta - x1 * sin_theta;
+        values[second] = x0 * sin_theta + x1 * cos_theta;
+
+        theta_t *= theta_scale;
+        theta_h *= theta_scale;
+        theta_w *= theta_scale;
+        theta_e *= theta_scale;
+      }
+    }
+  }
+}
+
+Result<std::vector<float>> qwen3vl_attention_token_major(
+  const std::vector<float>& qkv, std::size_t token_count,
+  std::size_t embedding_width, std::size_t head_count,
+  std::uint32_t patch_grid_x, std::uint32_t patch_grid_y,
+  std::string_view label) {
+  if (head_count == 0 || embedding_width % head_count != 0) {
+    return Status::invalid_argument(
+      std::string{label} + " attention head shape mismatch");
+  }
+  const auto head_dim = embedding_width / head_count;
+  if (head_dim == 0 || head_dim % 4U != 0) {
+    return Status::invalid_argument(
+      std::string{label} + " vision RoPE requires head_dim divisible by 4");
+  }
+  if (qkv.size() != token_count * embedding_width * 3U) {
+    return Status::invalid_argument(
+      std::string{label} + " qkv shape mismatch");
+  }
+
+  std::vector<float> q(token_count * embedding_width);
+  std::vector<float> k(token_count * embedding_width);
+  std::vector<float> v(token_count * embedding_width);
+  for (std::size_t token = 0; token < token_count; ++token) {
+    const auto src = token * embedding_width * 3U;
+    const auto dst = token * embedding_width;
+    std::copy(qkv.begin() + static_cast<std::ptrdiff_t>(src),
+              qkv.begin() + static_cast<std::ptrdiff_t>(src + embedding_width),
+              q.begin() + static_cast<std::ptrdiff_t>(dst));
+    std::copy(qkv.begin() + static_cast<std::ptrdiff_t>(src + embedding_width),
+              qkv.begin() + static_cast<std::ptrdiff_t>(src + embedding_width * 2U),
+              k.begin() + static_cast<std::ptrdiff_t>(dst));
+    std::copy(qkv.begin() + static_cast<std::ptrdiff_t>(src + embedding_width * 2U),
+              qkv.begin() + static_cast<std::ptrdiff_t>(src + embedding_width * 3U),
+              v.begin() + static_cast<std::ptrdiff_t>(dst));
+  }
+
+  const auto positions = qwen3vl_vision_positions(patch_grid_x, patch_grid_y);
+  qwen3vl_apply_vision_rope_one(q, token_count, embedding_width, head_count,
+                                head_dim, positions);
+  qwen3vl_apply_vision_rope_one(k, token_count, embedding_width, head_count,
+                                head_dim, positions);
+
+  const auto scale = 1.0F / std::sqrt(static_cast<float>(head_dim));
+  std::vector<float> output(token_count * embedding_width);
+  std::vector<float> scores(token_count);
+  for (std::size_t query = 0; query < token_count; ++query) {
+    for (std::size_t head = 0; head < head_count; ++head) {
+      float max_score = -std::numeric_limits<float>::infinity();
+      for (std::size_t key = 0; key < token_count; ++key) {
+        double dot = 0.0;
+        for (std::size_t dim = 0; dim < head_dim; ++dim) {
+          const auto q_index = query * embedding_width + head * head_dim + dim;
+          const auto k_index = key * embedding_width + head * head_dim + dim;
+          dot += static_cast<double>(q[q_index]) * static_cast<double>(k[k_index]);
+        }
+        const auto score = static_cast<float>(dot) * scale;
+        scores[key] = score;
+        max_score = std::max(max_score, score);
+      }
+
+      double denominator = 0.0;
+      for (auto& score : scores) {
+        score = static_cast<float>(std::exp(static_cast<double>(score - max_score)));
+        denominator += static_cast<double>(score);
+      }
+      if (denominator == 0.0) {
+        return Status::internal_error(
+          std::string{label} + " attention softmax underflow");
+      }
+      for (std::size_t dim = 0; dim < head_dim; ++dim) {
+        double sum = 0.0;
+        for (std::size_t key = 0; key < token_count; ++key) {
+          const auto v_index = key * embedding_width + head * head_dim + dim;
+          sum += static_cast<double>(scores[key]) /
+                 denominator * static_cast<double>(v[v_index]);
+        }
+        const auto out_index = query * embedding_width + head * head_dim + dim;
+        output[out_index] = static_cast<float>(sum);
+      }
+    }
+  }
+  return output;
+}
+
+Result<std::vector<float>> qwen3vl_group_four_tokens(
+  const std::vector<float>& input, std::size_t token_count,
+  std::size_t width, std::string_view label) {
+  if (token_count == 0 || token_count % 4U != 0 ||
+      input.size() != token_count * width) {
+    return Status::invalid_argument(
+      std::string{label} + " requires token_count divisible by 4");
+  }
+  const auto output_tokens = token_count / 4U;
+  const auto output_width = width * 4U;
+  std::vector<float> output(output_tokens * output_width);
+  for (std::size_t token = 0; token < output_tokens; ++token) {
+    for (std::size_t group = 0; group < 4U; ++group) {
+      const auto src = (token * 4U + group) * width;
+      const auto dst = token * output_width + group * width;
+      std::copy(input.begin() + static_cast<std::ptrdiff_t>(src),
+                input.begin() + static_cast<std::ptrdiff_t>(src + width),
+                output.begin() + static_cast<std::ptrdiff_t>(dst));
+    }
+  }
+  return output;
+}
+
+Result<std::vector<float>> qwen3vl_projector_mlp_token_major(
+  const std::vector<float>& input, std::size_t token_count,
+  std::size_t input_width, std::size_t hidden_width,
+  std::size_t output_width, const std::vector<float>& fc1_weight,
+  const std::vector<float>& fc1_bias, const std::vector<float>& fc2_weight,
+  const std::vector<float>& fc2_bias, std::string_view label) {
+  auto hidden = qwen35_linear_token_major(
+    input, token_count, input_width, hidden_width, fc1_weight, fc1_bias, label);
+  if (!hidden.is_ok()) {
+    return hidden.status();
+  }
+  qwen35_gelu_in_place(hidden.value());
+  return qwen35_linear_token_major(
+    hidden.value(), token_count, hidden_width, output_width,
+    fc2_weight, fc2_bias, label);
+}
+
 bool qwen35_role_is_supported(std::string_view role) {
   return role == "system" || role == "user" || role == "assistant";
 }
@@ -1573,6 +1880,429 @@ std::string format_qwen35_vision_input_stage_result(
          << result.vision_embedding_length << '\n';
   output << "vision input tokens: " << result.token_count << '\n';
   output << "vision input values: " << result.embeddings.size() << '\n';
+  return output.str();
+}
+
+Result<Qwen35VisionEncoderResult> run_qwen35_vision_encoder_cpu(
+  const std::filesystem::path& mmproj_path,
+  const Qwen35ImagePreprocessResult& image) {
+  auto graph_plan = plan_qwen35_vision_graph(mmproj_path);
+  if (!graph_plan.is_ok()) {
+    return graph_plan.status();
+  }
+  auto input_stage = run_qwen35_vision_input_stage_cpu(mmproj_path, image);
+  if (!input_stage.is_ok()) {
+    return input_stage.status();
+  }
+  if (input_stage.value().token_count !=
+      static_cast<std::size_t>(input_stage.value().patch_grid_x) *
+        input_stage.value().patch_grid_y) {
+    return Status::internal_error(
+      "Qwen3.5 vision input stage token count does not match patch grid");
+  }
+  if (input_stage.value().token_count % 4U != 0) {
+    return Status::invalid_argument(
+      "Qwen3.5 vision encoder requires token_count divisible by 4");
+  }
+
+  auto emb_size = checked_size_from_u64(
+    graph_plan.value().vision_embedding_length,
+    "Qwen3.5 vision embedding length");
+  if (!emb_size.is_ok()) {
+    return emb_size.status();
+  }
+  auto ffn_size = checked_size_from_u64(
+    graph_plan.value().vision_feed_forward_length,
+    "Qwen3.5 vision feed-forward length");
+  if (!ffn_size.is_ok()) {
+    return ffn_size.status();
+  }
+  auto projection_size = checked_size_from_u64(
+    graph_plan.value().projection_dim, "Qwen3.5 projection dimension");
+  if (!projection_size.is_ok()) {
+    return projection_size.status();
+  }
+  auto head_count = checked_size_from_u64(
+    graph_plan.value().vision_attention_head_count,
+    "Qwen3.5 vision attention head count");
+  if (!head_count.is_ok()) {
+    return head_count.status();
+  }
+  auto projector_output_width = checked_size_from_u64(
+    graph_plan.value().projector_output_width,
+    "Qwen3.5 projector output width");
+  if (!projector_output_width.is_ok()) {
+    return projector_output_width.status();
+  }
+  if (input_stage.value().vision_embedding_length !=
+      graph_plan.value().vision_embedding_length) {
+    return Status::internal_error(
+      "Qwen3.5 vision input stage embedding length mismatch");
+  }
+  const auto merged_width = emb_size.value() * 4U;
+  const auto image_token_count = input_stage.value().token_count / 4U;
+  const auto epsilon =
+    graph_plan.value().vision_attention_layer_norm_epsilon > 0.0
+      ? graph_plan.value().vision_attention_layer_norm_epsilon
+      : 1e-6;
+
+  auto gguf = read_gguf_file(mmproj_path);
+  if (!gguf.is_ok()) {
+    return gguf.status();
+  }
+  auto mapped = GgufMappedData::open(gguf.value());
+  if (!mapped.is_ok()) {
+    return mapped.status();
+  }
+
+  std::vector<float> hidden = std::move(input_stage.value().embeddings);
+  std::vector<std::vector<float>> deepstack_outputs;
+  deepstack_outputs.reserve(graph_plan.value().deepstack_layer_count);
+
+  for (const auto& block : graph_plan.value().blocks) {
+    const auto layer = block.layer_index;
+    const auto layer_prefix =
+      std::string{"Qwen3.5 vision block "} + std::to_string(layer);
+    auto ln1_weight = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ln1", "weight"),
+      {graph_plan.value().vision_embedding_length});
+    if (!ln1_weight.is_ok()) {
+      return ln1_weight.status();
+    }
+    auto ln1_bias = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ln1", "bias"),
+      {graph_plan.value().vision_embedding_length});
+    if (!ln1_bias.is_ok()) {
+      return ln1_bias.status();
+    }
+    auto qkv_weight = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "attn_qkv", "weight"),
+      {graph_plan.value().vision_embedding_length,
+       graph_plan.value().vision_embedding_length * 3U});
+    if (!qkv_weight.is_ok()) {
+      return qkv_weight.status();
+    }
+    auto qkv_bias = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "attn_qkv", "bias"),
+      {graph_plan.value().vision_embedding_length * 3U});
+    if (!qkv_bias.is_ok()) {
+      return qkv_bias.status();
+    }
+    auto attn_out_weight = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "attn_out", "weight"),
+      {graph_plan.value().vision_embedding_length,
+       graph_plan.value().vision_embedding_length});
+    if (!attn_out_weight.is_ok()) {
+      return attn_out_weight.status();
+    }
+    auto attn_out_bias = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "attn_out", "bias"),
+      {graph_plan.value().vision_embedding_length});
+    if (!attn_out_bias.is_ok()) {
+      return attn_out_bias.status();
+    }
+    auto ln2_weight = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ln2", "weight"),
+      {graph_plan.value().vision_embedding_length});
+    if (!ln2_weight.is_ok()) {
+      return ln2_weight.status();
+    }
+    auto ln2_bias = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ln2", "bias"),
+      {graph_plan.value().vision_embedding_length});
+    if (!ln2_bias.is_ok()) {
+      return ln2_bias.status();
+    }
+    auto ffn_up_weight = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ffn_up", "weight"),
+      {graph_plan.value().vision_embedding_length,
+       graph_plan.value().vision_feed_forward_length});
+    if (!ffn_up_weight.is_ok()) {
+      return ffn_up_weight.status();
+    }
+    auto ffn_up_bias = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ffn_up", "bias"),
+      {graph_plan.value().vision_feed_forward_length});
+    if (!ffn_up_bias.is_ok()) {
+      return ffn_up_bias.status();
+    }
+    auto ffn_down_weight = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ffn_down", "weight"),
+      {graph_plan.value().vision_feed_forward_length,
+       graph_plan.value().vision_embedding_length});
+    if (!ffn_down_weight.is_ok()) {
+      return ffn_down_weight.status();
+    }
+    auto ffn_down_bias = load_tensor_f32(
+      gguf.value(), mapped.value(),
+      vision_block_tensor_name(layer, "ffn_down", "bias"),
+      {graph_plan.value().vision_embedding_length});
+    if (!ffn_down_bias.is_ok()) {
+      return ffn_down_bias.status();
+    }
+
+    auto normed = qwen35_layer_norm_token_major(
+      hidden, input_stage.value().token_count, emb_size.value(),
+      ln1_weight.value(), ln1_bias.value(), epsilon, layer_prefix);
+    if (!normed.is_ok()) {
+      return normed.status();
+    }
+    auto qkv = qwen35_linear_token_major(
+      normed.value(), input_stage.value().token_count, emb_size.value(),
+      emb_size.value() * 3U, qkv_weight.value(), qkv_bias.value(),
+      layer_prefix);
+    if (!qkv.is_ok()) {
+      return qkv.status();
+    }
+    auto attention = qwen3vl_attention_token_major(
+      qkv.value(), input_stage.value().token_count, emb_size.value(),
+      head_count.value(), input_stage.value().patch_grid_x,
+      input_stage.value().patch_grid_y, layer_prefix);
+    if (!attention.is_ok()) {
+      return attention.status();
+    }
+    auto attention_output = qwen35_linear_token_major(
+      attention.value(), input_stage.value().token_count, emb_size.value(),
+      emb_size.value(), attn_out_weight.value(), attn_out_bias.value(),
+      layer_prefix);
+    if (!attention_output.is_ok()) {
+      return attention_output.status();
+    }
+    auto status = qwen35_add_in_place(hidden, attention_output.value(),
+                                      layer_prefix);
+    if (!status.is_ok()) {
+      return status;
+    }
+
+    auto ffn_normed = qwen35_layer_norm_token_major(
+      hidden, input_stage.value().token_count, emb_size.value(),
+      ln2_weight.value(), ln2_bias.value(), epsilon, layer_prefix);
+    if (!ffn_normed.is_ok()) {
+      return ffn_normed.status();
+    }
+    auto ffn_hidden = qwen35_linear_token_major(
+      ffn_normed.value(), input_stage.value().token_count, emb_size.value(),
+      ffn_size.value(), ffn_up_weight.value(), ffn_up_bias.value(),
+      layer_prefix);
+    if (!ffn_hidden.is_ok()) {
+      return ffn_hidden.status();
+    }
+    qwen35_gelu_in_place(ffn_hidden.value());
+    auto ffn_output = qwen35_linear_token_major(
+      ffn_hidden.value(), input_stage.value().token_count, ffn_size.value(),
+      emb_size.value(), ffn_down_weight.value(), ffn_down_bias.value(),
+      layer_prefix);
+    if (!ffn_output.is_ok()) {
+      return ffn_output.status();
+    }
+    status = qwen35_add_in_place(hidden, ffn_output.value(), layer_prefix);
+    if (!status.is_ok()) {
+      return status;
+    }
+
+    if (block.has_deepstack) {
+      auto deepstack_input = qwen3vl_group_four_tokens(
+        hidden, input_stage.value().token_count, emb_size.value(),
+        layer_prefix);
+      if (!deepstack_input.is_ok()) {
+        return deepstack_input.status();
+      }
+      auto norm_weight = load_tensor_f32(
+        gguf.value(), mapped.value(),
+        qwen3vl_deepstack_tensor_name(layer, "norm.weight"),
+        {graph_plan.value().vision_embedding_length * 4U});
+      if (!norm_weight.is_ok()) {
+        return norm_weight.status();
+      }
+      auto norm_bias = load_tensor_f32(
+        gguf.value(), mapped.value(),
+        qwen3vl_deepstack_tensor_name(layer, "norm.bias"),
+        {graph_plan.value().vision_embedding_length * 4U});
+      if (!norm_bias.is_ok()) {
+        return norm_bias.status();
+      }
+      auto fc1_weight = load_tensor_f32(
+        gguf.value(), mapped.value(),
+        qwen3vl_deepstack_tensor_name(layer, "fc1.weight"),
+        {graph_plan.value().vision_embedding_length * 4U,
+         graph_plan.value().vision_feed_forward_length});
+      if (!fc1_weight.is_ok()) {
+        return fc1_weight.status();
+      }
+      auto fc1_bias = load_tensor_f32(
+        gguf.value(), mapped.value(),
+        qwen3vl_deepstack_tensor_name(layer, "fc1.bias"),
+        {graph_plan.value().vision_feed_forward_length});
+      if (!fc1_bias.is_ok()) {
+        return fc1_bias.status();
+      }
+      auto fc2_weight = load_tensor_f32(
+        gguf.value(), mapped.value(),
+        qwen3vl_deepstack_tensor_name(layer, "fc2.weight"),
+        {graph_plan.value().vision_feed_forward_length,
+         graph_plan.value().projection_dim});
+      if (!fc2_weight.is_ok()) {
+        return fc2_weight.status();
+      }
+      auto fc2_bias = load_tensor_f32(
+        gguf.value(), mapped.value(),
+        qwen3vl_deepstack_tensor_name(layer, "fc2.bias"),
+        {graph_plan.value().projection_dim});
+      if (!fc2_bias.is_ok()) {
+        return fc2_bias.status();
+      }
+
+      auto deepstack_normed = qwen35_layer_norm_token_major(
+        deepstack_input.value(), image_token_count, merged_width,
+        norm_weight.value(), norm_bias.value(), epsilon, layer_prefix);
+      if (!deepstack_normed.is_ok()) {
+        return deepstack_normed.status();
+      }
+      auto deepstack = qwen3vl_projector_mlp_token_major(
+        deepstack_normed.value(), image_token_count, merged_width,
+        ffn_size.value(), projection_size.value(), fc1_weight.value(),
+        fc1_bias.value(), fc2_weight.value(), fc2_bias.value(), layer_prefix);
+      if (!deepstack.is_ok()) {
+        return deepstack.status();
+      }
+      deepstack_outputs.push_back(std::move(deepstack.value()));
+    }
+  }
+
+  auto post_ln_weight = load_tensor_f32(
+    gguf.value(), mapped.value(), "v.post_ln.weight",
+    {graph_plan.value().vision_embedding_length});
+  if (!post_ln_weight.is_ok()) {
+    return post_ln_weight.status();
+  }
+  auto post_ln_bias = load_tensor_f32(
+    gguf.value(), mapped.value(), "v.post_ln.bias",
+    {graph_plan.value().vision_embedding_length});
+  if (!post_ln_bias.is_ok()) {
+    return post_ln_bias.status();
+  }
+  auto post_normed = qwen35_layer_norm_token_major(
+    hidden, input_stage.value().token_count, emb_size.value(),
+    post_ln_weight.value(), post_ln_bias.value(), epsilon,
+    "Qwen3.5 vision post norm");
+  if (!post_normed.is_ok()) {
+    return post_normed.status();
+  }
+  auto projector_input = qwen3vl_group_four_tokens(
+    post_normed.value(), input_stage.value().token_count, emb_size.value(),
+    "Qwen3.5 vision projector input");
+  if (!projector_input.is_ok()) {
+    return projector_input.status();
+  }
+  auto mm0_weight = load_tensor_f32(
+    gguf.value(), mapped.value(), "mm.0.weight",
+    {graph_plan.value().vision_embedding_length * 4U,
+     graph_plan.value().vision_feed_forward_length});
+  if (!mm0_weight.is_ok()) {
+    return mm0_weight.status();
+  }
+  auto mm0_bias = load_tensor_f32(
+    gguf.value(), mapped.value(), "mm.0.bias",
+    {graph_plan.value().vision_feed_forward_length});
+  if (!mm0_bias.is_ok()) {
+    return mm0_bias.status();
+  }
+  auto mm2_weight = load_tensor_f32(
+    gguf.value(), mapped.value(), "mm.2.weight",
+    {graph_plan.value().vision_feed_forward_length,
+     graph_plan.value().projection_dim});
+  if (!mm2_weight.is_ok()) {
+    return mm2_weight.status();
+  }
+  auto mm2_bias = load_tensor_f32(
+    gguf.value(), mapped.value(), "mm.2.bias",
+    {graph_plan.value().projection_dim});
+  if (!mm2_bias.is_ok()) {
+    return mm2_bias.status();
+  }
+  auto main_projected = qwen3vl_projector_mlp_token_major(
+    projector_input.value(), image_token_count, merged_width, ffn_size.value(),
+    projection_size.value(), mm0_weight.value(), mm0_bias.value(),
+    mm2_weight.value(), mm2_bias.value(), "Qwen3.5 vision projector");
+  if (!main_projected.is_ok()) {
+    return main_projected.status();
+  }
+
+  const auto expected_output_width =
+    projection_size.value() * (deepstack_outputs.size() + 1U);
+  if (expected_output_width != projector_output_width.value()) {
+    return Status::invalid_argument(
+      "Qwen3.5 vision projector output width does not match deepstack outputs");
+  }
+  std::vector<float> embeddings(image_token_count * projector_output_width.value());
+  for (std::size_t token = 0; token < image_token_count; ++token) {
+    const auto output_offset = token * projector_output_width.value();
+    const auto main_offset = token * projection_size.value();
+    std::copy(main_projected.value().begin() +
+                static_cast<std::ptrdiff_t>(main_offset),
+              main_projected.value().begin() +
+                static_cast<std::ptrdiff_t>(main_offset + projection_size.value()),
+              embeddings.begin() + static_cast<std::ptrdiff_t>(output_offset));
+    for (std::size_t stack = 0; stack < deepstack_outputs.size(); ++stack) {
+      const auto feature_offset = output_offset +
+                                  (stack + 1U) * projection_size.value();
+      const auto stack_offset = token * projection_size.value();
+      if (deepstack_outputs[stack].size() !=
+          image_token_count * projection_size.value()) {
+        return Status::internal_error(
+          "Qwen3.5 vision deepstack output shape mismatch");
+      }
+      std::copy(deepstack_outputs[stack].begin() +
+                  static_cast<std::ptrdiff_t>(stack_offset),
+                deepstack_outputs[stack].begin() +
+                  static_cast<std::ptrdiff_t>(stack_offset + projection_size.value()),
+                embeddings.begin() +
+                  static_cast<std::ptrdiff_t>(feature_offset));
+    }
+  }
+
+  Qwen35VisionEncoderResult result;
+  result.image_plan = input_stage.value().image_plan;
+  result.patch_grid_x = input_stage.value().patch_grid_x;
+  result.patch_grid_y = input_stage.value().patch_grid_y;
+  result.vision_embedding_length = graph_plan.value().vision_embedding_length;
+  result.projection_dim = graph_plan.value().projection_dim;
+  result.projector_output_width = graph_plan.value().projector_output_width;
+  result.vision_token_count = input_stage.value().token_count;
+  result.image_token_count = image_token_count;
+  result.deepstack_layer_count = deepstack_outputs.size();
+  result.embeddings = std::move(embeddings);
+  return result;
+}
+
+std::string format_qwen35_vision_encoder_result(
+  const Qwen35VisionEncoderResult& result) {
+  std::ostringstream output;
+  output << "vision encoder patch_grid: " << result.patch_grid_x << 'x'
+         << result.patch_grid_y << '\n';
+  output << "vision encoder embedding_length: "
+         << result.vision_embedding_length << '\n';
+  output << "vision encoder projection_dim: " << result.projection_dim << '\n';
+  output << "vision encoder output_width: "
+         << result.projector_output_width << '\n';
+  output << "vision encoder vision_tokens: "
+         << result.vision_token_count << '\n';
+  output << "vision encoder image_tokens: "
+         << result.image_token_count << '\n';
+  output << "vision encoder deepstack_layers: "
+         << result.deepstack_layer_count << '\n';
+  output << "vision encoder values: " << result.embeddings.size() << '\n';
   return output.str();
 }
 

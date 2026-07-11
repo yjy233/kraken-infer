@@ -132,6 +132,19 @@ struct Qwen35VisionInputStageResult {
   std::vector<float> embeddings;
 };
 
+struct Qwen35VisionEncoderResult {
+  Qwen35ImageEmbeddingPlan image_plan;
+  std::uint32_t patch_grid_x{0};
+  std::uint32_t patch_grid_y{0};
+  std::uint64_t vision_embedding_length{0};
+  std::uint64_t projection_dim{0};
+  std::uint64_t projector_output_width{0};
+  std::size_t vision_token_count{0};
+  std::size_t image_token_count{0};
+  std::size_t deepstack_layer_count{0};
+  std::vector<float> embeddings;
+};
+
 enum class Qwen35MultimodalPromptChunkKind {
   text,
   image,
@@ -194,6 +207,11 @@ run_qwen35_vision_input_stage_cpu(const std::filesystem::path& mmproj_path,
                                   const Qwen35ImagePreprocessResult& image);
 [[nodiscard]] std::string format_qwen35_vision_input_stage_result(
   const Qwen35VisionInputStageResult& result);
+[[nodiscard]] Result<Qwen35VisionEncoderResult> run_qwen35_vision_encoder_cpu(
+  const std::filesystem::path& mmproj_path,
+  const Qwen35ImagePreprocessResult& image);
+[[nodiscard]] std::string format_qwen35_vision_encoder_result(
+  const Qwen35VisionEncoderResult& result);
 [[nodiscard]] bool qwen35_image_url_is_data_url(std::string_view url);
 [[nodiscard]] std::uint64_t qwen35_image_content_fingerprint(
   std::string_view image_url, std::string_view image_mime_type,

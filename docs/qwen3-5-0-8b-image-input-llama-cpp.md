@@ -296,13 +296,19 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   对 normalized HWC float32 pixels 执行 still-image temporal patch conv sum、Qwen3VL
   2x2 spatial merge、patch bias 和 resized position embedding 加法，产出进入
   `v.blk.0` 前的 `[image_patch_tokens, vision_embedding_length]` embedding。
+- 已新增 CPU reference vision encoder：在 input stage 后继续执行 normal
+  LayerNorm、QKV full self-attention、Qwen3VL vision MRoPE、GELU MLP residual
+  blocks、post norm、`mm.0 -> GELU -> mm.2` projector，并在 deepstack 层存在时
+  按 llama.cpp 规则把 deepstack projector 输出拼到主 projector 后。
+  输出为 contiguous F32 `[image_tokens, projector_output_width]`。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
 - 图片请求没有 `--mmproj` 时返回 OpenAI 兼容 400。
 - 图片请求带了非 `qwen3vl_merger` mmproj 时返回 OpenAI 兼容 400。
-- 图片请求带了 `qwen3vl_merger` mmproj 时，当前返回 OpenAI 兼容 501，明确说明
-  native vision graph execution 尚未实现。
+- 图片请求带了 `qwen3vl_merger` mmproj 时，当前 gateway 仍返回 OpenAI 兼容 501；
+  底层 CPU reference vision encoder 已具备，尚未接入 mixed prefill / decoder
+  embedding 注入。
 
 当前还没有实现：
 
@@ -389,9 +395,10 @@ GET http://127.0.0.1:18081/v1/openapi.json
 - native vision graph tensor/hparam plan 已实现，并已用真实 Qwen3.5 0.8B mmproj 校验。
 - CPU reference vision input stage 已实现，能把 normalized HWC float32 pixels 接到
   patch embed、spatial merge 和 position embedding。
-- 下一步是执行 vision transformer blocks、post norm 和 projector。
-- 按 `tools/mtmd/models/qwen3vl.cpp` 实现 patch embed、position embedding resize、
-  vision MRoPE attention、deepstack 和 projector。
+- CPU reference vision encoder 已实现，覆盖 `tools/mtmd/models/qwen3vl.cpp`
+  的 ViT block、vision MRoPE attention、post norm、projector 和 deepstack 拼接顺序。
+- 下一步是把 encoder output 接入 mixed prefill，并做 llama.cpp embedding parity
+  对比；随后再把 block/projector 搬到 Metal/MPS。
 - 输出 contiguous F32 embeddings，形状为 `[n_image_tokens, n_embd_inp]`。
 
 阶段 4：mixed prefill

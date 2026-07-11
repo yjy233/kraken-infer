@@ -2692,6 +2692,25 @@ void test_qwen35_mmproj_metadata_validation() {
     toyllm::format_qwen35_vision_input_stage_result(input_stage.value());
   assert(input_stage_summary.find("vision input tokens: 36") !=
          std::string::npos);
+  const auto encoder =
+    toyllm::run_qwen35_vision_encoder_cpu(valid_path, preprocessed.value());
+  assert(encoder.is_ok());
+  assert(encoder.value().patch_grid_x == 6);
+  assert(encoder.value().patch_grid_y == 6);
+  assert(encoder.value().vision_embedding_length == 4);
+  assert(encoder.value().projection_dim == 6);
+  assert(encoder.value().projector_output_width == 12);
+  assert(encoder.value().vision_token_count == 36);
+  assert(encoder.value().image_token_count == 9);
+  assert(encoder.value().deepstack_layer_count == 1);
+  assert(encoder.value().embeddings.size() == 9U * 12U);
+  for (const auto value : encoder.value().embeddings) {
+    assert(std::abs(value) < 1e-6F);
+  }
+  const auto encoder_summary =
+    toyllm::format_qwen35_vision_encoder_result(encoder.value());
+  assert(encoder_summary.find("vision encoder image_tokens: 9") !=
+         std::string::npos);
 
   const auto photo_plan =
     toyllm::plan_qwen35_image_embeddings(metadata.value(), 640, 480);
