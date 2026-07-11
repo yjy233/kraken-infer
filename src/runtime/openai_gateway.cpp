@@ -1039,6 +1039,27 @@ std::optional<std::pair<int, std::string>> chat_multimodal_error(
         prompt_plan.status().message(),
     };
   }
+  for (const auto& message : request.messages) {
+    for (const auto& part : message.content_parts) {
+      if (part.kind != ChatContentPartKind::image_url || part.image_bytes.empty()) {
+        continue;
+      }
+      Qwen35ImageDataUrl image;
+      image.mime_type = part.image_mime_type;
+      image.bytes = part.image_bytes;
+      image.width = part.image_width;
+      image.height = part.image_height;
+      const auto preprocessed =
+        preprocess_qwen35_image_for_vision(metadata.value(), image);
+      if (!preprocessed.is_ok()) {
+        return std::pair<int, std::string>{
+          400,
+          "failed to preprocess Qwen3.5 image input: " +
+            preprocessed.status().message(),
+        };
+      }
+    }
+  }
   return std::nullopt;
 }
 
@@ -2023,6 +2044,18 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
                   << mmproj_metadata->deepstack_layer_count << '\n';
         std::cout << "mmproj projector_output_width: "
                   << mmproj_metadata->projector_output_width << '\n';
+        std::cout << "mmproj native_image_min_pixels: "
+                  << mmproj_metadata->image_min_pixels << '\n';
+        std::cout << "mmproj native_image_max_pixels: "
+                  << mmproj_metadata->image_max_pixels << '\n';
+        std::cout << "mmproj native_image_mean: ["
+                  << mmproj_metadata->image_mean[0] << ", "
+                  << mmproj_metadata->image_mean[1] << ", "
+                  << mmproj_metadata->image_mean[2] << "]\n";
+        std::cout << "mmproj native_image_std: ["
+                  << mmproj_metadata->image_std[0] << ", "
+                  << mmproj_metadata->image_std[1] << ", "
+                  << mmproj_metadata->image_std[2] << "]\n";
         const auto min_plan = plan_qwen35_image_embeddings(*mmproj_metadata, 28, 28);
         if (min_plan.is_ok()) {
           std::cout << "mmproj native_image_patch_size: "

@@ -3,6 +3,7 @@
 #include "toyllm/core/status.hpp"
 #include "toyllm/runtime/chat_message.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -21,6 +22,11 @@ struct Qwen35MmprojMetadata {
   std::string vision_projector_type;
   std::int64_t spatial_merge_size{0};
   std::int64_t patch_size{0};
+  std::uint64_t image_min_pixels{0};
+  std::uint64_t image_max_pixels{0};
+  std::array<float, 3> image_mean{0.0F, 0.0F, 0.0F};
+  std::array<float, 3> image_std{1.0F, 1.0F, 1.0F};
+  bool image_mean_std_present{false};
   std::int64_t vision_block_count{0};
   std::int64_t vision_embedding_length{0};
   std::size_t tensor_count{0};
@@ -58,6 +64,22 @@ struct Qwen35ImageEmbeddingPlan {
   std::size_t image_tokens{0};
   std::size_t min_image_tokens{0};
   std::size_t max_image_tokens{0};
+};
+
+struct Qwen35ImageRgb {
+  std::uint32_t width{0};
+  std::uint32_t height{0};
+  std::vector<std::uint8_t> pixels;
+};
+
+struct Qwen35ImagePreprocessResult {
+  Qwen35ImageEmbeddingPlan plan;
+  std::uint32_t width{0};
+  std::uint32_t height{0};
+  std::uint32_t channels{3};
+  std::array<float, 3> mean{0.0F, 0.0F, 0.0F};
+  std::array<float, 3> std{1.0F, 1.0F, 1.0F};
+  std::vector<float> pixels;
 };
 
 enum class Qwen35MultimodalPromptChunkKind {
@@ -121,6 +143,8 @@ struct Qwen35MultimodalTokenPlan {
   std::string_view mime_type, const std::vector<std::uint8_t>& image_bytes);
 [[nodiscard]] Result<Qwen35ImageDataUrl> parse_qwen35_image_data_url(
   std::string_view url);
+[[nodiscard]] Result<Qwen35ImageRgb> decode_qwen35_image_rgb(
+  const Qwen35ImageDataUrl& image);
 [[nodiscard]] Result<Qwen35ImageEmbeddingPlan> plan_qwen35_image_embeddings(
   const Qwen35MmprojMetadata& metadata, std::uint32_t image_width,
   std::uint32_t image_height);
@@ -128,6 +152,10 @@ struct Qwen35MultimodalTokenPlan {
   const Qwen35MmprojMetadata& metadata, const Qwen35ImageDataUrl& image);
 [[nodiscard]] std::string format_qwen35_image_embedding_plan(
   const Qwen35ImageEmbeddingPlan& plan);
+[[nodiscard]] Result<Qwen35ImagePreprocessResult> preprocess_qwen35_image_for_vision(
+  const Qwen35MmprojMetadata& metadata, const Qwen35ImageRgb& image);
+[[nodiscard]] Result<Qwen35ImagePreprocessResult> preprocess_qwen35_image_for_vision(
+  const Qwen35MmprojMetadata& metadata, const Qwen35ImageDataUrl& image);
 [[nodiscard]] Result<Qwen35MultimodalPromptPlan> plan_qwen35_multimodal_prompt(
   const Qwen35MmprojMetadata& metadata, const std::vector<ChatMessage>& messages,
   bool add_generation_prompt, bool enable_thinking);

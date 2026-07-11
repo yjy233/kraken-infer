@@ -7,6 +7,10 @@ project(
   LANGUAGES CXX
 )
 
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
+
 if(DEFINED TOYLLM_ENABLE_MPS AND NOT DEFINED KRAKEN_INFER_ENABLE_MPS)
   set(KRAKEN_INFER_ENABLE_MPS "${TOYLLM_ENABLE_MPS}" CACHE BOOL
       "Enable Metal Performance Shaders backend on macOS" FORCE)
@@ -76,8 +80,19 @@ target_include_directories(
 target_compile_features(kraken_infer_core PUBLIC cxx_std_20)
 kraken_infer_set_project_warnings(kraken_infer_core)
 
-if(APPLE AND (KRAKEN_INFER_ENABLE_MPS OR KRAKEN_INFER_ENABLE_MPSGRAPH))
-  enable_language(OBJCXX)
+if(APPLE)
+  target_sources(kraken_infer_core PRIVATE src/runtime/qwen35_image_decode.mm)
+  target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_APPLE_IMAGEIO=1)
+  target_link_libraries(
+    kraken_infer_core
+    PUBLIC
+      "-framework Foundation"
+      "-framework CoreGraphics"
+      "-framework ImageIO"
+  )
+else()
+  target_sources(kraken_infer_core PRIVATE src/runtime/qwen35_image_decode_stub.cpp)
+  target_compile_definitions(kraken_infer_core PUBLIC KRAKEN_INFER_ENABLE_APPLE_IMAGEIO=0)
 endif()
 
 if(APPLE AND KRAKEN_INFER_ENABLE_MPS)

@@ -278,6 +278,12 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
 - 已新增 tokenizer-aware multimodal token plan：text chunk 使用 Qwen3.5 GGUF
   tokenizer + `parse_special` 编码，image chunk 保留 raw embedding token count；
   同时区分 `total_tokens` 和 image MRoPE `total_position_advance`。
+- 已新增 native image decode/preprocess 入口：macOS 下通过 ImageIO/CoreGraphics
+  将 data URL 图片解码为 RGB；随后按 llama.cpp Qwen3VL dynamic-size 规则做
+  bilinear resize，并使用 mmproj GGUF 中的 `clip.vision.image_mean/std` 输出 HWC
+  float32 normalized pixels。
+- `qwen3vl_merger` mmproj 加载时会强制读取 `clip.vision.image_mean/std`，并派生
+  native `image_min_pixels/image_max_pixels`，启动摘要会打印这些预处理参数。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
@@ -288,7 +294,6 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
 
 当前还没有实现：
 
-- image bytes 的像素 decode / preprocess。PNG/JPEG header 宽高推断已完成。
 - `tools/mtmd/models/qwen3vl.cpp` 对应的 vision tower / merger / deepstack graph。
 - mixed token/raw-embedding prefill。
 - 多模态 block cache key 的真实 image chunk commit/restore。当前已有
@@ -366,7 +371,9 @@ GET http://127.0.0.1:18081/v1/openapi.json
 
 阶段 3：image preprocessing + vision graph
 
-- dynamic-size image embedding plan 已实现；下一步是接入真实像素 resize/normalize。
+- dynamic-size image embedding plan 已实现。
+- macOS ImageIO image decode 已实现；CPU bilinear resize + mean/std normalize 已实现。
+- 下一步是把 normalized HWC float32 pixels 接入原生 vision graph 输入张量。
 - 按 `tools/mtmd/models/qwen3vl.cpp` 实现 patch embed、position embedding resize、
   vision MRoPE attention、deepstack 和 projector。
 - 输出 contiguous F32 embeddings，形状为 `[n_image_tokens, n_embd_inp]`。

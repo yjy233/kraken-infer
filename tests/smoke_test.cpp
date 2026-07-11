@@ -245,6 +245,19 @@ void test_qwen35_image_data_url_parser() {
     toyllm::parse_qwen35_image_data_url("data:text/plain;base64,SGVsbG8=");
   assert(!not_image.is_ok());
   assert(not_image.status().message().find("image/") != std::string::npos);
+
+#if defined(KRAKEN_INFER_ENABLE_APPLE_IMAGEIO) && KRAKEN_INFER_ENABLE_APPLE_IMAGEIO
+  const auto red_png = toyllm::parse_qwen35_image_data_url(
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/"
+    "lV9SogAAAABJRU5ErkJggg==");
+  assert(red_png.is_ok());
+  const auto decoded = toyllm::decode_qwen35_image_rgb(red_png.value());
+  assert(decoded.is_ok());
+  assert(decoded.value().width == 1);
+  assert(decoded.value().height == 1);
+  assert(decoded.value().pixels.size() == 3);
+#endif
 }
 
 void test_qwen35_prefix_cache_index() {
@@ -2435,6 +2448,17 @@ void write_gguf_metadata_i64(std::ostream& output, const std::string& key,
   write_binary_value(output, value);
 }
 
+void write_gguf_metadata_f32_array(std::ostream& output, const std::string& key,
+                                   const std::array<float, 3>& values) {
+  write_gguf_string(output, key);
+  write_binary_value(output, static_cast<std::uint32_t>(9));  // GGUF array
+  write_binary_value(output, static_cast<std::uint32_t>(6));  // GGUF float32
+  write_binary_value(output, static_cast<std::uint64_t>(values.size()));
+  for (const auto value : values) {
+    write_binary_value(output, value);
+  }
+}
+
 std::uint64_t align_up_for_test(std::uint64_t value, std::uint64_t alignment) {
   const auto remainder = value % alignment;
   return remainder == 0 ? value : value + (alignment - remainder);
@@ -2463,13 +2487,17 @@ void write_tiny_qwen35_mmproj_gguf(const std::filesystem::path& path,
   write_binary_value(output, static_cast<std::uint32_t>(0x46554747U));  // GGUF
   write_binary_value(output, static_cast<std::uint32_t>(3));
   write_binary_value(output, static_cast<std::uint64_t>(tensors.size()));
-  write_binary_value(output, static_cast<std::uint64_t>(6));
+  write_binary_value(output, static_cast<std::uint64_t>(8));
   write_gguf_metadata_string(output, "general.architecture", "clip");
   write_gguf_metadata_string(output, "clip.vision.projector_type", "qwen3vl_merger");
   write_gguf_metadata_i64(output, "clip.vision.spatial_merge_size", 2);
   write_gguf_metadata_i64(output, "clip.vision.patch_size", 14);
   write_gguf_metadata_i64(output, "clip.vision.block_count", 1);
   write_gguf_metadata_i64(output, "clip.vision.embedding_length", 1024);
+  write_gguf_metadata_f32_array(output, "clip.vision.image_mean",
+                                {0.5F, 0.25F, 0.125F});
+  write_gguf_metadata_f32_array(output, "clip.vision.image_std",
+                                {0.5F, 0.25F, 0.125F});
 
   std::uint64_t offset = 0;
   for (const auto& tensor : tensors) {
@@ -2531,9 +2559,17 @@ void test_qwen35_mmproj_metadata_validation() {
   assert(metadata.value().deepstack_layer_count == 1);
   assert(metadata.value().projector_output_width == 2048);
   assert(metadata.value().missing_required_tensors.empty());
+  assert(metadata.value().image_mean_std_present);
+  assert(metadata.value().image_min_pixels ==
+         static_cast<std::uint64_t>(8U) * 28U * 28U);
+  assert(metadata.value().image_max_pixels ==
+         static_cast<std::uint64_t>(4096U) * 28U * 28U);
+  assert(std::abs(metadata.value().image_mean[0] - 0.5F) < 1e-6F);
+  assert(std::abs(metadata.value().image_std[2] - 0.125F) < 1e-6F);
   const auto summary = toyllm::format_qwen35_mmproj_metadata_summary(metadata.value());
   assert(summary.find("qwen3vl_required_tensors_present: true") != std::string::npos);
   assert(summary.find("projector_output_width: 2048") != std::string::npos);
+  assert(summary.find("image_mean: [0.5, 0.25, 0.125]") != std::string::npos);
   const auto compatible =
     toyllm::validate_qwen35_mmproj_text_embedding_compatibility(metadata.value(), 2048);
   assert(compatible.is_ok());
@@ -2551,6 +2587,27 @@ void test_qwen35_mmproj_metadata_validation() {
   assert(tiny_plan.value().merge_grid_x == 3);
   assert(tiny_plan.value().merge_grid_y == 3);
   assert(tiny_plan.value().image_tokens == 9);
+
+  toyllm::Qwen35ImageRgb red_image;
+  red_image.width = 28;
+  red_image.height = 28;
+  red_image.pixels.resize(28U * 28U * 3U);
+  for (std::size_t index = 0; index < red_image.pixels.size(); index += 3U) {
+    red_image.pixels[index] = static_cast<std::uint8_t>(255U);
+    red_image.pixels[index + 1U] = static_cast<std::uint8_t>(0U);
+    red_image.pixels[index + 2U] = static_cast<std::uint8_t>(0U);
+  }
+  const auto preprocessed =
+    toyllm::preprocess_qwen35_image_for_vision(metadata.value(), red_image);
+  assert(preprocessed.is_ok());
+  assert(preprocessed.value().width == 84);
+  assert(preprocessed.value().height == 84);
+  assert(preprocessed.value().channels == 3);
+  assert(preprocessed.value().plan.image_tokens == 9);
+  assert(preprocessed.value().pixels.size() == 84U * 84U * 3U);
+  assert(std::abs(preprocessed.value().pixels[0] - 1.0F) < 1e-6F);
+  assert(std::abs(preprocessed.value().pixels[1] + 1.0F) < 1e-6F);
+  assert(std::abs(preprocessed.value().pixels[2] + 1.0F) < 1e-6F);
 
   const auto photo_plan =
     toyllm::plan_qwen35_image_embeddings(metadata.value(), 640, 480);

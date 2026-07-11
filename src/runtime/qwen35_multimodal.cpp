@@ -10,6 +10,7 @@
 #include <limits>
 #include <sstream>
 #include <string_view>
+#include <utility>
 #include <variant>
 
 namespace toyllm {
@@ -63,6 +64,25 @@ std::int64_t optional_gguf_i64(const GgufFile& file, const std::string& key) {
     return static_cast<std::int64_t>(std::get<std::uint64_t>(value->value));
   }
   return 0;
+}
+
+Result<std::array<float, 3>> required_gguf_f32x3(const GgufFile& file,
+                                                 const std::string& key) {
+  const auto* value = find_gguf_metadata(file, key);
+  if (value == nullptr || !std::holds_alternative<std::vector<double>>(value->value)) {
+    return Status::invalid_argument("mmproj GGUF is missing float array metadata: " +
+                                    key);
+  }
+  const auto& values = std::get<std::vector<double>>(value->value);
+  if (values.size() != 3U) {
+    return Status::invalid_argument("mmproj GGUF float array metadata must have 3 values: " +
+                                    key);
+  }
+  std::array<float, 3> result{};
+  for (std::size_t index = 0; index < result.size(); ++index) {
+    result[index] = static_cast<float>(values[index]);
+  }
+  return result;
 }
 
 std::string ascii_lower(std::string value) {
@@ -322,6 +342,59 @@ Result<std::uint64_t> checked_u64_mul(std::uint64_t lhs, std::uint64_t rhs,
   return lhs * rhs;
 }
 
+Result<std::size_t> checked_size_from_u64(std::uint64_t value,
+                                          std::string_view label) {
+  if (value > std::numeric_limits<std::size_t>::max()) {
+    return Status::invalid_argument(std::string{label} + " exceeds size_t range");
+  }
+  return static_cast<std::size_t>(value);
+}
+
+Result<std::size_t> checked_image_elements(std::uint32_t width,
+                                           std::uint32_t height,
+                                           std::uint32_t channels,
+                                           std::string_view label) {
+  auto pixels = checked_u64_mul(width, height, label);
+  if (!pixels.is_ok()) {
+    return pixels.status();
+  }
+  auto elements = checked_u64_mul(pixels.value(), channels, label);
+  if (!elements.is_ok()) {
+    return elements.status();
+  }
+  return checked_size_from_u64(elements.value(), label);
+}
+
+Result<std::uint64_t> qwen35_image_pixel_limit(
+  const Qwen35MmprojMetadata& metadata, std::size_t token_limit) {
+  auto patch_size = positive_u32_from_i64(metadata.patch_size,
+                                          "clip.vision.patch_size");
+  if (!patch_size.is_ok()) {
+    return patch_size.status();
+  }
+  auto spatial_merge_size =
+    metadata.spatial_merge_size > 0
+      ? positive_u32_from_i64(metadata.spatial_merge_size,
+                              "clip.vision.spatial_merge_size")
+      : Result<std::uint32_t>{2U};
+  if (!spatial_merge_size.is_ok()) {
+    return spatial_merge_size.status();
+  }
+  auto align_size = checked_u64_mul(patch_size.value(),
+                                    spatial_merge_size.value(),
+                                    "Qwen3.5 image align size");
+  if (!align_size.is_ok()) {
+    return align_size.status();
+  }
+  auto patch_area = checked_u64_mul(align_size.value(), align_size.value(),
+                                    "Qwen3.5 image patch area");
+  if (!patch_area.is_ok()) {
+    return patch_area.status();
+  }
+  return checked_u64_mul(patch_area.value(), token_limit,
+                         "Qwen3.5 image pixel limit");
+}
+
 std::uint32_t round_by_factor(std::uint32_t value, std::uint32_t factor) {
   const auto rounded = std::round(static_cast<double>(value) /
                                   static_cast<double>(factor));
@@ -385,6 +458,57 @@ Result<Qwen35ImageDimensions> qwen35_smart_resize(std::uint32_t width,
   return Qwen35ImageDimensions{aligned_width, aligned_height};
 }
 
+float lerp(float lhs, float rhs, float weight) {
+  return lhs + (rhs - lhs) * weight;
+}
+
+std::size_t rgb_offset(std::uint32_t width, std::uint32_t x, std::uint32_t y) {
+  return (static_cast<std::size_t>(y) * width + x) * 3U;
+}
+
+std::vector<std::uint8_t> resize_rgb_bilinear(const Qwen35ImageRgb& src,
+                                              std::uint32_t target_width,
+                                              std::uint32_t target_height) {
+  std::vector<std::uint8_t> dst(
+    static_cast<std::size_t>(target_width) * target_height * 3U);
+  const auto x_ratio =
+    target_width > 1U
+      ? static_cast<float>(src.width - 1U) / static_cast<float>(target_width - 1U)
+      : 0.0F;
+  const auto y_ratio =
+    target_height > 1U
+      ? static_cast<float>(src.height - 1U) / static_cast<float>(target_height - 1U)
+      : 0.0F;
+
+  for (std::uint32_t y = 0; y < target_height; ++y) {
+    for (std::uint32_t x = 0; x < target_width; ++x) {
+      const auto px = static_cast<float>(x) * x_ratio;
+      const auto py = static_cast<float>(y) * y_ratio;
+      const auto x0 = std::min(static_cast<std::uint32_t>(px), src.width - 1U);
+      const auto y0 = std::min(static_cast<std::uint32_t>(py), src.height - 1U);
+      const auto x1 = std::min(x0 + 1U, src.width - 1U);
+      const auto y1 = std::min(y0 + 1U, src.height - 1U);
+      const auto xf = px - static_cast<float>(x0);
+      const auto yf = py - static_cast<float>(y0);
+
+      const auto p00 = rgb_offset(src.width, x0, y0);
+      const auto p10 = rgb_offset(src.width, x1, y0);
+      const auto p01 = rgb_offset(src.width, x0, y1);
+      const auto p11 = rgb_offset(src.width, x1, y1);
+      const auto out = rgb_offset(target_width, x, y);
+      for (std::size_t channel = 0; channel < 3U; ++channel) {
+        const auto top = lerp(static_cast<float>(src.pixels[p00 + channel]),
+                              static_cast<float>(src.pixels[p10 + channel]), xf);
+        const auto bottom = lerp(static_cast<float>(src.pixels[p01 + channel]),
+                                 static_cast<float>(src.pixels[p11 + channel]), xf);
+        const auto value = std::clamp(lerp(top, bottom, yf), 0.0F, 255.0F);
+        dst[out + channel] = static_cast<std::uint8_t>(value);
+      }
+    }
+  }
+  return dst;
+}
+
 bool qwen35_role_is_supported(std::string_view role) {
   return role == "system" || role == "user" || role == "assistant";
 }
@@ -414,7 +538,19 @@ Result<Qwen35ImageDimensions> image_part_dimensions(const ChatContentPart& part)
     return Qwen35ImageDimensions{part.image_width, part.image_height};
   }
   if (!part.image_mime_type.empty() && !part.image_bytes.empty()) {
-    return infer_qwen35_image_dimensions(part.image_mime_type, part.image_bytes);
+    auto dimensions =
+      infer_qwen35_image_dimensions(part.image_mime_type, part.image_bytes);
+    if (dimensions.is_ok()) {
+      return dimensions;
+    }
+    Qwen35ImageDataUrl image;
+    image.mime_type = part.image_mime_type;
+    image.bytes = part.image_bytes;
+    auto decoded = decode_qwen35_image_rgb(image);
+    if (!decoded.is_ok()) {
+      return decoded.status();
+    }
+    return Qwen35ImageDimensions{decoded.value().width, decoded.value().height};
   }
   return Status::invalid_argument(
     "Qwen3.5 multimodal prompt image part is missing dimensions");
@@ -500,6 +636,16 @@ Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
   metadata.spatial_merge_size =
     optional_gguf_i64(gguf.value(), "clip.vision.spatial_merge_size");
   metadata.patch_size = optional_gguf_i64(gguf.value(), "clip.vision.patch_size");
+  const auto image_min_pixels =
+    optional_gguf_i64(gguf.value(), "clip.vision.image_min_pixels");
+  const auto image_max_pixels =
+    optional_gguf_i64(gguf.value(), "clip.vision.image_max_pixels");
+  if (image_min_pixels > 0) {
+    metadata.image_min_pixels = static_cast<std::uint64_t>(image_min_pixels);
+  }
+  if (image_max_pixels > 0) {
+    metadata.image_max_pixels = static_cast<std::uint64_t>(image_max_pixels);
+  }
   metadata.vision_block_count =
     optional_gguf_i64(gguf.value(), "clip.vision.block_count");
   metadata.vision_embedding_length =
@@ -513,6 +659,38 @@ Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
       "mmproj GGUF is missing clip.projector_type / clip.vision.projector_type");
   }
   if (qwen35_mmproj_is_qwen3vl_merger(metadata)) {
+    auto image_mean = required_gguf_f32x3(gguf.value(), "clip.vision.image_mean");
+    if (!image_mean.is_ok()) {
+      return image_mean.status();
+    }
+    auto image_std = required_gguf_f32x3(gguf.value(), "clip.vision.image_std");
+    if (!image_std.is_ok()) {
+      return image_std.status();
+    }
+    for (const auto value : image_std.value()) {
+      if (value <= 0.0F) {
+        return Status::invalid_argument("clip.vision.image_std values must be positive");
+      }
+    }
+    metadata.image_mean = image_mean.value();
+    metadata.image_std = image_std.value();
+    metadata.image_mean_std_present = true;
+    if (metadata.image_min_pixels == 0) {
+      auto min_pixels = qwen35_image_pixel_limit(
+        metadata, kQwen35VlDefaultMinImageTokens);
+      if (!min_pixels.is_ok()) {
+        return min_pixels.status();
+      }
+      metadata.image_min_pixels = min_pixels.value();
+    }
+    if (metadata.image_max_pixels == 0) {
+      auto max_pixels = qwen35_image_pixel_limit(
+        metadata, kQwen35VlDefaultMaxImageTokens);
+      if (!max_pixels.is_ok()) {
+        return max_pixels.status();
+      }
+      metadata.image_max_pixels = max_pixels.value();
+    }
     metadata.missing_required_tensors =
       qwen3vl_missing_required_tensors(gguf.value(), metadata.deepstack_layer_count);
     metadata.qwen3vl_required_tensors_present =
@@ -567,6 +745,12 @@ std::string format_qwen35_mmproj_metadata_summary(
   output << "mmproj vision_projector_type: " << metadata.vision_projector_type << '\n';
   output << "mmproj spatial_merge_size: " << metadata.spatial_merge_size << '\n';
   output << "mmproj patch_size: " << metadata.patch_size << '\n';
+  output << "mmproj image_min_pixels: " << metadata.image_min_pixels << '\n';
+  output << "mmproj image_max_pixels: " << metadata.image_max_pixels << '\n';
+  output << "mmproj image_mean: [" << metadata.image_mean[0] << ", "
+         << metadata.image_mean[1] << ", " << metadata.image_mean[2] << "]\n";
+  output << "mmproj image_std: [" << metadata.image_std[0] << ", "
+         << metadata.image_std[1] << ", " << metadata.image_std[2] << "]\n";
   output << "mmproj vision_block_count: " << metadata.vision_block_count << '\n';
   output << "mmproj vision_embedding_length: " << metadata.vision_embedding_length << '\n';
   output << "mmproj qwen3vl_required_tensors_present: "
@@ -699,21 +883,29 @@ Result<Qwen35ImageEmbeddingPlan> plan_qwen35_image_embeddings(
   if (!patch_area.is_ok()) {
     return patch_area.status();
   }
-  auto min_pixels = checked_u64_mul(
-    patch_area.value(), kQwen35VlDefaultMinImageTokens,
-    "Qwen3.5 minimum image pixels");
-  if (!min_pixels.is_ok()) {
-    return min_pixels.status();
+  auto min_pixels = metadata.image_min_pixels;
+  if (min_pixels == 0) {
+    auto default_min_pixels = checked_u64_mul(
+      patch_area.value(), kQwen35VlDefaultMinImageTokens,
+      "Qwen3.5 minimum image pixels");
+    if (!default_min_pixels.is_ok()) {
+      return default_min_pixels.status();
+    }
+    min_pixels = default_min_pixels.value();
   }
-  auto max_pixels = checked_u64_mul(
-    patch_area.value(), kQwen35VlDefaultMaxImageTokens,
-    "Qwen3.5 maximum image pixels");
-  if (!max_pixels.is_ok()) {
-    return max_pixels.status();
+  auto max_pixels = metadata.image_max_pixels;
+  if (max_pixels == 0) {
+    auto default_max_pixels = checked_u64_mul(
+      patch_area.value(), kQwen35VlDefaultMaxImageTokens,
+      "Qwen3.5 maximum image pixels");
+    if (!default_max_pixels.is_ok()) {
+      return default_max_pixels.status();
+    }
+    max_pixels = default_max_pixels.value();
   }
   auto resized = qwen35_smart_resize(
     image_width, image_height, static_cast<std::uint32_t>(align_size.value()),
-    min_pixels.value(), max_pixels.value());
+    min_pixels, max_pixels);
   if (!resized.is_ok()) {
     return resized.status();
   }
@@ -731,12 +923,17 @@ Result<Qwen35ImageEmbeddingPlan> plan_qwen35_image_embeddings(
   plan.spatial_merge_size = spatial_merge_size.value();
   plan.patch_grid_x = plan.resized_width / plan.patch_size;
   plan.patch_grid_y = plan.resized_height / plan.patch_size;
+  if (plan.patch_grid_x % plan.spatial_merge_size != 0 ||
+      plan.patch_grid_y % plan.spatial_merge_size != 0) {
+    return Status::invalid_argument(
+      "Qwen3.5 resized image patch grid is not spatial-merge aligned");
+  }
   plan.merge_grid_x = plan.patch_grid_x / plan.spatial_merge_size;
   plan.merge_grid_y = plan.patch_grid_y / plan.spatial_merge_size;
   plan.image_tokens =
     static_cast<std::size_t>(plan.merge_grid_x) * plan.merge_grid_y;
-  plan.min_image_tokens = kQwen35VlDefaultMinImageTokens;
-  plan.max_image_tokens = kQwen35VlDefaultMaxImageTokens;
+  plan.min_image_tokens = static_cast<std::size_t>(min_pixels / patch_area.value());
+  plan.max_image_tokens = static_cast<std::size_t>(max_pixels / patch_area.value());
   if (plan.merge_grid_x == 0 || plan.merge_grid_y == 0 ||
       plan.image_tokens == 0) {
     return Status::invalid_argument("Qwen3.5 image embedding plan has no tokens");
@@ -766,6 +963,70 @@ std::string format_qwen35_image_embedding_plan(
   output << "image token_limits: " << plan.min_image_tokens << ".."
          << plan.max_image_tokens << '\n';
   return output.str();
+}
+
+Result<Qwen35ImagePreprocessResult> preprocess_qwen35_image_for_vision(
+  const Qwen35MmprojMetadata& metadata, const Qwen35ImageRgb& image) {
+  if (!qwen35_mmproj_is_qwen3vl_merger(metadata)) {
+    return Status::invalid_argument(
+      "Qwen3.5 image preprocessing requires qwen3vl_merger mmproj");
+  }
+  if (!metadata.image_mean_std_present) {
+    return Status::invalid_argument(
+      "Qwen3.5 image preprocessing requires clip.vision.image_mean/std metadata");
+  }
+  if (image.width == 0 || image.height == 0) {
+    return Status::invalid_argument("RGB image dimensions must be non-zero");
+  }
+  auto expected_elements = checked_image_elements(
+    image.width, image.height, 3U, "RGB image element count");
+  if (!expected_elements.is_ok()) {
+    return expected_elements.status();
+  }
+  if (image.pixels.size() != expected_elements.value()) {
+    return Status::invalid_argument("RGB image buffer size does not match dimensions");
+  }
+  auto plan = plan_qwen35_image_embeddings(metadata, image.width, image.height);
+  if (!plan.is_ok()) {
+    return plan.status();
+  }
+  auto resized_elements = checked_image_elements(
+    plan.value().resized_width, plan.value().resized_height, 3U,
+    "Qwen3.5 preprocessed image element count");
+  if (!resized_elements.is_ok()) {
+    return resized_elements.status();
+  }
+
+  const auto resized = resize_rgb_bilinear(
+    image, plan.value().resized_width, plan.value().resized_height);
+  Qwen35ImagePreprocessResult result;
+  result.plan = plan.value();
+  result.width = plan.value().resized_width;
+  result.height = plan.value().resized_height;
+  result.mean = metadata.image_mean;
+  result.std = metadata.image_std;
+  result.pixels.resize(resized_elements.value());
+  for (std::size_t index = 0; index < resized_elements.value(); index += 3U) {
+    result.pixels[index] =
+      (static_cast<float>(resized[index]) / 255.0F - metadata.image_mean[0]) /
+      metadata.image_std[0];
+    result.pixels[index + 1U] =
+      (static_cast<float>(resized[index + 1U]) / 255.0F - metadata.image_mean[1]) /
+      metadata.image_std[1];
+    result.pixels[index + 2U] =
+      (static_cast<float>(resized[index + 2U]) / 255.0F - metadata.image_mean[2]) /
+      metadata.image_std[2];
+  }
+  return result;
+}
+
+Result<Qwen35ImagePreprocessResult> preprocess_qwen35_image_for_vision(
+  const Qwen35MmprojMetadata& metadata, const Qwen35ImageDataUrl& image) {
+  auto decoded = decode_qwen35_image_rgb(image);
+  if (!decoded.is_ok()) {
+    return decoded.status();
+  }
+  return preprocess_qwen35_image_for_vision(metadata, decoded.value());
 }
 
 Result<Qwen35MultimodalPromptPlan> plan_qwen35_multimodal_prompt(
