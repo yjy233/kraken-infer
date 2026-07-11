@@ -161,6 +161,9 @@ completion tokens 下实测，wall time 有机器负载波动：
 - MTP `draft_tokens=3, p_min=0.20`：`real 11.43s`，
   drafted=45、accepted=28、verify_steps=36、confidence_stops=26、
   adaptive_budget=3、adaptive_changes=2。
+- 2026-07-11 参数 sweep 中，`p_min=0.30` 更稳：`draft_tokens=1`
+  为 `real 10.44s`，`draft_tokens=2` 为 `real 10.67s`，
+  `draft_tokens=3` 为 `real 10.92s`，同轮 no-MTP 为 `real 11.05s`。
 
 对比上一轮 full-logits draft head：
 
@@ -190,7 +193,8 @@ token-only argmax 移除了 `p_min=0` 下不需要的 softmax denominator；adap
 
 - `CpuGenerationRequest` / CLI / OpenAI gateway 增加 `mtp_p_min`。
 - Qwen35 MTP draft 支持 top-1 softmax probability gate：
-  - 默认 `mtp_p_min = 0`，保持原 device argmax 快路径。
+  - 默认 `mtp_p_min = 0.30`，减少低置信 draft 带来的额外 MTP block 计算。
+  - 显式传 `mtp_p_min = 0` 时仍保留 device argmax 快路径。
   - `mtp_p_min > 0` 时回读 draft logits 计算 greedy probability，低于阈值则停止本轮
     draft，不送入 target verify。
 - `CpuMtpReport`、CLI 文本输出、OpenAI response headers 和 profiler metadata 增加：

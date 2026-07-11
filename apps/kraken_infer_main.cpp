@@ -1007,7 +1007,7 @@ int main(int argc, char** argv) {
     bool stream = false;
     bool enable_mtp = true;
     std::size_t mtp_draft_tokens = 3;
-    double mtp_p_min = 0.0;
+    double mtp_p_min = 0.30;
     toyllm::Device compute_device = toyllm::Device::cpu();
     toyllm::CpuSamplingConfig sampling;
     toyllm::ObservabilityConfig observability;
@@ -1199,7 +1199,7 @@ int main(int argc, char** argv) {
   bool stream = false;
   bool enable_mtp = true;
   std::size_t mtp_draft_tokens = 3;
-  double mtp_p_min = 0.0;
+  double mtp_p_min = 0.30;
   toyllm::Device compute_device = toyllm::Device::cpu();
   toyllm::CpuSamplingConfig sampling;
   toyllm::ObservabilityConfig observability;

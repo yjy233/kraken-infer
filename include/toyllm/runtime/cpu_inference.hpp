@@ -37,7 +37,7 @@ struct CpuGenerationRequest {
   bool enable_thinking{false};
   bool enable_mtp{true};
   std::size_t mtp_draft_tokens{3};
-  double mtp_p_min{0.0};
+  double mtp_p_min{0.30};
   bool cache_prompt{false};
   std::size_t cache_reuse_min_tokens{0};
   std::size_t cache_block_tokens{0};

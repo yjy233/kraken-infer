@@ -812,6 +812,26 @@ fused top-1 / token-only argmax / adaptive budget 结果：
 | `--mtp --mtp-draft-tokens 3 --mtp-p-min 0` | 14.38s | drafted=62 accepted=28 verify_steps=50 adaptive_budget=1 adaptive_changes=4 |
 | `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 11.43s | drafted=45 accepted=28 verify_steps=36 confidence_stops=26 adaptive_budget=3 adaptive_changes=2 |
 
+### 2026-07-11 MTP 参数 sweep
+
+同一 prompt、Debug build、`max-new-tokens=64`，使用
+`scripts/sweep_qwen35_mtp.py --draft-tokens 1,2,3 --p-min 0,0.1,0.2,0.3`
+重新扫描：
+
+| 模式 | wall time | 说明 |
+| --- | ---: | --- |
+| `--no-mtp` | 11.05s | baseline greedy decode |
+| `--mtp --mtp-draft-tokens 1 --mtp-p-min 0.30` | 10.44s | drafted=23 accepted=21 verify_steps=23 acceptance=91.3% |
+| `--mtp --mtp-draft-tokens 2 --mtp-p-min 0.30` | 10.67s | drafted=30 accepted=27 verify_steps=30 acceptance=90.0% |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.30` | 10.92s | drafted=28 accepted=26 verify_steps=28 acceptance=92.9% |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.20` | 11.56s | drafted=45 accepted=28 verify_steps=36 acceptance=62.2% |
+
+结论：`p_min=0` / `0.10` 会让低置信 draft 过多，MTP block 额外计算抵消
+verify 步数收益；`p_min=0.30` 在这轮 sweep 中最稳定。CLI、OpenAI gateway
+和脚本默认 `mtp_p_min` 因此改为 `0.30`。默认仍保留 `mtp_draft_tokens=3`，
+用于保持多 token draft 能力；追求单 prompt 最低延迟时可以显式设为
+`--mtp-draft-tokens 1`。
+
 已实现 batch target verify 和 device-side draft chain：
 
 - target verify 会一次 decode `[sampled_token + draft_tokens]`。
@@ -824,7 +844,7 @@ fused top-1 / token-only argmax / adaptive budget 结果：
 - adaptive budget 会在低 acceptance 窗口把 draft budget 从请求值逐步降下来，
   减少低收益深层 draft 的 MTP block 计算。
 
-现在 `p_min=0.20` 仍是最划算配置；`p_min=0` 通过 adaptive budget 减少了无效
+现在推荐默认 `p_min=0.30`；`p_min=0` 通过 adaptive budget 减少了无效
 draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。后续要继续提速，
 优先方向是：
 
@@ -850,7 +870,7 @@ draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。
 ```bash
 python3 scripts/compare_qwen35_llamacpp.py \
   --max-tokens 64 \
-  --p-min 0.20 \
+  --p-min 0.30 \
   --json-out build/qwen35-compare.json
 
 python3 scripts/sweep_qwen35_mtp.py \

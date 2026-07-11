@@ -68,7 +68,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18184)
     parser.add_argument("--max-tokens", type=int, default=8)
     parser.add_argument("--draft-tokens", type=int, default=3)
-    parser.add_argument("--p-min", type=float, default=0.0)
+    parser.add_argument("--p-min", type=float, default=0.30)
     parser.add_argument(
         "--prompt",
         default="Write one short sentence about Metal acceleration.",

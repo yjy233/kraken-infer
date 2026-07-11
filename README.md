@@ -207,7 +207,7 @@ KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
   --prefill-chunk-tokens 32 \
   --mtp \
   --mtp-draft-tokens 3 \
-  --mtp-p-min 0.20 \
+  --mtp-p-min 0.30 \
   --no-cache-prompt \
   --profile summary
 ```
@@ -242,7 +242,7 @@ curl http://127.0.0.1:18080/v1/chat/completions \
     "max_completion_tokens": 128,
     "mtp": true,
     "mtp_draft_tokens": 3,
-    "mtp_p_min": 0.20,
+    "mtp_p_min": 0.30,
     "chat_template_kwargs": {"enable_thinking": false},
     "device": "mps"
   }'
@@ -275,7 +275,7 @@ curl http://127.0.0.1:18080/v1/completions \
     "max_tokens": 32,
     "mtp": true,
     "mtp_draft_tokens": 3,
-    "mtp_p_min": 0.20,
+    "mtp_p_min": 0.30,
     "device": "mps"
   }'
 ```
@@ -446,7 +446,7 @@ make qwen35-vl-test
 Qwen3.5 MTP gateway smoke test：
 
 ```bash
-python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --p-min 0.20
+python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --p-min 0.30
 ```
 
 Qwen3.5 kraken/llama.cpp 对照基准：
@@ -454,7 +454,7 @@ Qwen3.5 kraken/llama.cpp 对照基准：
 ```bash
 python3 scripts/compare_qwen35_llamacpp.py \
   --max-tokens 64 \
-  --p-min 0.20 \
+  --p-min 0.30 \
   --json-out build/qwen35-compare.json
 ```
 
