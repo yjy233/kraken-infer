@@ -66,6 +66,27 @@ std::int64_t optional_gguf_i64(const GgufFile& file, const std::string& key) {
   return 0;
 }
 
+double optional_gguf_f64(const GgufFile& file, const std::string& key) {
+  const auto* value = find_gguf_metadata(file, key);
+  if (value == nullptr) {
+    return 0.0;
+  }
+  if (std::holds_alternative<double>(value->value)) {
+    return std::get<double>(value->value);
+  }
+  return 0.0;
+}
+
+std::vector<bool> optional_gguf_bool_array(const GgufFile& file,
+                                           const std::string& key) {
+  const auto* value = find_gguf_metadata(file, key);
+  if (value == nullptr ||
+      !std::holds_alternative<std::vector<bool>>(value->value)) {
+    return {};
+  }
+  return std::get<std::vector<bool>>(value->value);
+}
+
 Result<std::array<float, 3>> required_gguf_f32x3(const GgufFile& file,
                                                  const std::string& key) {
   const auto* value = find_gguf_metadata(file, key);
@@ -83,6 +104,17 @@ Result<std::array<float, 3>> required_gguf_f32x3(const GgufFile& file,
     result[index] = static_cast<float>(values[index]);
   }
   return result;
+}
+
+std::vector<std::size_t> qwen3vl_deepstack_indices_from_flags(
+  const std::vector<bool>& flags) {
+  std::vector<std::size_t> indices;
+  for (std::size_t index = 0; index < flags.size(); ++index) {
+    if (flags[index]) {
+      indices.push_back(index);
+    }
+  }
+  return indices;
 }
 
 std::string ascii_lower(std::string value) {
@@ -165,8 +197,9 @@ std::string qwen3vl_deepstack_tensor_name(std::size_t layer_index,
   return output.str();
 }
 
-std::vector<std::string> qwen3vl_missing_required_tensors(const GgufFile& file,
-                                                         std::size_t& deepstack_layers) {
+std::vector<std::string> qwen3vl_missing_required_tensors(
+  const GgufFile& file, const std::vector<bool>& deepstack_layer_flags,
+  std::size_t& deepstack_layers) {
   std::vector<std::string> missing;
   constexpr std::array<std::string_view, 8> required{
     "v.patch_embd.weight",
@@ -182,7 +215,15 @@ std::vector<std::string> qwen3vl_missing_required_tensors(const GgufFile& file,
     append_missing_tensor(file, name, missing);
   }
 
-  const auto deepstack_indices = qwen3vl_deepstack_layer_indices(file);
+  auto deepstack_indices =
+    qwen3vl_deepstack_indices_from_flags(deepstack_layer_flags);
+  auto tensor_deepstack_indices = qwen3vl_deepstack_layer_indices(file);
+  deepstack_indices.insert(deepstack_indices.end(), tensor_deepstack_indices.begin(),
+                           tensor_deepstack_indices.end());
+  std::sort(deepstack_indices.begin(), deepstack_indices.end());
+  deepstack_indices.erase(
+    std::unique(deepstack_indices.begin(), deepstack_indices.end()),
+    deepstack_indices.end());
   deepstack_layers = deepstack_indices.size();
   constexpr std::array<std::string_view, 6> deepstack_suffixes{
     "norm.weight",
@@ -212,6 +253,76 @@ std::uint64_t qwen3vl_projector_output_width(const GgufFile& file,
     return 0;
   }
   return bias->shape[0] * multiplier;
+}
+
+std::string format_shape(const std::vector<std::uint64_t>& shape) {
+  std::ostringstream output;
+  output << '[';
+  for (std::size_t index = 0; index < shape.size(); ++index) {
+    if (index != 0) {
+      output << 'x';
+    }
+    output << shape[index];
+  }
+  output << ']';
+  return output.str();
+}
+
+Qwen35VisionTensorPlan make_vision_tensor_plan(const GgufTensorInfo& tensor) {
+  Qwen35VisionTensorPlan plan;
+  plan.name = tensor.name;
+  plan.shape = tensor.shape;
+  plan.type = tensor.type;
+  plan.byte_size = tensor.byte_size;
+  return plan;
+}
+
+Result<Qwen35VisionTensorPlan> require_tensor_shape(
+  const GgufFile& file, std::string_view name,
+  const std::vector<std::uint64_t>& expected_shape) {
+  const auto* tensor = find_gguf_tensor(file, std::string{name});
+  if (tensor == nullptr) {
+    return Status::invalid_argument("qwen3vl_merger mmproj is missing tensor: " +
+                                    std::string{name});
+  }
+  if (tensor->shape != expected_shape) {
+    return Status::invalid_argument(
+      "qwen3vl_merger tensor " + std::string{name} + " shape " +
+      format_shape(tensor->shape) + " does not match expected " +
+      format_shape(expected_shape));
+  }
+  return make_vision_tensor_plan(*tensor);
+}
+
+Result<std::uint64_t> required_positive_u64_from_i64(std::int64_t value,
+                                                     std::string_view label) {
+  if (value <= 0) {
+    return Status::invalid_argument(std::string{label} + " must be positive");
+  }
+  return static_cast<std::uint64_t>(value);
+}
+
+Status append_required_tensor(
+  const GgufFile& file, std::string_view name,
+  const std::vector<std::uint64_t>& expected_shape,
+  std::vector<Qwen35VisionTensorPlan>& tensors) {
+  auto tensor = require_tensor_shape(file, name, expected_shape);
+  if (!tensor.is_ok()) {
+    return tensor.status();
+  }
+  tensors.push_back(std::move(tensor.value()));
+  return Status::ok();
+}
+
+std::string vision_block_tensor_name(std::size_t layer_index,
+                                     std::string_view stem,
+                                     std::string_view suffix) {
+  std::ostringstream output;
+  output << "v.blk." << layer_index << '.' << stem;
+  if (!suffix.empty()) {
+    output << '.' << suffix;
+  }
+  return output.str();
 }
 
 std::uint16_t read_be_u16(const std::vector<std::uint8_t>& bytes,
@@ -646,6 +757,17 @@ Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
   if (image_max_pixels > 0) {
     metadata.image_max_pixels = static_cast<std::uint64_t>(image_max_pixels);
   }
+  metadata.image_size = optional_gguf_i64(gguf.value(), "clip.vision.image_size");
+  metadata.projection_dim =
+    optional_gguf_i64(gguf.value(), "clip.vision.projection_dim");
+  metadata.vision_feed_forward_length =
+    optional_gguf_i64(gguf.value(), "clip.vision.feed_forward_length");
+  metadata.vision_attention_head_count =
+    optional_gguf_i64(gguf.value(), "clip.vision.attention.head_count");
+  metadata.vision_attention_layer_norm_epsilon =
+    optional_gguf_f64(gguf.value(), "clip.vision.attention.layer_norm_epsilon");
+  metadata.deepstack_layer_flags =
+    optional_gguf_bool_array(gguf.value(), "clip.vision.is_deepstack_layers");
   metadata.vision_block_count =
     optional_gguf_i64(gguf.value(), "clip.vision.block_count");
   metadata.vision_embedding_length =
@@ -691,8 +813,8 @@ Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
       }
       metadata.image_max_pixels = max_pixels.value();
     }
-    metadata.missing_required_tensors =
-      qwen3vl_missing_required_tensors(gguf.value(), metadata.deepstack_layer_count);
+    metadata.missing_required_tensors = qwen3vl_missing_required_tensors(
+      gguf.value(), metadata.deepstack_layer_flags, metadata.deepstack_layer_count);
     metadata.qwen3vl_required_tensors_present =
       metadata.missing_required_tensors.empty();
     metadata.projector_output_width =
@@ -751,6 +873,14 @@ std::string format_qwen35_mmproj_metadata_summary(
          << metadata.image_mean[1] << ", " << metadata.image_mean[2] << "]\n";
   output << "mmproj image_std: [" << metadata.image_std[0] << ", "
          << metadata.image_std[1] << ", " << metadata.image_std[2] << "]\n";
+  output << "mmproj image_size: " << metadata.image_size << '\n';
+  output << "mmproj projection_dim: " << metadata.projection_dim << '\n';
+  output << "mmproj vision_feed_forward_length: "
+         << metadata.vision_feed_forward_length << '\n';
+  output << "mmproj vision_attention_head_count: "
+         << metadata.vision_attention_head_count << '\n';
+  output << "mmproj vision_attention_layer_norm_epsilon: "
+         << metadata.vision_attention_layer_norm_epsilon << '\n';
   output << "mmproj vision_block_count: " << metadata.vision_block_count << '\n';
   output << "mmproj vision_embedding_length: " << metadata.vision_embedding_length << '\n';
   output << "mmproj qwen3vl_required_tensors_present: "
@@ -761,6 +891,365 @@ std::string format_qwen35_mmproj_metadata_summary(
     output << "mmproj missing_required_tensors: "
            << join_names(metadata.missing_required_tensors) << '\n';
   }
+  return output.str();
+}
+
+Result<Qwen35VisionGraphPlan> plan_qwen35_vision_graph(
+  const std::filesystem::path& mmproj_path) {
+  auto metadata = load_qwen35_mmproj_metadata(mmproj_path);
+  if (!metadata.is_ok()) {
+    return metadata.status();
+  }
+  if (!qwen35_mmproj_is_qwen3vl_merger(metadata.value())) {
+    return Status::invalid_argument(
+      "Qwen3.5 native vision graph requires qwen3vl_merger mmproj");
+  }
+  auto gguf = read_gguf_file(mmproj_path);
+  if (!gguf.is_ok()) {
+    return gguf.status();
+  }
+
+  auto image_size = required_positive_u64_from_i64(
+    metadata.value().image_size, "clip.vision.image_size");
+  if (!image_size.is_ok()) {
+    return image_size.status();
+  }
+  auto patch_size = required_positive_u64_from_i64(
+    metadata.value().patch_size, "clip.vision.patch_size");
+  if (!patch_size.is_ok()) {
+    return patch_size.status();
+  }
+  auto spatial_merge_size = required_positive_u64_from_i64(
+    metadata.value().spatial_merge_size, "clip.vision.spatial_merge_size");
+  if (!spatial_merge_size.is_ok()) {
+    return spatial_merge_size.status();
+  }
+  if (spatial_merge_size.value() != 2U) {
+    return Status::invalid_argument(
+      "Qwen3.5 native vision graph currently supports spatial_merge_size=2");
+  }
+  auto vision_embedding_length = required_positive_u64_from_i64(
+    metadata.value().vision_embedding_length, "clip.vision.embedding_length");
+  if (!vision_embedding_length.is_ok()) {
+    return vision_embedding_length.status();
+  }
+  auto vision_feed_forward_length = required_positive_u64_from_i64(
+    metadata.value().vision_feed_forward_length,
+    "clip.vision.feed_forward_length");
+  if (!vision_feed_forward_length.is_ok()) {
+    return vision_feed_forward_length.status();
+  }
+  auto projection_dim = required_positive_u64_from_i64(
+    metadata.value().projection_dim, "clip.vision.projection_dim");
+  if (!projection_dim.is_ok()) {
+    return projection_dim.status();
+  }
+  auto attention_head_count = required_positive_u64_from_i64(
+    metadata.value().vision_attention_head_count,
+    "clip.vision.attention.head_count");
+  if (!attention_head_count.is_ok()) {
+    return attention_head_count.status();
+  }
+  auto block_count_u64 = required_positive_u64_from_i64(
+    metadata.value().vision_block_count, "clip.vision.block_count");
+  if (!block_count_u64.is_ok()) {
+    return block_count_u64.status();
+  }
+  auto block_count_size =
+    checked_size_from_u64(block_count_u64.value(), "clip.vision.block_count");
+  if (!block_count_size.is_ok()) {
+    return block_count_size.status();
+  }
+  if (image_size.value() % patch_size.value() != 0) {
+    return Status::invalid_argument(
+      "clip.vision.image_size must be divisible by clip.vision.patch_size");
+  }
+  if (vision_embedding_length.value() % attention_head_count.value() != 0) {
+    return Status::invalid_argument(
+      "clip.vision.embedding_length must be divisible by attention.head_count");
+  }
+  const auto head_dim =
+    vision_embedding_length.value() / attention_head_count.value();
+  if (head_dim % 4U != 0) {
+    return Status::invalid_argument(
+      "Qwen3.5 native vision graph requires vision head_dim divisible by 4");
+  }
+
+  const auto image_grid = image_size.value() / patch_size.value();
+  auto position_count = checked_u64_mul(image_grid, image_grid,
+                                        "Qwen3.5 vision position count");
+  if (!position_count.is_ok()) {
+    return position_count.status();
+  }
+  auto merge_factor = checked_u64_mul(spatial_merge_size.value(),
+                                      spatial_merge_size.value(),
+                                      "Qwen3.5 vision merge factor");
+  if (!merge_factor.is_ok()) {
+    return merge_factor.status();
+  }
+  auto merged_embedding = checked_u64_mul(
+    vision_embedding_length.value(), merge_factor.value(),
+    "Qwen3.5 vision merged embedding width");
+  if (!merged_embedding.is_ok()) {
+    return merged_embedding.status();
+  }
+
+  Qwen35VisionGraphPlan plan;
+  plan.path = mmproj_path;
+  plan.image_size = image_size.value();
+  plan.patch_size = patch_size.value();
+  plan.spatial_merge_size = spatial_merge_size.value();
+  plan.vision_embedding_length = vision_embedding_length.value();
+  plan.vision_feed_forward_length = vision_feed_forward_length.value();
+  plan.projection_dim = projection_dim.value();
+  plan.vision_attention_head_count = attention_head_count.value();
+  plan.vision_attention_layer_norm_epsilon =
+    metadata.value().vision_attention_layer_norm_epsilon;
+  plan.block_count = block_count_size.value();
+  plan.projector_output_width = metadata.value().projector_output_width;
+
+  auto append_input = [&](std::string_view name,
+                          std::vector<std::uint64_t> shape) -> Status {
+    return append_required_tensor(gguf.value(), name, shape, plan.input_tensors);
+  };
+  auto status = append_input(
+    "v.patch_embd.weight",
+    {patch_size.value(), patch_size.value(), 3U, vision_embedding_length.value()});
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = append_input(
+    "v.patch_embd.weight.1",
+    {patch_size.value(), patch_size.value(), 3U, vision_embedding_length.value()});
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = append_input("v.patch_embd.bias", {vision_embedding_length.value()});
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = append_input("v.position_embd.weight",
+                        {vision_embedding_length.value(), position_count.value()});
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  status = append_required_tensor(
+    gguf.value(), "v.post_ln.weight", {vision_embedding_length.value()},
+    plan.output_norm_tensors);
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = append_required_tensor(
+    gguf.value(), "v.post_ln.bias", {vision_embedding_length.value()},
+    plan.output_norm_tensors);
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  status = append_required_tensor(
+    gguf.value(), "mm.0.weight",
+    {merged_embedding.value(), vision_feed_forward_length.value()},
+    plan.projector_tensors);
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = append_required_tensor(
+    gguf.value(), "mm.0.bias", {vision_feed_forward_length.value()},
+    plan.projector_tensors);
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = append_required_tensor(
+    gguf.value(), "mm.2.weight",
+    {vision_feed_forward_length.value(), projection_dim.value()},
+    plan.projector_tensors);
+  if (!status.is_ok()) {
+    return status;
+  }
+  status = append_required_tensor(
+    gguf.value(), "mm.2.bias", {projection_dim.value()}, plan.projector_tensors);
+  if (!status.is_ok()) {
+    return status;
+  }
+
+  plan.deepstack_layer_indices =
+    qwen3vl_deepstack_indices_from_flags(metadata.value().deepstack_layer_flags);
+  auto tensor_deepstack_indices = qwen3vl_deepstack_layer_indices(gguf.value());
+  plan.deepstack_layer_indices.insert(
+    plan.deepstack_layer_indices.end(), tensor_deepstack_indices.begin(),
+    tensor_deepstack_indices.end());
+  std::sort(plan.deepstack_layer_indices.begin(),
+            plan.deepstack_layer_indices.end());
+  plan.deepstack_layer_indices.erase(
+    std::unique(plan.deepstack_layer_indices.begin(),
+                plan.deepstack_layer_indices.end()),
+    plan.deepstack_layer_indices.end());
+  for (const auto layer_index : plan.deepstack_layer_indices) {
+    if (layer_index >= plan.block_count) {
+      return Status::invalid_argument(
+        "clip.vision.is_deepstack_layers contains out-of-range layer index");
+    }
+  }
+  plan.deepstack_layer_count = plan.deepstack_layer_indices.size();
+  if (plan.projector_output_width !=
+      projection_dim.value() * static_cast<std::uint64_t>(plan.deepstack_layer_count + 1U)) {
+    return Status::invalid_argument(
+      "qwen3vl_merger projector_output_width does not match projection_dim and deepstack layers");
+  }
+
+  std::vector<bool> block_has_deepstack(plan.block_count, false);
+  for (const auto layer_index : plan.deepstack_layer_indices) {
+    block_has_deepstack[layer_index] = true;
+  }
+  plan.blocks.reserve(plan.block_count);
+  for (std::size_t layer_index = 0; layer_index < plan.block_count; ++layer_index) {
+    Qwen35VisionBlockPlan block;
+    block.layer_index = layer_index;
+    block.has_deepstack = block_has_deepstack[layer_index];
+    auto append_block = [&](std::string_view stem, std::string_view suffix,
+                            std::vector<std::uint64_t> shape) -> Status {
+      return append_required_tensor(
+        gguf.value(), vision_block_tensor_name(layer_index, stem, suffix),
+        shape, block.tensors);
+    };
+    status = append_block("ln1", "weight", {vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("ln1", "bias", {vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("attn_qkv", "weight",
+                          {vision_embedding_length.value(),
+                           vision_embedding_length.value() * 3U});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("attn_qkv", "bias",
+                          {vision_embedding_length.value() * 3U});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("attn_out", "weight",
+                          {vision_embedding_length.value(),
+                           vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("attn_out", "bias", {vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("ln2", "weight", {vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("ln2", "bias", {vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("ffn_up", "weight",
+                          {vision_embedding_length.value(),
+                           vision_feed_forward_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("ffn_up", "bias",
+                          {vision_feed_forward_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("ffn_down", "weight",
+                          {vision_feed_forward_length.value(),
+                           vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+    status = append_block("ffn_down", "bias", {vision_embedding_length.value()});
+    if (!status.is_ok()) {
+      return status;
+    }
+
+    if (block.has_deepstack) {
+      auto append_deepstack =
+        [&](std::string_view suffix,
+            std::vector<std::uint64_t> shape) -> Status {
+        return append_required_tensor(
+          gguf.value(), qwen3vl_deepstack_tensor_name(layer_index, suffix),
+          shape, block.deepstack_tensors);
+      };
+      status = append_deepstack("norm.weight", {merged_embedding.value()});
+      if (!status.is_ok()) {
+        return status;
+      }
+      status = append_deepstack("norm.bias", {merged_embedding.value()});
+      if (!status.is_ok()) {
+        return status;
+      }
+      status = append_deepstack(
+        "fc1.weight",
+        {merged_embedding.value(), vision_feed_forward_length.value()});
+      if (!status.is_ok()) {
+        return status;
+      }
+      status = append_deepstack("fc1.bias",
+                                {vision_feed_forward_length.value()});
+      if (!status.is_ok()) {
+        return status;
+      }
+      status = append_deepstack(
+        "fc2.weight",
+        {vision_feed_forward_length.value(), projection_dim.value()});
+      if (!status.is_ok()) {
+        return status;
+      }
+      status = append_deepstack("fc2.bias", {projection_dim.value()});
+      if (!status.is_ok()) {
+        return status;
+      }
+    }
+    plan.required_tensor_count += block.tensors.size() + block.deepstack_tensors.size();
+    plan.blocks.push_back(std::move(block));
+  }
+  plan.required_tensor_count += plan.input_tensors.size() +
+                                plan.output_norm_tensors.size() +
+                                plan.projector_tensors.size();
+  return plan;
+}
+
+std::string format_qwen35_vision_graph_plan(const Qwen35VisionGraphPlan& plan) {
+  std::ostringstream output;
+  output << "vision graph path: " << plan.path.string() << '\n';
+  output << "vision graph image_size: " << plan.image_size << '\n';
+  output << "vision graph patch_size: " << plan.patch_size << '\n';
+  output << "vision graph spatial_merge_size: " << plan.spatial_merge_size << '\n';
+  output << "vision graph embedding_length: "
+         << plan.vision_embedding_length << '\n';
+  output << "vision graph feed_forward_length: "
+         << plan.vision_feed_forward_length << '\n';
+  output << "vision graph projection_dim: " << plan.projection_dim << '\n';
+  output << "vision graph attention_head_count: "
+         << plan.vision_attention_head_count << '\n';
+  output << "vision graph attention_layer_norm_epsilon: "
+         << plan.vision_attention_layer_norm_epsilon << '\n';
+  output << "vision graph block_count: " << plan.block_count << '\n';
+  output << "vision graph deepstack_layer_count: "
+         << plan.deepstack_layer_count << '\n';
+  output << "vision graph projector_output_width: "
+         << plan.projector_output_width << '\n';
+  output << "vision graph required_tensors: "
+         << plan.required_tensor_count << '\n';
+  output << "vision graph deepstack_layers:";
+  if (plan.deepstack_layer_indices.empty()) {
+    output << " none";
+  } else {
+    for (const auto layer_index : plan.deepstack_layer_indices) {
+      output << ' ' << layer_index;
+    }
+  }
+  output << '\n';
   return output.str();
 }
 

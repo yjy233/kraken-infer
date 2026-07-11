@@ -2448,6 +2448,13 @@ void write_gguf_metadata_i64(std::ostream& output, const std::string& key,
   write_binary_value(output, value);
 }
 
+void write_gguf_metadata_f64(std::ostream& output, const std::string& key,
+                             double value) {
+  write_gguf_string(output, key);
+  write_binary_value(output, static_cast<std::uint32_t>(12));  // GGUF float64
+  write_binary_value(output, value);
+}
+
 void write_gguf_metadata_f32_array(std::ostream& output, const std::string& key,
                                    const std::array<float, 3>& values) {
   write_gguf_string(output, key);
@@ -2456,6 +2463,17 @@ void write_gguf_metadata_f32_array(std::ostream& output, const std::string& key,
   write_binary_value(output, static_cast<std::uint64_t>(values.size()));
   for (const auto value : values) {
     write_binary_value(output, value);
+  }
+}
+
+void write_gguf_metadata_bool_array(std::ostream& output, const std::string& key,
+                                    const std::vector<bool>& values) {
+  write_gguf_string(output, key);
+  write_binary_value(output, static_cast<std::uint32_t>(9));  // GGUF array
+  write_binary_value(output, static_cast<std::uint32_t>(7));  // GGUF bool
+  write_binary_value(output, static_cast<std::uint64_t>(values.size()));
+  for (const auto value : values) {
+    write_binary_value(output, static_cast<std::uint8_t>(value ? 1U : 0U));
   }
 }
 
@@ -2487,13 +2505,21 @@ void write_tiny_qwen35_mmproj_gguf(const std::filesystem::path& path,
   write_binary_value(output, static_cast<std::uint32_t>(0x46554747U));  // GGUF
   write_binary_value(output, static_cast<std::uint32_t>(3));
   write_binary_value(output, static_cast<std::uint64_t>(tensors.size()));
-  write_binary_value(output, static_cast<std::uint64_t>(8));
+  write_binary_value(output, static_cast<std::uint64_t>(14));
   write_gguf_metadata_string(output, "general.architecture", "clip");
   write_gguf_metadata_string(output, "clip.vision.projector_type", "qwen3vl_merger");
   write_gguf_metadata_i64(output, "clip.vision.spatial_merge_size", 2);
   write_gguf_metadata_i64(output, "clip.vision.patch_size", 14);
+  write_gguf_metadata_i64(output, "clip.vision.image_size", 28);
+  write_gguf_metadata_i64(output, "clip.vision.projection_dim", 6);
+  write_gguf_metadata_i64(output, "clip.vision.feed_forward_length", 8);
   write_gguf_metadata_i64(output, "clip.vision.block_count", 1);
-  write_gguf_metadata_i64(output, "clip.vision.embedding_length", 1024);
+  write_gguf_metadata_i64(output, "clip.vision.embedding_length", 4);
+  write_gguf_metadata_i64(output, "clip.vision.attention.head_count", 1);
+  write_gguf_metadata_f64(output, "clip.vision.attention.layer_norm_epsilon",
+                          1e-6);
+  write_gguf_metadata_bool_array(output, "clip.vision.is_deepstack_layers",
+                                 {true});
   write_gguf_metadata_f32_array(output, "clip.vision.image_mean",
                                 {0.5F, 0.25F, 0.125F});
   write_gguf_metadata_f32_array(output, "clip.vision.image_std",
@@ -2529,20 +2555,34 @@ void write_tiny_qwen35_mmproj_gguf(const std::filesystem::path& path,
 
 std::vector<TinyGgufTensorSpec> tiny_qwen35_mmproj_tensors() {
   return {
-    {"v.patch_embd.weight", {1}},
-    {"v.patch_embd.weight.1", {1}},
-    {"v.patch_embd.bias", {1}},
-    {"v.position_embd.weight", {1}},
-    {"mm.0.weight", {1}},
-    {"mm.0.bias", {1}},
-    {"mm.2.weight", {1}},
-    {"mm.2.bias", {1024}},
-    {"v.deepstack.3.norm.weight", {1}},
-    {"v.deepstack.3.norm.bias", {1}},
-    {"v.deepstack.3.fc1.weight", {1}},
-    {"v.deepstack.3.fc1.bias", {1}},
-    {"v.deepstack.3.fc2.weight", {1}},
-    {"v.deepstack.3.fc2.bias", {1}},
+    {"v.patch_embd.weight", {14, 14, 3, 4}},
+    {"v.patch_embd.weight.1", {14, 14, 3, 4}},
+    {"v.patch_embd.bias", {4}},
+    {"v.position_embd.weight", {4, 4}},
+    {"v.post_ln.weight", {4}},
+    {"v.post_ln.bias", {4}},
+    {"v.blk.0.ln1.weight", {4}},
+    {"v.blk.0.ln1.bias", {4}},
+    {"v.blk.0.attn_qkv.weight", {4, 12}},
+    {"v.blk.0.attn_qkv.bias", {12}},
+    {"v.blk.0.attn_out.weight", {4, 4}},
+    {"v.blk.0.attn_out.bias", {4}},
+    {"v.blk.0.ln2.weight", {4}},
+    {"v.blk.0.ln2.bias", {4}},
+    {"v.blk.0.ffn_up.weight", {4, 8}},
+    {"v.blk.0.ffn_up.bias", {8}},
+    {"v.blk.0.ffn_down.weight", {8, 4}},
+    {"v.blk.0.ffn_down.bias", {4}},
+    {"mm.0.weight", {16, 8}},
+    {"mm.0.bias", {8}},
+    {"mm.2.weight", {8, 6}},
+    {"mm.2.bias", {6}},
+    {"v.deepstack.0.norm.weight", {16}},
+    {"v.deepstack.0.norm.bias", {16}},
+    {"v.deepstack.0.fc1.weight", {16, 8}},
+    {"v.deepstack.0.fc1.bias", {8}},
+    {"v.deepstack.0.fc2.weight", {8, 6}},
+    {"v.deepstack.0.fc2.bias", {6}},
   };
 }
 
@@ -2557,7 +2597,7 @@ void test_qwen35_mmproj_metadata_validation() {
   assert(toyllm::qwen35_mmproj_is_qwen3vl_merger(metadata.value()));
   assert(metadata.value().qwen3vl_required_tensors_present);
   assert(metadata.value().deepstack_layer_count == 1);
-  assert(metadata.value().projector_output_width == 2048);
+  assert(metadata.value().projector_output_width == 12);
   assert(metadata.value().missing_required_tensors.empty());
   assert(metadata.value().image_mean_std_present);
   assert(metadata.value().image_min_pixels ==
@@ -2566,17 +2606,46 @@ void test_qwen35_mmproj_metadata_validation() {
          static_cast<std::uint64_t>(4096U) * 28U * 28U);
   assert(std::abs(metadata.value().image_mean[0] - 0.5F) < 1e-6F);
   assert(std::abs(metadata.value().image_std[2] - 0.125F) < 1e-6F);
+  assert(metadata.value().image_size == 28);
+  assert(metadata.value().projection_dim == 6);
+  assert(metadata.value().vision_feed_forward_length == 8);
+  assert(metadata.value().vision_attention_head_count == 1);
+  assert(metadata.value().deepstack_layer_flags.size() == 1);
+  assert(metadata.value().deepstack_layer_flags[0]);
   const auto summary = toyllm::format_qwen35_mmproj_metadata_summary(metadata.value());
   assert(summary.find("qwen3vl_required_tensors_present: true") != std::string::npos);
-  assert(summary.find("projector_output_width: 2048") != std::string::npos);
+  assert(summary.find("projector_output_width: 12") != std::string::npos);
   assert(summary.find("image_mean: [0.5, 0.25, 0.125]") != std::string::npos);
   const auto compatible =
-    toyllm::validate_qwen35_mmproj_text_embedding_compatibility(metadata.value(), 2048);
+    toyllm::validate_qwen35_mmproj_text_embedding_compatibility(metadata.value(), 12);
   assert(compatible.is_ok());
   const auto incompatible =
-    toyllm::validate_qwen35_mmproj_text_embedding_compatibility(metadata.value(), 1024);
+    toyllm::validate_qwen35_mmproj_text_embedding_compatibility(metadata.value(), 6);
   assert(!incompatible.is_ok());
   assert(incompatible.message().find("embedding_length") != std::string::npos);
+
+  const auto vision_graph_plan = toyllm::plan_qwen35_vision_graph(valid_path);
+  assert(vision_graph_plan.is_ok());
+  assert(vision_graph_plan.value().image_size == 28);
+  assert(vision_graph_plan.value().patch_size == 14);
+  assert(vision_graph_plan.value().vision_embedding_length == 4);
+  assert(vision_graph_plan.value().vision_feed_forward_length == 8);
+  assert(vision_graph_plan.value().projection_dim == 6);
+  assert(vision_graph_plan.value().block_count == 1);
+  assert(vision_graph_plan.value().deepstack_layer_count == 1);
+  assert(vision_graph_plan.value().projector_output_width == 12);
+  assert(vision_graph_plan.value().input_tensors.size() == 4);
+  assert(vision_graph_plan.value().output_norm_tensors.size() == 2);
+  assert(vision_graph_plan.value().projector_tensors.size() == 4);
+  assert(vision_graph_plan.value().blocks.size() == 1);
+  assert(vision_graph_plan.value().blocks[0].tensors.size() == 12);
+  assert(vision_graph_plan.value().blocks[0].deepstack_tensors.size() == 6);
+  const auto graph_summary =
+    toyllm::format_qwen35_vision_graph_plan(vision_graph_plan.value());
+  assert(graph_summary.find("vision graph required_tensors: 28") !=
+         std::string::npos);
+  assert(graph_summary.find("vision graph deepstack_layers: 0") !=
+         std::string::npos);
 
   const auto tiny_plan = toyllm::plan_qwen35_image_embeddings(metadata.value(), 28, 28);
   assert(tiny_plan.is_ok());

@@ -27,6 +27,12 @@ struct Qwen35MmprojMetadata {
   std::array<float, 3> image_mean{0.0F, 0.0F, 0.0F};
   std::array<float, 3> image_std{1.0F, 1.0F, 1.0F};
   bool image_mean_std_present{false};
+  std::int64_t image_size{0};
+  std::int64_t projection_dim{0};
+  std::int64_t vision_feed_forward_length{0};
+  std::int64_t vision_attention_head_count{0};
+  double vision_attention_layer_norm_epsilon{0.0};
+  std::vector<bool> deepstack_layer_flags;
   std::int64_t vision_block_count{0};
   std::int64_t vision_embedding_length{0};
   std::size_t tensor_count{0};
@@ -82,6 +88,41 @@ struct Qwen35ImagePreprocessResult {
   std::vector<float> pixels;
 };
 
+struct Qwen35VisionTensorPlan {
+  std::string name;
+  std::vector<std::uint64_t> shape;
+  std::uint32_t type{0};
+  std::uint64_t byte_size{0};
+};
+
+struct Qwen35VisionBlockPlan {
+  std::size_t layer_index{0};
+  bool has_deepstack{false};
+  std::vector<Qwen35VisionTensorPlan> tensors;
+  std::vector<Qwen35VisionTensorPlan> deepstack_tensors;
+};
+
+struct Qwen35VisionGraphPlan {
+  std::filesystem::path path;
+  std::uint64_t image_size{0};
+  std::uint64_t patch_size{0};
+  std::uint64_t spatial_merge_size{0};
+  std::uint64_t vision_embedding_length{0};
+  std::uint64_t vision_feed_forward_length{0};
+  std::uint64_t projection_dim{0};
+  std::uint64_t vision_attention_head_count{0};
+  double vision_attention_layer_norm_epsilon{0.0};
+  std::size_t block_count{0};
+  std::size_t deepstack_layer_count{0};
+  std::uint64_t projector_output_width{0};
+  std::size_t required_tensor_count{0};
+  std::vector<std::size_t> deepstack_layer_indices;
+  std::vector<Qwen35VisionTensorPlan> input_tensors;
+  std::vector<Qwen35VisionTensorPlan> projector_tensors;
+  std::vector<Qwen35VisionTensorPlan> output_norm_tensors;
+  std::vector<Qwen35VisionBlockPlan> blocks;
+};
+
 enum class Qwen35MultimodalPromptChunkKind {
   text,
   image,
@@ -135,6 +176,10 @@ struct Qwen35MultimodalTokenPlan {
   const Qwen35MmprojMetadata& metadata, std::int64_t text_embedding_length);
 [[nodiscard]] std::string format_qwen35_mmproj_metadata_summary(
   const Qwen35MmprojMetadata& metadata);
+[[nodiscard]] Result<Qwen35VisionGraphPlan> plan_qwen35_vision_graph(
+  const std::filesystem::path& mmproj_path);
+[[nodiscard]] std::string format_qwen35_vision_graph_plan(
+  const Qwen35VisionGraphPlan& plan);
 [[nodiscard]] bool qwen35_image_url_is_data_url(std::string_view url);
 [[nodiscard]] std::uint64_t qwen35_image_content_fingerprint(
   std::string_view image_url, std::string_view image_mime_type,

@@ -284,6 +284,13 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   float32 normalized pixels。
 - `qwen3vl_merger` mmproj 加载时会强制读取 `clip.vision.image_mean/std`，并派生
   native `image_min_pixels/image_max_pixels`，启动摘要会打印这些预处理参数。
+- 已新增 Qwen3VL native vision graph plan：读取并校验 patch embedding、absolute
+  position embedding、post norm、12 层 `v.blk.*`、projector `mm.0/mm.2` 以及
+  deepstack tensor shape。`kraken-infer weights <mmproj.gguf>` 会打印 graph plan。
+- 本地 Qwen3.5 0.8B mmproj
+  `models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf` 已通过 graph plan 校验：
+  `image_size=768`、`patch_size=16`、`embedding_length=768`、`block_count=12`、
+  `projection_dim=1024`、`required_tensors=154`、`deepstack_layer_count=0`。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
@@ -294,7 +301,8 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
 
 当前还没有实现：
 
-- `tools/mtmd/models/qwen3vl.cpp` 对应的 vision tower / merger / deepstack graph。
+- `tools/mtmd/models/qwen3vl.cpp` 对应的 vision tower / merger / deepstack graph 执行。
+  当前已经能校验 graph 所需 tensor/hparam shape，但还没有跑 MPS/MPSGraph/CPU forward。
 - mixed token/raw-embedding prefill。
 - 多模态 block cache key 的真实 image chunk commit/restore。当前已有
   `image_fingerprint` 前置字段，但图片请求不会返回真实 KV cache hit。
@@ -373,7 +381,9 @@ GET http://127.0.0.1:18081/v1/openapi.json
 
 - dynamic-size image embedding plan 已实现。
 - macOS ImageIO image decode 已实现；CPU bilinear resize + mean/std normalize 已实现。
-- 下一步是把 normalized HWC float32 pixels 接入原生 vision graph 输入张量。
+- native vision graph tensor/hparam plan 已实现，并已用真实 Qwen3.5 0.8B mmproj 校验。
+- 下一步是把 normalized HWC float32 pixels 接入原生 vision graph 输入张量并执行
+  patch embed、vision blocks、post norm 和 projector。
 - 按 `tools/mtmd/models/qwen3vl.cpp` 实现 patch embed、position embedding resize、
   vision MRoPE attention、deepstack 和 projector。
 - 输出 contiguous F32 embeddings，形状为 `[n_image_tokens, n_embd_inp]`。

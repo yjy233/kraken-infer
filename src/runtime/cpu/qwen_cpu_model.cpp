@@ -8,6 +8,7 @@
 #include "toyllm/backends/mps/mps_backend.hpp"
 #include "toyllm/model/model_config.hpp"
 #include "toyllm/runtime/gguf_reader.hpp"
+#include "toyllm/runtime/qwen35_multimodal.hpp"
 #include "toyllm/runtime/qwen35_weight_map.hpp"
 
 #include <algorithm>
@@ -1447,6 +1448,15 @@ std::string build_weight_summary(const std::filesystem::path& model_dir) {
       }
       output << format_qwen35_weight_map_summary(qwen35_map.value());
       output << "Qwen3.5 GGUF mapping: ok\n";
+    } else if (bundle.value().model.architecture == "clip") {
+      auto vision_graph_plan = plan_qwen35_vision_graph(bundle.value().model_file);
+      if (vision_graph_plan.is_ok()) {
+        output << format_qwen35_vision_graph_plan(vision_graph_plan.value());
+        output << "Qwen3.5 VL native vision graph plan: ok\n";
+      } else {
+        output << "Qwen3.5 VL native vision graph plan: unavailable: "
+               << vision_graph_plan.status().message() << '\n';
+      }
     } else {
       output << "Native Qwen3.5 weight map: not implemented for "
              << bundle.value().model.architecture << '\n';
