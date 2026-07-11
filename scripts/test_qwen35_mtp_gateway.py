@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_DRAFT_TOKENS = 3
+DEFAULT_P_MIN = 0.30
+
+
 def wait_for_health(url: str, timeout_seconds: float) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
@@ -60,6 +64,16 @@ def int_header(headers: dict[str, str], name: str) -> int:
         raise RuntimeError(f"header {name} is not an integer: {headers[key]}") from exc
 
 
+def float_header(headers: dict[str, str], name: str) -> float:
+    key = name.lower()
+    if key not in headers:
+        raise RuntimeError(f"missing response header: {name}")
+    try:
+        return float(headers[key])
+    except ValueError as exc:
+        raise RuntimeError(f"header {name} is not a float: {headers[key]}") from exc
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="./build/debug/kraken-infer")
@@ -67,8 +81,13 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18184)
     parser.add_argument("--max-tokens", type=int, default=8)
-    parser.add_argument("--draft-tokens", type=int, default=3)
-    parser.add_argument("--p-min", type=float, default=0.30)
+    parser.add_argument("--draft-tokens", type=int, default=DEFAULT_DRAFT_TOKENS)
+    parser.add_argument("--p-min", type=float, default=DEFAULT_P_MIN)
+    parser.add_argument(
+        "--use-default-mtp-params",
+        action="store_true",
+        help="omit draft/p_min serve and request overrides to test gateway defaults",
+    )
     parser.add_argument(
         "--prompt",
         default="Write one short sentence about Metal acceleration.",
@@ -82,29 +101,40 @@ def main() -> int:
         if not path.exists():
             raise FileNotFoundError(f"{label} not found: {path}")
 
+    server_args = [
+        str(binary),
+        "serve",
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--model",
+        str(model),
+        "--model-id",
+        "qwen35-mtp-test",
+        "--device",
+        "mps",
+        "--max-new-tokens",
+        str(args.max_tokens),
+        "--mtp",
+        "--no-cache-prompt",
+    ]
+    expected_draft_tokens = DEFAULT_DRAFT_TOKENS
+    expected_p_min = DEFAULT_P_MIN
+    if not args.use_default_mtp_params:
+        server_args.extend(
+            [
+                "--mtp-draft-tokens",
+                str(args.draft_tokens),
+                "--mtp-p-min",
+                str(args.p_min),
+            ]
+        )
+        expected_draft_tokens = args.draft_tokens
+        expected_p_min = args.p_min
+
     server = subprocess.Popen(
-        [
-            str(binary),
-            "serve",
-            "--host",
-            args.host,
-            "--port",
-            str(args.port),
-            "--model",
-            str(model),
-            "--model-id",
-            "qwen35-mtp-test",
-            "--device",
-            "mps",
-            "--max-new-tokens",
-            str(args.max_tokens),
-            "--mtp",
-            "--mtp-draft-tokens",
-            str(args.draft_tokens),
-            "--mtp-p-min",
-            str(args.p_min),
-            "--no-cache-prompt",
-        ],
+        server_args,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -118,9 +148,10 @@ def main() -> int:
             "prompt": args.prompt,
             "max_tokens": args.max_tokens,
             "mtp": True,
-            "mtp_draft_tokens": args.draft_tokens,
-            "mtp_p_min": args.p_min,
         }
+        if not args.use_default_mtp_params:
+            payload["mtp_draft_tokens"] = args.draft_tokens
+            payload["mtp_p_min"] = args.p_min
         response, headers = post_json(
             f"{base_url}/v1/completions",
             payload,
@@ -139,6 +170,19 @@ def main() -> int:
             raise RuntimeError(f"MTP was not enabled; headers={headers}")
         if layers < 1:
             raise RuntimeError(f"MTP layer count was not reported; headers={headers}")
+        reported_draft_tokens = int_header(headers, "X-Kraken-MTP-Draft-Tokens")
+        reported_p_min = float_header(headers, "X-Kraken-MTP-P-Min")
+        if reported_draft_tokens != expected_draft_tokens:
+            raise RuntimeError(
+                "MTP draft token default/override mismatch; "
+                f"expected={expected_draft_tokens}, got={reported_draft_tokens}, "
+                f"headers={headers}"
+            )
+        if abs(reported_p_min - expected_p_min) > 1.0e-6:
+            raise RuntimeError(
+                "MTP p_min default/override mismatch; "
+                f"expected={expected_p_min}, got={reported_p_min}, headers={headers}"
+            )
         if drafted < 1 and confidence_stops < 1:
             raise RuntimeError(f"MTP did not draft or confidence-stop any tokens; headers={headers}")
         if drafted > 0 and verify_steps < 1:
@@ -150,7 +194,7 @@ def main() -> int:
                 {
                     "mtp_enabled": enabled,
                     "mtp_layers": layers,
-                    "draft_tokens": int_header(headers, "X-Kraken-MTP-Draft-Tokens"),
+                    "draft_tokens": reported_draft_tokens,
                     "p_min": headers.get("x-kraken-mtp-p-min"),
                     "drafted_tokens": drafted,
                     "accepted_tokens": int_header(headers, "X-Kraken-MTP-Accepted-Tokens"),

@@ -790,6 +790,14 @@ mtp: enabled, layers=1, draft_tokens=3, drafted=8, accepted=5, verify_steps=6
 
 python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8
 {"accepted_tokens": 4, "drafted_tokens": 9, "mtp_enabled": 1, "mtp_layers": 1, "verify_steps": 6}
+
+python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --use-default-mtp-params
+{"draft_tokens": 3, "mtp_enabled": 1, "p_min": "0.300000", ...}
+
+python3 scripts/test_qwen35_vl_gateway.py \
+  --model models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf \
+  --expect-mtp-disabled-reason vl_bridge_uses_llama_mtmd_without_mtp
+{"mtp": {"x-kraken-mtp-enabled": "0", "x-kraken-mtp-layers": "1", ...}}
 ```
 
 ### 2026-07-10 性能测量
@@ -864,6 +872,10 @@ draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。
   可用 `--include-llama-mtp` 额外尝试 llama.cpp `--spec-type draft-mtp`。
 - 新增 `scripts/sweep_qwen35_mtp.py` 用于批量扫描 `mtp_draft_tokens` 和
   `mtp_p_min`，输出 aggregate table、JSON 和可选 CSV，帮助选择默认参数。
+- `scripts/test_qwen35_mtp_gateway.py --use-default-mtp-params` 可验证 gateway
+  默认 MTP 参数仍是 `draft_tokens=3`、`p_min=0.30`。
+- `scripts/test_qwen35_vl_gateway.py --expect-mtp-disabled-reason ...` 可验证使用
+  MTP GGUF 启动视觉 bridge 时，响应 headers 明确标记 MTP 未启用原因。
 
 示例：
 
@@ -895,6 +907,8 @@ python3 scripts/sweep_qwen35_mtp.py \
 - 新增 `scripts/test_qwen35_mtp_gateway.py` 能在真实 MTP GGUF 存在时跑通。
 - 新增 `scripts/compare_qwen35_llamacpp.py` 能生成 kraken/llama.cpp 对照 JSON。
 - 新增 `scripts/sweep_qwen35_mtp.py` 能生成 MTP 参数 sweep JSON/CSV。
+- `make qwen35-vl-mtp-test` 能验证 MTP GGUF + mmproj 图片请求路径，并检查
+  `X-Kraken-MTP-Disabled-Reason=vl_bridge_uses_llama_mtmd_without_mtp`。
 
 第二阶段：
 

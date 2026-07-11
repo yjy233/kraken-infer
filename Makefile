@@ -4,6 +4,7 @@ MODEL ?= models/qwen3-0.6b
 PROMPT ?= hello
 CHAT_TOKENS ?= 16
 QWEN35_MODEL ?= models/qwen3.5-0.8b
+QWEN35_MTP_MODEL ?= models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf
 QWEN35_MMPROJ ?= models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
 QWEN35_IMAGE ?= /Users/bill/code/llama.cpp/tools/mtmd/test-1.jpeg
 BINARY := kraken-infer
@@ -46,7 +47,7 @@ CORE_SRCS := \
 	src/backends/mps/mps_backend.mm \
 	src/backends/mpsgraph/mpsgraph_backend.mm
 
-.PHONY: all debug release test qwen35-vl-test cli inspect weights doctor infer run chat serve compare-transformers mps-info clean
+.PHONY: all debug release test qwen35-vl-test qwen35-vl-mtp-test cli inspect weights doctor infer run chat serve compare-transformers mps-info clean
 
 all: debug
 
@@ -73,6 +74,14 @@ qwen35-vl-test: $(BUILD_DIR)/$(BINARY)
 		--model $(QWEN35_MODEL) \
 		--mmproj $(QWEN35_MMPROJ) \
 		--image $(QWEN35_IMAGE)
+
+qwen35-vl-mtp-test: $(BUILD_DIR)/$(BINARY)
+	python3 scripts/test_qwen35_vl_gateway.py \
+		--binary ./$(BUILD_DIR)/$(BINARY) \
+		--model $(QWEN35_MTP_MODEL) \
+		--mmproj $(QWEN35_MMPROJ) \
+		--image $(QWEN35_IMAGE) \
+		--expect-mtp-disabled-reason vl_bridge_uses_llama_mtmd_without_mtp
 
 cli: $(BUILD_DIR)/$(BINARY)
 	./$(BUILD_DIR)/$(BINARY) help

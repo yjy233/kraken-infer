@@ -441,12 +441,14 @@ Qwen3.5 VL gateway smoke test：
 ```bash
 python3 scripts/test_qwen35_vl_gateway.py --max-tokens 24
 make qwen35-vl-test
+make qwen35-vl-mtp-test
 ```
 
 Qwen3.5 MTP gateway smoke test：
 
 ```bash
 python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --p-min 0.30
+python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --use-default-mtp-params
 ```
 
 Qwen3.5 kraken/llama.cpp 对照基准：

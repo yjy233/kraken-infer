@@ -14,6 +14,10 @@ import urllib.request
 from pathlib import Path
 
 
+def lower_headers(headers) -> dict[str, str]:
+    return {key.lower(): value for key, value in headers.items()}
+
+
 def image_mime(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in {".jpg", ".jpeg"}:
@@ -39,7 +43,7 @@ def wait_for_health(url: str, timeout_seconds: float) -> None:
     raise RuntimeError(f"gateway did not become healthy: {last_error}")
 
 
-def post_json(url: str, payload: dict, timeout_seconds: float) -> dict:
+def post_json(url: str, payload: dict, timeout_seconds: float) -> tuple[dict, dict[str, str]]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -49,7 +53,8 @@ def post_json(url: str, payload: dict, timeout_seconds: float) -> dict:
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+            headers = lower_headers(response.headers)
+            return json.loads(response.read().decode("utf-8")), headers
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"gateway returned HTTP {exc.code}: {error_body}") from exc
@@ -75,6 +80,11 @@ def main() -> int:
         default="Describe the image in one sentence.",
     )
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--expect-mtp-disabled-reason",
+        default="",
+        help="assert that MTP is available but disabled with this reason",
+    )
     args = parser.parse_args()
 
     binary = Path(args.binary)
@@ -138,7 +148,7 @@ def main() -> int:
             "max_tokens": args.max_tokens,
             "temperature": 0,
         }
-        response = post_json(
+        response, headers = post_json(
             f"{base_url}/v1/chat/completions",
             payload,
             args.timeout,
@@ -146,9 +156,23 @@ def main() -> int:
         content = response["choices"][0]["message"].get("content", "").strip()
         if not content:
             raise RuntimeError(f"empty assistant content: {json.dumps(response)[:1000]}")
+        if args.expect_mtp_disabled_reason:
+            enabled = headers.get("x-kraken-mtp-enabled")
+            reason = headers.get("x-kraken-mtp-disabled-reason")
+            if enabled != "0" or reason != args.expect_mtp_disabled_reason:
+                raise RuntimeError(
+                    "unexpected VL MTP headers: "
+                    f"enabled={enabled}, reason={reason}, headers={headers}"
+                )
         print(content)
-        if "usage" in response:
-            print(json.dumps(response["usage"], ensure_ascii=False, sort_keys=True))
+        summary = {"usage": response.get("usage", {})}
+        mtp_headers = {
+            key: value for key, value in headers.items()
+            if key.startswith("x-kraken-mtp-")
+        }
+        if mtp_headers:
+            summary["mtp"] = mtp_headers
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
     finally:
         server.terminate()
