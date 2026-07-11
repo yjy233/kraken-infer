@@ -275,6 +275,9 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
 - 已新增 Qwen3VL multimodal prompt plan：按 chat message/content part 顺序生成
   text chunk、image embedding chunk、`<|vision_start|>` / `<|vision_end|>` 边界，
   并统计 image token 总数和 MRoPE image position advance。
+- 已新增 tokenizer-aware multimodal token plan：text chunk 使用 Qwen3.5 GGUF
+  tokenizer + `parse_special` 编码，image chunk 保留 raw embedding token count；
+  同时区分 `total_tokens` 和 image MRoPE `total_position_advance`。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
@@ -372,6 +375,8 @@ GET http://127.0.0.1:18081/v1/openapi.json
 
 - multimodal prompt chunk plan 已实现，包含 text/image chunk 顺序和 image
   placeholder 长度。
+- tokenizer-aware multimodal token plan 已实现，可直接作为 mixed prefill scheduler
+  的输入结构。
 - text chunk 走 token embedding path。
 - image chunk 走 raw embedding path。
 - MRoPE position buffer 支持 text broadcast 和 image `[t,y,x,z]`。

@@ -1,6 +1,7 @@
 #include "toyllm/runtime/qwen35_multimodal.hpp"
 
 #include "toyllm/runtime/gguf_reader.hpp"
+#include "toyllm/runtime/gguf_tokenizer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -867,6 +868,82 @@ std::string format_qwen35_multimodal_prompt_plan(
              << " grid=" << chunk.image_plan.merge_grid_x << 'x'
              << chunk.image_plan.merge_grid_y
              << " fingerprint=" << chunk.image_fingerprint;
+    }
+    output << " message=" << chunk.message_index
+           << " part=" << chunk.part_index << '\n';
+  }
+  return output.str();
+}
+
+Result<Qwen35MultimodalTokenPlan> tokenize_qwen35_multimodal_prompt(
+  const GgufTokenizer& tokenizer, const Qwen35MultimodalPromptPlan& prompt_plan) {
+  Qwen35MultimodalTokenPlan token_plan;
+  token_plan.chunks.reserve(prompt_plan.chunks.size());
+  for (const auto& prompt_chunk : prompt_plan.chunks) {
+    Qwen35MultimodalTokenChunk chunk;
+    chunk.kind = prompt_chunk.kind;
+    chunk.message_index = prompt_chunk.message_index;
+    chunk.part_index = prompt_chunk.part_index;
+    chunk.image_index = prompt_chunk.image_index;
+    chunk.image_fingerprint = prompt_chunk.image_fingerprint;
+    chunk.image_plan = prompt_chunk.image_plan;
+    if (prompt_chunk.kind == Qwen35MultimodalPromptChunkKind::text) {
+      auto tokens = gguf_encode_text(tokenizer, prompt_chunk.text, false, true);
+      if (!tokens.is_ok()) {
+        return tokens.status();
+      }
+      chunk.text_tokens = std::move(tokens.value());
+      chunk.token_count = chunk.text_tokens.size();
+      chunk.position_advance = chunk.text_tokens.size();
+      token_plan.text_tokens += chunk.text_tokens.size();
+      ++token_plan.text_chunks;
+    } else {
+      chunk.token_count = chunk.image_plan.image_tokens;
+      chunk.position_advance = std::max<std::size_t>(
+        chunk.image_plan.merge_grid_x, chunk.image_plan.merge_grid_y);
+      token_plan.image_tokens += chunk.image_plan.image_tokens;
+      ++token_plan.image_chunks;
+    }
+    token_plan.total_tokens += chunk.token_count;
+    token_plan.total_position_advance += chunk.position_advance;
+    token_plan.chunks.push_back(std::move(chunk));
+  }
+  return token_plan;
+}
+
+Result<Qwen35MultimodalTokenPlan> tokenize_qwen35_multimodal_prompt(
+  const GgufTokenizer& tokenizer, const Qwen35MmprojMetadata& metadata,
+  const std::vector<ChatMessage>& messages, bool add_generation_prompt,
+  bool enable_thinking) {
+  auto prompt_plan = plan_qwen35_multimodal_prompt(
+    metadata, messages, add_generation_prompt, enable_thinking);
+  if (!prompt_plan.is_ok()) {
+    return prompt_plan.status();
+  }
+  return tokenize_qwen35_multimodal_prompt(tokenizer, prompt_plan.value());
+}
+
+std::string format_qwen35_multimodal_token_plan(
+  const Qwen35MultimodalTokenPlan& plan) {
+  std::ostringstream output;
+  output << "multimodal token chunks: " << plan.chunks.size() << '\n';
+  output << "multimodal token text_chunks: " << plan.text_chunks << '\n';
+  output << "multimodal token image_chunks: " << plan.image_chunks << '\n';
+  output << "multimodal token text_tokens: " << plan.text_tokens << '\n';
+  output << "multimodal token image_tokens: " << plan.image_tokens << '\n';
+  output << "multimodal token total_tokens: " << plan.total_tokens << '\n';
+  output << "multimodal token total_position_advance: "
+         << plan.total_position_advance << '\n';
+  for (const auto& chunk : plan.chunks) {
+    output << "- ";
+    if (chunk.kind == Qwen35MultimodalPromptChunkKind::text) {
+      output << "text tokens=" << chunk.text_tokens.size();
+    } else {
+      output << "image index=" << chunk.image_index
+             << " tokens=" << chunk.token_count
+             << " pos_advance=" << chunk.position_advance
+             << " grid=" << chunk.image_plan.merge_grid_x << 'x'
+             << chunk.image_plan.merge_grid_y;
     }
     output << " message=" << chunk.message_index
            << " part=" << chunk.part_index << '\n';

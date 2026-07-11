@@ -12,6 +12,8 @@
 
 namespace toyllm {
 
+struct GgufTokenizer;
+
 struct Qwen35MmprojMetadata {
   std::filesystem::path path;
   std::string architecture;
@@ -81,6 +83,28 @@ struct Qwen35MultimodalPromptPlan {
   std::size_t image_position_advance{0};
 };
 
+struct Qwen35MultimodalTokenChunk {
+  Qwen35MultimodalPromptChunkKind kind{Qwen35MultimodalPromptChunkKind::text};
+  std::vector<std::int64_t> text_tokens;
+  std::size_t message_index{0};
+  std::size_t part_index{0};
+  std::size_t image_index{0};
+  std::uint64_t image_fingerprint{0};
+  Qwen35ImageEmbeddingPlan image_plan;
+  std::size_t token_count{0};
+  std::size_t position_advance{0};
+};
+
+struct Qwen35MultimodalTokenPlan {
+  std::vector<Qwen35MultimodalTokenChunk> chunks;
+  std::size_t text_chunks{0};
+  std::size_t image_chunks{0};
+  std::size_t text_tokens{0};
+  std::size_t image_tokens{0};
+  std::size_t total_tokens{0};
+  std::size_t total_position_advance{0};
+};
+
 [[nodiscard]] Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
   const std::filesystem::path& path);
 [[nodiscard]] bool qwen35_mmproj_is_qwen3vl_merger(
@@ -109,5 +133,13 @@ struct Qwen35MultimodalPromptPlan {
   bool add_generation_prompt, bool enable_thinking);
 [[nodiscard]] std::string format_qwen35_multimodal_prompt_plan(
   const Qwen35MultimodalPromptPlan& plan);
+[[nodiscard]] Result<Qwen35MultimodalTokenPlan> tokenize_qwen35_multimodal_prompt(
+  const GgufTokenizer& tokenizer, const Qwen35MultimodalPromptPlan& prompt_plan);
+[[nodiscard]] Result<Qwen35MultimodalTokenPlan> tokenize_qwen35_multimodal_prompt(
+  const GgufTokenizer& tokenizer, const Qwen35MmprojMetadata& metadata,
+  const std::vector<ChatMessage>& messages, bool add_generation_prompt,
+  bool enable_thinking);
+[[nodiscard]] std::string format_qwen35_multimodal_token_plan(
+  const Qwen35MultimodalTokenPlan& plan);
 
 }  // namespace toyllm

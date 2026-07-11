@@ -2177,6 +2177,8 @@ void test_qwen35_gguf_model_config() {
   assert(im_start.has_value());
   assert(im_end.has_value());
   assert(tokenizer.value().eos_token_id == *im_end);
+  const auto vision_end = toyllm::gguf_token_id(tokenizer.value(), "<|vision_end|>");
+  assert(vision_end.has_value());
   assert(toyllm::gguf_token_is_control(tokenizer.value(), *im_start));
   assert(toyllm::gguf_token_is_control(tokenizer.value(), *im_end));
   const auto raw_controls =
@@ -2231,6 +2233,46 @@ void test_qwen35_gguf_model_config() {
       tokenizer.value(), {toyllm::ChatMessage{"user", "hello"}}, true, false);
   assert(chat_tokens_via_helper.is_ok());
   assert(chat_tokens_via_helper.value() == chat_tokens.value());
+  toyllm::Qwen35MultimodalPromptPlan multimodal_prompt_plan;
+  toyllm::Qwen35MultimodalPromptChunk multimodal_text_before;
+  multimodal_text_before.kind = toyllm::Qwen35MultimodalPromptChunkKind::text;
+  multimodal_text_before.text = "<|im_start|>user\nhello <|vision_start|>";
+  multimodal_prompt_plan.chunks.push_back(std::move(multimodal_text_before));
+  toyllm::Qwen35MultimodalPromptChunk multimodal_image;
+  multimodal_image.kind = toyllm::Qwen35MultimodalPromptChunkKind::image;
+  multimodal_image.image_index = 0;
+  multimodal_image.image_fingerprint = 42;
+  multimodal_image.image_plan.merge_grid_x = 3;
+  multimodal_image.image_plan.merge_grid_y = 3;
+  multimodal_image.image_plan.image_tokens = 9;
+  multimodal_prompt_plan.chunks.push_back(std::move(multimodal_image));
+  toyllm::Qwen35MultimodalPromptChunk multimodal_text_after;
+  multimodal_text_after.kind = toyllm::Qwen35MultimodalPromptChunkKind::text;
+  multimodal_text_after.text =
+    "<|vision_end|><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+  multimodal_prompt_plan.chunks.push_back(std::move(multimodal_text_after));
+  const auto multimodal_tokens =
+    toyllm::tokenize_qwen35_multimodal_prompt(tokenizer.value(),
+                                              multimodal_prompt_plan);
+  assert(multimodal_tokens.is_ok());
+  assert(multimodal_tokens.value().chunks.size() == 3);
+  assert(multimodal_tokens.value().text_chunks == 2);
+  assert(multimodal_tokens.value().image_chunks == 1);
+  assert(multimodal_tokens.value().image_tokens == 9);
+  assert(multimodal_tokens.value().chunks[0].text_tokens.front() == *im_start);
+  assert(multimodal_tokens.value().chunks[1].token_count == 9);
+  assert(multimodal_tokens.value().chunks[1].position_advance == 3);
+  assert(multimodal_tokens.value().chunks[2].text_tokens.front() ==
+         *vision_end);
+  assert(multimodal_tokens.value().total_tokens ==
+         multimodal_tokens.value().text_tokens + 9);
+  assert(multimodal_tokens.value().total_position_advance ==
+         multimodal_tokens.value().text_tokens + 3);
+  const auto multimodal_token_summary =
+    toyllm::format_qwen35_multimodal_token_plan(multimodal_tokens.value());
+  assert(multimodal_token_summary.find("multimodal token image_tokens: 9") !=
+         std::string::npos);
+  assert(multimodal_token_summary.find("pos_advance=3") != std::string::npos);
 
   const auto summary = toyllm::format_model_summary(bundle.value());
   assert(summary.find("Architecture: qwen35") != std::string::npos);
