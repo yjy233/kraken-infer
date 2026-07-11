@@ -2677,6 +2677,21 @@ void test_qwen35_mmproj_metadata_validation() {
   assert(std::abs(preprocessed.value().pixels[0] - 1.0F) < 1e-6F);
   assert(std::abs(preprocessed.value().pixels[1] + 1.0F) < 1e-6F);
   assert(std::abs(preprocessed.value().pixels[2] + 1.0F) < 1e-6F);
+  const auto input_stage =
+    toyllm::run_qwen35_vision_input_stage_cpu(valid_path, preprocessed.value());
+  assert(input_stage.is_ok());
+  assert(input_stage.value().patch_grid_x == 6);
+  assert(input_stage.value().patch_grid_y == 6);
+  assert(input_stage.value().vision_embedding_length == 4);
+  assert(input_stage.value().token_count == 36);
+  assert(input_stage.value().embeddings.size() == 36U * 4U);
+  for (const auto value : input_stage.value().embeddings) {
+    assert(std::abs(value) < 1e-6F);
+  }
+  const auto input_stage_summary =
+    toyllm::format_qwen35_vision_input_stage_result(input_stage.value());
+  assert(input_stage_summary.find("vision input tokens: 36") !=
+         std::string::npos);
 
   const auto photo_plan =
     toyllm::plan_qwen35_image_embeddings(metadata.value(), 640, 480);

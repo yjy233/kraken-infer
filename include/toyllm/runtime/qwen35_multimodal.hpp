@@ -123,6 +123,15 @@ struct Qwen35VisionGraphPlan {
   std::vector<Qwen35VisionBlockPlan> blocks;
 };
 
+struct Qwen35VisionInputStageResult {
+  Qwen35ImageEmbeddingPlan image_plan;
+  std::uint32_t patch_grid_x{0};
+  std::uint32_t patch_grid_y{0};
+  std::uint64_t vision_embedding_length{0};
+  std::size_t token_count{0};
+  std::vector<float> embeddings;
+};
+
 enum class Qwen35MultimodalPromptChunkKind {
   text,
   image,
@@ -180,6 +189,11 @@ struct Qwen35MultimodalTokenPlan {
   const std::filesystem::path& mmproj_path);
 [[nodiscard]] std::string format_qwen35_vision_graph_plan(
   const Qwen35VisionGraphPlan& plan);
+[[nodiscard]] Result<Qwen35VisionInputStageResult>
+run_qwen35_vision_input_stage_cpu(const std::filesystem::path& mmproj_path,
+                                  const Qwen35ImagePreprocessResult& image);
+[[nodiscard]] std::string format_qwen35_vision_input_stage_result(
+  const Qwen35VisionInputStageResult& result);
 [[nodiscard]] bool qwen35_image_url_is_data_url(std::string_view url);
 [[nodiscard]] std::uint64_t qwen35_image_content_fingerprint(
   std::string_view image_url, std::string_view image_mime_type,

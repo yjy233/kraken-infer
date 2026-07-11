@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -277,6 +278,11 @@ Qwen35VisionTensorPlan make_vision_tensor_plan(const GgufTensorInfo& tensor) {
   return plan;
 }
 
+Result<std::uint64_t> checked_u64_mul(std::uint64_t lhs, std::uint64_t rhs,
+                                      std::string_view label);
+Result<std::size_t> checked_size_from_u64(std::uint64_t value,
+                                          std::string_view label);
+
 Result<Qwen35VisionTensorPlan> require_tensor_shape(
   const GgufFile& file, std::string_view name,
   const std::vector<std::uint64_t>& expected_shape) {
@@ -312,6 +318,89 @@ Status append_required_tensor(
   }
   tensors.push_back(std::move(tensor.value()));
   return Status::ok();
+}
+
+Result<std::size_t> tensor_element_count(const std::vector<std::uint64_t>& shape,
+                                         std::string_view label) {
+  std::uint64_t elements = 1;
+  for (const auto dim : shape) {
+    auto multiplied = checked_u64_mul(elements, dim, label);
+    if (!multiplied.is_ok()) {
+      return multiplied.status();
+    }
+    elements = multiplied.value();
+  }
+  return checked_size_from_u64(elements, label);
+}
+
+float bf16_to_f32(std::uint16_t value) {
+  const auto bits = static_cast<std::uint32_t>(value) << 16U;
+  float result = 0.0F;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+Result<std::vector<float>> tensor_bytes_to_f32(const GgufTensorInfo& tensor,
+                                               const GgufTensorBytes& bytes) {
+  auto elements = tensor_element_count(tensor.shape, tensor.name);
+  if (!elements.is_ok()) {
+    return elements.status();
+  }
+  std::vector<float> values(elements.value());
+  if (tensor.type == 0U) {
+    const auto expected_bytes = checked_u64_mul(
+      static_cast<std::uint64_t>(elements.value()), sizeof(float),
+      "GGUF F32 tensor bytes");
+    if (!expected_bytes.is_ok()) {
+      return expected_bytes.status();
+    }
+    if (bytes.size != expected_bytes.value()) {
+      return Status::invalid_argument("GGUF F32 tensor byte size mismatch: " +
+                                      tensor.name);
+    }
+    std::memcpy(values.data(), bytes.data, bytes.size);
+    return values;
+  }
+  if (tensor.type == 30U) {
+    const auto expected_bytes = checked_u64_mul(
+      static_cast<std::uint64_t>(elements.value()), sizeof(std::uint16_t),
+      "GGUF BF16 tensor bytes");
+    if (!expected_bytes.is_ok()) {
+      return expected_bytes.status();
+    }
+    if (bytes.size != expected_bytes.value()) {
+      return Status::invalid_argument("GGUF BF16 tensor byte size mismatch: " +
+                                      tensor.name);
+    }
+    for (std::size_t index = 0; index < elements.value(); ++index) {
+      std::uint16_t raw = 0;
+      std::memcpy(&raw, bytes.data + index * sizeof(raw), sizeof(raw));
+      values[index] = bf16_to_f32(raw);
+    }
+    return values;
+  }
+  return Status::invalid_argument(
+    "Qwen3.5 CPU vision input stage supports F32/BF16 tensors only: " +
+    tensor.name + " has " + ggml_type_name(tensor.type));
+}
+
+Result<std::vector<float>> load_tensor_f32(const GgufFile& file,
+                                           const GgufMappedData& mapped,
+                                           std::string_view name,
+                                           const std::vector<std::uint64_t>& shape) {
+  auto plan = require_tensor_shape(file, name, shape);
+  if (!plan.is_ok()) {
+    return plan.status();
+  }
+  const auto* tensor = find_gguf_tensor(file, std::string{name});
+  if (tensor == nullptr) {
+    return Status::invalid_argument("missing tensor: " + std::string{name});
+  }
+  auto bytes = mapped.tensor_bytes(*tensor);
+  if (!bytes.is_ok()) {
+    return bytes.status();
+  }
+  return tensor_bytes_to_f32(*tensor, bytes.value());
 }
 
 std::string vision_block_tensor_name(std::size_t layer_index,
@@ -618,6 +707,114 @@ std::vector<std::uint8_t> resize_rgb_bilinear(const Qwen35ImageRgb& src,
     }
   }
   return dst;
+}
+
+std::vector<float> resize_position_embeddings_bilinear(
+  const std::vector<float>& source, std::uint32_t source_grid,
+  std::uint32_t target_width, std::uint32_t target_height,
+  std::uint64_t embedding_length) {
+  std::vector<float> resized(
+    static_cast<std::size_t>(target_width) * target_height * embedding_length);
+  const auto x_ratio =
+    target_width > 1U
+      ? static_cast<float>(source_grid - 1U) / static_cast<float>(target_width - 1U)
+      : 0.0F;
+  const auto y_ratio =
+    target_height > 1U
+      ? static_cast<float>(source_grid - 1U) / static_cast<float>(target_height - 1U)
+      : 0.0F;
+  const auto emb = static_cast<std::size_t>(embedding_length);
+  for (std::uint32_t y = 0; y < target_height; ++y) {
+    for (std::uint32_t x = 0; x < target_width; ++x) {
+      const auto px = static_cast<float>(x) * x_ratio;
+      const auto py = static_cast<float>(y) * y_ratio;
+      const auto x0 = std::min(static_cast<std::uint32_t>(px), source_grid - 1U);
+      const auto y0 = std::min(static_cast<std::uint32_t>(py), source_grid - 1U);
+      const auto x1 = std::min(x0 + 1U, source_grid - 1U);
+      const auto y1 = std::min(y0 + 1U, source_grid - 1U);
+      const auto xf = px - static_cast<float>(x0);
+      const auto yf = py - static_cast<float>(y0);
+      const auto p00 = emb * (static_cast<std::size_t>(x0) + source_grid * y0);
+      const auto p10 = emb * (static_cast<std::size_t>(x1) + source_grid * y0);
+      const auto p01 = emb * (static_cast<std::size_t>(x0) + source_grid * y1);
+      const auto p11 = emb * (static_cast<std::size_t>(x1) + source_grid * y1);
+      const auto out = emb * (static_cast<std::size_t>(x) + target_width * y);
+      for (std::size_t channel = 0; channel < emb; ++channel) {
+        const auto top = lerp(source[p00 + channel], source[p10 + channel], xf);
+        const auto bottom = lerp(source[p01 + channel], source[p11 + channel], xf);
+        resized[out + channel] = lerp(top, bottom, yf);
+      }
+    }
+  }
+  return resized;
+}
+
+std::vector<float> qwen3vl_spatial_merge_ewh(const std::vector<float>& input,
+                                             std::uint32_t patch_grid_x,
+                                             std::uint32_t patch_grid_y,
+                                             std::uint64_t embedding_length) {
+  const auto emb = static_cast<std::size_t>(embedding_length);
+  std::vector<float> output(
+    static_cast<std::size_t>(patch_grid_x) * patch_grid_y * emb);
+  std::size_t token = 0;
+  for (std::uint32_t y_block = 0; y_block < patch_grid_y / 2U; ++y_block) {
+    for (std::uint32_t x_block = 0; x_block < patch_grid_x / 2U; ++x_block) {
+      for (std::uint32_t y_inner = 0; y_inner < 2U; ++y_inner) {
+        for (std::uint32_t x_inner = 0; x_inner < 2U; ++x_inner) {
+          const auto x = x_block * 2U + x_inner;
+          const auto y = y_block * 2U + y_inner;
+          const auto input_offset =
+            emb * (static_cast<std::size_t>(x) + patch_grid_x * y);
+          const auto output_offset = token * emb;
+          std::copy(input.begin() + static_cast<std::ptrdiff_t>(input_offset),
+                    input.begin() + static_cast<std::ptrdiff_t>(input_offset + emb),
+                    output.begin() + static_cast<std::ptrdiff_t>(output_offset));
+          ++token;
+        }
+      }
+    }
+  }
+  return output;
+}
+
+Result<std::vector<float>> qwen3vl_patch_embedding_temporal_sum(
+  const Qwen35ImagePreprocessResult& image, const std::vector<float>& weight_0,
+  const std::vector<float>& weight_1, std::uint32_t patch_size,
+  std::uint32_t patch_grid_x, std::uint32_t patch_grid_y,
+  std::uint64_t embedding_length) {
+  const auto emb = static_cast<std::size_t>(embedding_length);
+  auto elements = checked_image_elements(
+    patch_grid_x, patch_grid_y, static_cast<std::uint32_t>(embedding_length),
+    "Qwen3.5 patch embedding output elements");
+  if (!elements.is_ok()) {
+    return elements.status();
+  }
+  std::vector<float> output(elements.value());
+  for (std::uint32_t py = 0; py < patch_grid_y; ++py) {
+    for (std::uint32_t px = 0; px < patch_grid_x; ++px) {
+      for (std::size_t e = 0; e < emb; ++e) {
+        float sum = 0.0F;
+        for (std::uint32_t ky = 0; ky < patch_size; ++ky) {
+          for (std::uint32_t kx = 0; kx < patch_size; ++kx) {
+            const auto image_x = px * patch_size + kx;
+            const auto image_y = py * patch_size + ky;
+            const auto pixel_offset =
+              (static_cast<std::size_t>(image_y) * image.width + image_x) * 3U;
+            for (std::size_t channel = 0; channel < 3U; ++channel) {
+              const auto weight_offset =
+                static_cast<std::size_t>(kx) +
+                patch_size * (static_cast<std::size_t>(ky) +
+                patch_size * (channel + 3U * e));
+              sum += image.pixels[pixel_offset + channel] *
+                     (weight_0[weight_offset] + weight_1[weight_offset]);
+            }
+          }
+        }
+        output[e + emb * (static_cast<std::size_t>(px) + patch_grid_x * py)] = sum;
+      }
+    }
+  }
+  return output;
 }
 
 bool qwen35_role_is_supported(std::string_view role) {
@@ -1250,6 +1447,132 @@ std::string format_qwen35_vision_graph_plan(const Qwen35VisionGraphPlan& plan) {
     }
   }
   output << '\n';
+  return output.str();
+}
+
+Result<Qwen35VisionInputStageResult> run_qwen35_vision_input_stage_cpu(
+  const std::filesystem::path& mmproj_path,
+  const Qwen35ImagePreprocessResult& image) {
+  auto graph_plan = plan_qwen35_vision_graph(mmproj_path);
+  if (!graph_plan.is_ok()) {
+    return graph_plan.status();
+  }
+  if (image.width == 0 || image.height == 0 || image.channels != 3U) {
+    return Status::invalid_argument(
+      "Qwen3.5 vision input stage requires a non-empty 3-channel image");
+  }
+  if (image.width % graph_plan.value().patch_size != 0 ||
+      image.height % graph_plan.value().patch_size != 0) {
+    return Status::invalid_argument(
+      "Qwen3.5 preprocessed image is not divisible by vision patch_size");
+  }
+  const auto patch_grid_x =
+    static_cast<std::uint32_t>(image.width / graph_plan.value().patch_size);
+  const auto patch_grid_y =
+    static_cast<std::uint32_t>(image.height / graph_plan.value().patch_size);
+  if (patch_grid_x % graph_plan.value().spatial_merge_size != 0 ||
+      patch_grid_y % graph_plan.value().spatial_merge_size != 0) {
+    return Status::invalid_argument(
+      "Qwen3.5 patch grid is not divisible by spatial_merge_size");
+  }
+  auto expected_pixels = checked_image_elements(
+    image.width, image.height, 3U, "Qwen3.5 preprocessed image elements");
+  if (!expected_pixels.is_ok()) {
+    return expected_pixels.status();
+  }
+  if (image.pixels.size() != expected_pixels.value()) {
+    return Status::invalid_argument(
+      "Qwen3.5 preprocessed image buffer size does not match dimensions");
+  }
+
+  auto gguf = read_gguf_file(mmproj_path);
+  if (!gguf.is_ok()) {
+    return gguf.status();
+  }
+  auto mapped = GgufMappedData::open(gguf.value());
+  if (!mapped.is_ok()) {
+    return mapped.status();
+  }
+  const auto patch_size = static_cast<std::uint32_t>(graph_plan.value().patch_size);
+  const auto emb = graph_plan.value().vision_embedding_length;
+  const std::vector<std::uint64_t> patch_shape{
+    graph_plan.value().patch_size, graph_plan.value().patch_size, 3U, emb};
+  auto patch_0 = load_tensor_f32(gguf.value(), mapped.value(),
+                                 "v.patch_embd.weight", patch_shape);
+  if (!patch_0.is_ok()) {
+    return patch_0.status();
+  }
+  auto patch_1 = load_tensor_f32(gguf.value(), mapped.value(),
+                                 "v.patch_embd.weight.1", patch_shape);
+  if (!patch_1.is_ok()) {
+    return patch_1.status();
+  }
+  auto patch_bias = load_tensor_f32(gguf.value(), mapped.value(),
+                                    "v.patch_embd.bias", {emb});
+  if (!patch_bias.is_ok()) {
+    return patch_bias.status();
+  }
+  const auto base_grid = graph_plan.value().image_size / graph_plan.value().patch_size;
+  auto base_positions = checked_u64_mul(base_grid, base_grid,
+                                        "Qwen3.5 position embedding grid");
+  if (!base_positions.is_ok()) {
+    return base_positions.status();
+  }
+  auto position_embedding = load_tensor_f32(
+    gguf.value(), mapped.value(), "v.position_embd.weight",
+    {emb, base_positions.value()});
+  if (!position_embedding.is_ok()) {
+    return position_embedding.status();
+  }
+
+  auto conv = qwen3vl_patch_embedding_temporal_sum(
+    image, patch_0.value(), patch_1.value(), patch_size, patch_grid_x,
+    patch_grid_y, emb);
+  if (!conv.is_ok()) {
+    return conv.status();
+  }
+  auto merged = qwen3vl_spatial_merge_ewh(
+    conv.value(), patch_grid_x, patch_grid_y, emb);
+  const auto emb_size = static_cast<std::size_t>(emb);
+  for (std::size_t token = 0; token < merged.size() / emb_size; ++token) {
+    const auto offset = token * emb_size;
+    for (std::size_t channel = 0; channel < emb_size; ++channel) {
+      merged[offset + channel] += patch_bias.value()[channel];
+    }
+  }
+
+  const auto resized_positions = resize_position_embeddings_bilinear(
+    position_embedding.value(), static_cast<std::uint32_t>(base_grid),
+    patch_grid_x, patch_grid_y, emb);
+  auto merged_positions = qwen3vl_spatial_merge_ewh(
+    resized_positions, patch_grid_x, patch_grid_y, emb);
+  if (merged_positions.size() != merged.size()) {
+    return Status::internal_error(
+      "Qwen3.5 merged position embedding size mismatch");
+  }
+  for (std::size_t index = 0; index < merged.size(); ++index) {
+    merged[index] += merged_positions[index];
+  }
+
+  Qwen35VisionInputStageResult result;
+  result.image_plan = image.plan;
+  result.patch_grid_x = patch_grid_x;
+  result.patch_grid_y = patch_grid_y;
+  result.vision_embedding_length = emb;
+  result.token_count = merged.size() / emb_size;
+  result.embeddings = std::move(merged);
+  return result;
+}
+
+std::string format_qwen35_vision_input_stage_result(
+  const Qwen35VisionInputStageResult& result) {
+  std::ostringstream output;
+  output << "vision input patch_grid: " << result.patch_grid_x << 'x'
+         << result.patch_grid_y << '\n';
+  output << "vision input embedding_length: "
+         << result.vision_embedding_length << '\n';
+  output << "vision input tokens: " << result.token_count << '\n';
+  output << "vision input values: " << result.embeddings.size() << '\n';
   return output.str();
 }
 

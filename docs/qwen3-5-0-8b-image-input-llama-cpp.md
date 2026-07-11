@@ -291,6 +291,11 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   `models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf` 已通过 graph plan 校验：
   `image_size=768`、`patch_size=16`、`embedding_length=768`、`block_count=12`、
   `projection_dim=1024`、`required_tensors=154`、`deepstack_layer_count=0`。
+- 已新增 CPU reference vision input stage：读取 `v.patch_embd.weight` /
+  `v.patch_embd.weight.1` / `v.patch_embd.bias` / `v.position_embd.weight`，
+  对 normalized HWC float32 pixels 执行 still-image temporal patch conv sum、Qwen3VL
+  2x2 spatial merge、patch bias 和 resized position embedding 加法，产出进入
+  `v.blk.0` 前的 `[image_patch_tokens, vision_embedding_length]` embedding。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
@@ -382,8 +387,9 @@ GET http://127.0.0.1:18081/v1/openapi.json
 - dynamic-size image embedding plan 已实现。
 - macOS ImageIO image decode 已实现；CPU bilinear resize + mean/std normalize 已实现。
 - native vision graph tensor/hparam plan 已实现，并已用真实 Qwen3.5 0.8B mmproj 校验。
-- 下一步是把 normalized HWC float32 pixels 接入原生 vision graph 输入张量并执行
-  patch embed、vision blocks、post norm 和 projector。
+- CPU reference vision input stage 已实现，能把 normalized HWC float32 pixels 接到
+  patch embed、spatial merge 和 position embedding。
+- 下一步是执行 vision transformer blocks、post norm 和 projector。
 - 按 `tools/mtmd/models/qwen3vl.cpp` 实现 patch embed、position embedding resize、
   vision MRoPE attention、deepstack 和 projector。
 - 输出 contiguous F32 embeddings，形状为 `[n_image_tokens, n_embd_inp]`。
