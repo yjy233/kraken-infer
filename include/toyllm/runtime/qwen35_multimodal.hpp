@@ -1,6 +1,7 @@
 #pragma once
 
 #include "toyllm/core/status.hpp"
+#include "toyllm/runtime/chat_message.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -57,6 +58,29 @@ struct Qwen35ImageEmbeddingPlan {
   std::size_t max_image_tokens{0};
 };
 
+enum class Qwen35MultimodalPromptChunkKind {
+  text,
+  image,
+};
+
+struct Qwen35MultimodalPromptChunk {
+  Qwen35MultimodalPromptChunkKind kind{Qwen35MultimodalPromptChunkKind::text};
+  std::string text;
+  std::size_t message_index{0};
+  std::size_t part_index{0};
+  std::size_t image_index{0};
+  std::uint64_t image_fingerprint{0};
+  Qwen35ImageEmbeddingPlan image_plan;
+};
+
+struct Qwen35MultimodalPromptPlan {
+  std::vector<Qwen35MultimodalPromptChunk> chunks;
+  std::size_t text_chunks{0};
+  std::size_t image_chunks{0};
+  std::size_t image_tokens{0};
+  std::size_t image_position_advance{0};
+};
+
 [[nodiscard]] Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
   const std::filesystem::path& path);
 [[nodiscard]] bool qwen35_mmproj_is_qwen3vl_merger(
@@ -80,5 +104,10 @@ struct Qwen35ImageEmbeddingPlan {
   const Qwen35MmprojMetadata& metadata, const Qwen35ImageDataUrl& image);
 [[nodiscard]] std::string format_qwen35_image_embedding_plan(
   const Qwen35ImageEmbeddingPlan& plan);
+[[nodiscard]] Result<Qwen35MultimodalPromptPlan> plan_qwen35_multimodal_prompt(
+  const Qwen35MmprojMetadata& metadata, const std::vector<ChatMessage>& messages,
+  bool add_generation_prompt, bool enable_thinking);
+[[nodiscard]] std::string format_qwen35_multimodal_prompt_plan(
+  const Qwen35MultimodalPromptPlan& plan);
 
 }  // namespace toyllm

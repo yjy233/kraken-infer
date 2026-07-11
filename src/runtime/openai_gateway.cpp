@@ -1030,6 +1030,15 @@ std::optional<std::pair<int, std::string>> chat_multimodal_error(
         metadata.value().vision_projector_type,
     };
   }
+  const auto prompt_plan = plan_qwen35_multimodal_prompt(
+    metadata.value(), request.messages, true, request.enable_thinking);
+  if (!prompt_plan.is_ok()) {
+    return std::pair<int, std::string>{
+      400,
+      "failed to plan Qwen3.5 multimodal prompt: " +
+        prompt_plan.status().message(),
+    };
+  }
   return std::nullopt;
 }
 

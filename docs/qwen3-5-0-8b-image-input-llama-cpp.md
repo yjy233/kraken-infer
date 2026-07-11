@@ -272,6 +272,11 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   `8..4096`，并输出 resized size、patch grid、merge grid 和 image token 数。
   这一步尚不做像素 decode/vision forward，但为 native mixed prefill 明确 image
   placeholder 长度。
+- 已新增 Qwen3VL multimodal prompt plan：按 chat message/content part 顺序生成
+  text chunk、image embedding chunk、`<|vision_start|>` / `<|vision_end|>` 边界，
+  并统计 image token 总数和 MRoPE image position advance。
+- gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
+  native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
 - 图片请求没有 `--mmproj` 时返回 OpenAI 兼容 400。
 - 图片请求带了非 `qwen3vl_merger` mmproj 时返回 OpenAI 兼容 400。
@@ -365,6 +370,8 @@ GET http://127.0.0.1:18081/v1/openapi.json
 
 阶段 4：mixed prefill
 
+- multimodal prompt chunk plan 已实现，包含 text/image chunk 顺序和 image
+  placeholder 长度。
 - text chunk 走 token embedding path。
 - image chunk 走 raw embedding path。
 - MRoPE position buffer 支持 text broadcast 和 image `[t,y,x,z]`。

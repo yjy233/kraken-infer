@@ -2522,6 +2522,69 @@ void test_qwen35_mmproj_metadata_validation() {
   assert(plan_summary.find("image merge_grid:") != std::string::npos);
   assert(plan_summary.find("image tokens:") != std::string::npos);
 
+  toyllm::ChatContentPart prompt_text{
+    toyllm::ChatContentPartKind::text,
+    "describe ",
+    {},
+    {},
+  };
+  toyllm::ChatContentPart prompt_image{
+    toyllm::ChatContentPartKind::image_url,
+    {},
+    "data:image/png;base64,ignored",
+    "auto",
+  };
+  prompt_image.image_width = 28;
+  prompt_image.image_height = 28;
+  prompt_image.image_fingerprint = 42;
+  toyllm::ChatContentPart prompt_tail{
+    toyllm::ChatContentPartKind::text,
+    " please",
+    {},
+    {},
+  };
+  const auto prompt_plan = toyllm::plan_qwen35_multimodal_prompt(
+    metadata.value(),
+    {toyllm::ChatMessage{"user", {}, {prompt_text, prompt_image, prompt_tail}}},
+    true, false);
+  assert(prompt_plan.is_ok());
+  assert(prompt_plan.value().chunks.size() == 3);
+  assert(prompt_plan.value().text_chunks == 2);
+  assert(prompt_plan.value().image_chunks == 1);
+  assert(prompt_plan.value().image_tokens == 9);
+  assert(prompt_plan.value().image_position_advance == 3);
+  assert(prompt_plan.value().chunks[0].kind ==
+         toyllm::Qwen35MultimodalPromptChunkKind::text);
+  assert(prompt_plan.value().chunks[0].text ==
+         "<|im_start|>user\ndescribe <|vision_start|>");
+  assert(prompt_plan.value().chunks[1].kind ==
+         toyllm::Qwen35MultimodalPromptChunkKind::image);
+  assert(prompt_plan.value().chunks[1].image_fingerprint == 42);
+  assert(prompt_plan.value().chunks[1].image_plan.image_tokens == 9);
+  assert(prompt_plan.value().chunks[2].kind ==
+         toyllm::Qwen35MultimodalPromptChunkKind::text);
+  assert(prompt_plan.value().chunks[2].text ==
+         "<|vision_end|> please<|im_end|>\n<|im_start|>assistant\n"
+         "<think>\n\n</think>\n\n");
+  const auto prompt_summary =
+    toyllm::format_qwen35_multimodal_prompt_plan(prompt_plan.value());
+  assert(prompt_summary.find("multimodal image_tokens: 9") != std::string::npos);
+  assert(prompt_summary.find("grid=3x3") != std::string::npos);
+
+  toyllm::ChatContentPart missing_dimension_image{
+    toyllm::ChatContentPartKind::image_url,
+    {},
+    "https://example.test/image.png",
+    "auto",
+  };
+  const auto missing_dimension_plan = toyllm::plan_qwen35_multimodal_prompt(
+    metadata.value(),
+    {toyllm::ChatMessage{"user", {}, {missing_dimension_image}}},
+    false, false);
+  assert(!missing_dimension_plan.is_ok());
+  assert(missing_dimension_plan.status().message().find("dimensions") !=
+         std::string::npos);
+
   auto missing_tensors = tiny_qwen35_mmproj_tensors();
   missing_tensors.erase(
     std::remove_if(missing_tensors.begin(), missing_tensors.end(),

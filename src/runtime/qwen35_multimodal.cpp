@@ -384,6 +384,41 @@ Result<Qwen35ImageDimensions> qwen35_smart_resize(std::uint32_t width,
   return Qwen35ImageDimensions{aligned_width, aligned_height};
 }
 
+bool qwen35_role_is_supported(std::string_view role) {
+  return role == "system" || role == "user" || role == "assistant";
+}
+
+void add_multimodal_text_chunk(Qwen35MultimodalPromptPlan& plan,
+                               std::string_view text,
+                               std::size_t message_index,
+                               std::size_t part_index) {
+  if (text.empty()) {
+    return;
+  }
+  if (!plan.chunks.empty() &&
+      plan.chunks.back().kind == Qwen35MultimodalPromptChunkKind::text) {
+    plan.chunks.back().text += text;
+    return;
+  }
+  Qwen35MultimodalPromptChunk chunk;
+  chunk.kind = Qwen35MultimodalPromptChunkKind::text;
+  chunk.text = std::string{text};
+  chunk.message_index = message_index;
+  chunk.part_index = part_index;
+  plan.chunks.push_back(std::move(chunk));
+}
+
+Result<Qwen35ImageDimensions> image_part_dimensions(const ChatContentPart& part) {
+  if (part.image_width != 0 && part.image_height != 0) {
+    return Qwen35ImageDimensions{part.image_width, part.image_height};
+  }
+  if (!part.image_mime_type.empty() && !part.image_bytes.empty()) {
+    return infer_qwen35_image_dimensions(part.image_mime_type, part.image_bytes);
+  }
+  return Status::invalid_argument(
+    "Qwen3.5 multimodal prompt image part is missing dimensions");
+}
+
 int base64_value(char ch) {
   if (ch >= 'A' && ch <= 'Z') {
     return ch - 'A';
@@ -729,6 +764,113 @@ std::string format_qwen35_image_embedding_plan(
   output << "image tokens: " << plan.image_tokens << '\n';
   output << "image token_limits: " << plan.min_image_tokens << ".."
          << plan.max_image_tokens << '\n';
+  return output.str();
+}
+
+Result<Qwen35MultimodalPromptPlan> plan_qwen35_multimodal_prompt(
+  const Qwen35MmprojMetadata& metadata, const std::vector<ChatMessage>& messages,
+  bool add_generation_prompt, bool enable_thinking) {
+  if (!qwen35_mmproj_is_qwen3vl_merger(metadata)) {
+    return Status::invalid_argument(
+      "Qwen3.5 multimodal prompt plan requires qwen3vl_merger mmproj");
+  }
+  Qwen35MultimodalPromptPlan plan;
+  std::size_t image_index = 0;
+  for (std::size_t message_index = 0; message_index < messages.size();
+       ++message_index) {
+    const auto& message = messages[message_index];
+    if (!qwen35_role_is_supported(message.role)) {
+      return Status::invalid_argument("unsupported chat message role: " +
+                                      message.role);
+    }
+    {
+      std::ostringstream prefix;
+      prefix << "<|im_start|>" << message.role << '\n';
+      add_multimodal_text_chunk(plan, prefix.str(), message_index, 0);
+    }
+    if (message.content_parts.empty()) {
+      add_multimodal_text_chunk(plan, message.content, message_index, 0);
+    } else {
+      for (std::size_t part_index = 0; part_index < message.content_parts.size();
+           ++part_index) {
+        const auto& part = message.content_parts[part_index];
+        if (part.kind == ChatContentPartKind::text) {
+          add_multimodal_text_chunk(plan, part.text, message_index, part_index);
+          continue;
+        }
+        if (part.kind != ChatContentPartKind::image_url) {
+          return Status::invalid_argument("unsupported chat content part kind");
+        }
+        add_multimodal_text_chunk(plan, "<|vision_start|>", message_index,
+                                  part_index);
+        auto dimensions = image_part_dimensions(part);
+        if (!dimensions.is_ok()) {
+          return dimensions.status();
+        }
+        auto image_plan = plan_qwen35_image_embeddings(
+          metadata, dimensions.value().width, dimensions.value().height);
+        if (!image_plan.is_ok()) {
+          return image_plan.status();
+        }
+        Qwen35MultimodalPromptChunk chunk;
+        chunk.kind = Qwen35MultimodalPromptChunkKind::image;
+        chunk.message_index = message_index;
+        chunk.part_index = part_index;
+        chunk.image_index = image_index++;
+        chunk.image_fingerprint = part.image_fingerprint;
+        chunk.image_plan = image_plan.value();
+        plan.image_tokens += chunk.image_plan.image_tokens;
+        plan.image_position_advance += std::max<std::size_t>(
+          chunk.image_plan.merge_grid_x, chunk.image_plan.merge_grid_y);
+        plan.chunks.push_back(std::move(chunk));
+        add_multimodal_text_chunk(plan, "<|vision_end|>", message_index,
+                                  part_index);
+      }
+    }
+    add_multimodal_text_chunk(plan, "<|im_end|>\n", message_index, 0);
+  }
+  if (add_generation_prompt) {
+    add_multimodal_text_chunk(plan, "<|im_start|>assistant\n", messages.size(), 0);
+    if (enable_thinking) {
+      add_multimodal_text_chunk(plan, "<think>\n", messages.size(), 0);
+    } else {
+      add_multimodal_text_chunk(plan, "<think>\n\n</think>\n\n",
+                                messages.size(), 0);
+    }
+  }
+  for (const auto& chunk : plan.chunks) {
+    if (chunk.kind == Qwen35MultimodalPromptChunkKind::text) {
+      ++plan.text_chunks;
+    } else {
+      ++plan.image_chunks;
+    }
+  }
+  return plan;
+}
+
+std::string format_qwen35_multimodal_prompt_plan(
+  const Qwen35MultimodalPromptPlan& plan) {
+  std::ostringstream output;
+  output << "multimodal chunks: " << plan.chunks.size() << '\n';
+  output << "multimodal text_chunks: " << plan.text_chunks << '\n';
+  output << "multimodal image_chunks: " << plan.image_chunks << '\n';
+  output << "multimodal image_tokens: " << plan.image_tokens << '\n';
+  output << "multimodal image_position_advance: "
+         << plan.image_position_advance << '\n';
+  for (const auto& chunk : plan.chunks) {
+    output << "- ";
+    if (chunk.kind == Qwen35MultimodalPromptChunkKind::text) {
+      output << "text bytes=" << chunk.text.size();
+    } else {
+      output << "image index=" << chunk.image_index
+             << " tokens=" << chunk.image_plan.image_tokens
+             << " grid=" << chunk.image_plan.merge_grid_x << 'x'
+             << chunk.image_plan.merge_grid_y
+             << " fingerprint=" << chunk.image_fingerprint;
+    }
+    output << " message=" << chunk.message_index
+           << " part=" << chunk.part_index << '\n';
+  }
   return output.str();
 }
 
