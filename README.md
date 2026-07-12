@@ -193,7 +193,10 @@ ctest --preset debug
   --stream
 ```
 
-启动本地 HTTP gateway（Qwen3.5 0.8B VL + text MTP + F16 KV cache）：
+### 推荐启动命令
+
+Qwen3.5 0.8B 全功能本地 gateway（文本 MTP、VL 图片对话、F16 KV cache、默认
+prompt cache、profile summary）：
 
 ```bash
 KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
@@ -211,15 +214,16 @@ KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
   --profile summary
 ```
 
-该命令同时启用 OpenAI `image_url` 图片输入、原生 Qwen3.5 VL mixed prefill、
-文本 MTP speculative decode，以及 Qwen3.5 full-attention F16 KV cache。图片请求会在
-本 runtime 内执行 mmproj CPU vision encoder，再把 image embeddings 和文本
-embeddings 混合喂给 Metal decoder，但图片请求不会启用 MTP。Prompt cache 默认开启；
-当文本 MTP 实际启用或请求包含图片时，cache 会自动跳过。需要强制关闭 cache 时使用
-`--no-cache-prompt` 或请求字段 `"cache_prompt": false`。
+功能策略：
 
-当前文本 MTP 是功能完整、可观测的 greedy speculative path；release CLI 文本路径
-已经能看到正收益。若只追求最低单请求延迟，仍建议用 `--no-mtp` 做基线对照。
+- 文本请求：默认启用 MTP speculative decode，并返回 `X-Kraken-MTP-*` headers。
+- 图片请求：使用 OpenAI `image_url` content array；本 runtime 执行 Qwen3.5 VL CPU
+  vision encoder，再把 image embeddings 与文本 embeddings 混合喂给 Metal decoder。
+- 图片请求不会启用 MTP，会返回
+  `X-Kraken-MTP-Disabled-Reason: multimodal_prompt_not_supported_with_mtp`。
+- Prompt cache 默认开启；文本 MTP 实际启用或请求包含图片时，cache 会自动跳过。
+- 需要强制关闭 cache 时使用 `--no-cache-prompt` 或请求字段 `"cache_prompt": false`。
+- 需要测 prompt cache 时，用 `--no-mtp` 或请求字段 `"mtp": false`。
 
 浏览器对话页：
 
@@ -306,11 +310,9 @@ curl http://127.0.0.1:18080/v1/chat/completions \
 
 ## Prefix Cache Example
 
-Start gateway with Qwen3.5 0.8B VL and prompt cache defaults. Prompt cache is
-enabled by default; keep `--cache-block-tokens` aligned with
-`--prefill-chunk-tokens` for the current implementation. MTP and multimodal
-requests currently skip prompt cache, so this cache-focused example disables
-MTP.
+Prompt cache 默认开启。当前实现要求 `--cache-block-tokens` 与
+`--prefill-chunk-tokens` 对齐。MTP 和多模态请求会跳过 prompt cache，所以这个
+cache 专用示例关闭 MTP：
 
 ```bash
 ./build/debug/kraken-infer serve \
@@ -328,7 +330,7 @@ MTP.
   --cache-capacity-blocks 16
 ```
 
-Run the same request twice:
+连续发送同一个请求两次：
 
 ```bash
 curl -i http://127.0.0.1:18080/v1/chat/completions \
