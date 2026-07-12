@@ -214,6 +214,7 @@ struct Qwen35MixedPrefillPlan {
   std::size_t total_tokens{0};
   std::size_t total_position_advance{0};
   std::uint64_t embedding_width{0};
+  std::vector<std::int32_t> mrope_positions;
 };
 
 [[nodiscard]] Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(

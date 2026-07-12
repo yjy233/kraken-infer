@@ -305,7 +305,8 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   plan，对 text chunk 保留 token ids，对 image chunk 执行 decode/preprocess/CPU
   vision encoder，并记录每个 chunk 的 `start_token`、MRoPE `start_position`、
   `token_count` 和 `position_advance`。这一步已经能产出 decoder 所需的 raw image
-  embeddings，但尚未把它们注入 Metal prefill layer loop。
+  embeddings 和按 llama.cpp mtmd 规则排布的 `[t, y, x, z]` MRoPE position buffer，
+  但尚未把它们注入 Metal prefill layer loop。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
@@ -415,6 +416,9 @@ GET http://127.0.0.1:18081/v1/openapi.json
   的输入结构。
 - native mixed prefill plan builder 已实现：image chunk 会跑 CPU reference vision
   encoder 并携带 raw F32 embeddings，text chunk 保留 token ids。
+- mixed plan 已携带整段 MRoPE position buffer：text chunk 为 1D broadcast；
+  image chunk 为 `t=pos0, y=pos0+row, x=pos0+col, z=0`，并按
+  llama.cpp `set_position_mrope_2d()` 的 section-major layout 存储。
 - text chunk 走 token embedding path。
 - 下一步是让 Metal prefill layer loop 消费 mixed prefill hidden stream。
 - MRoPE position buffer 支持 text broadcast 和 image `[t,y,x,z]`。

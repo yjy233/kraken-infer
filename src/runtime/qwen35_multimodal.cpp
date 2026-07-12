@@ -1124,6 +1124,72 @@ Result<std::vector<float>> qwen3vl_projector_mlp_token_major(
     fc2_weight, fc2_bias, label);
 }
 
+Result<std::int32_t> qwen35_i32_position(std::size_t value,
+                                         std::string_view label) {
+  if (value > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    return Status::invalid_argument(std::string{label} + " exceeds int32 range");
+  }
+  return static_cast<std::int32_t>(value);
+}
+
+Status append_mixed_text_mrope_positions(std::vector<std::int32_t>& positions,
+                                         std::size_t total_tokens,
+                                         std::size_t token_offset,
+                                         std::size_t position_start,
+                                         std::size_t tokens) {
+  for (std::size_t token = 0; token < tokens; ++token) {
+    auto position = qwen35_i32_position(position_start + token,
+                                        "Qwen3.5 text MRoPE position");
+    if (!position.is_ok()) {
+      return position.status();
+    }
+    for (std::size_t section = 0; section < 4U; ++section) {
+      positions[section * total_tokens + token_offset + token] = position.value();
+    }
+  }
+  return Status::ok();
+}
+
+Status append_mixed_image_mrope_positions(std::vector<std::int32_t>& positions,
+                                          std::size_t total_tokens,
+                                          std::size_t token_offset,
+                                          std::size_t position_start,
+                                          const Qwen35ImageEmbeddingPlan& image_plan) {
+  if (image_plan.merge_grid_x == 0 || image_plan.merge_grid_y == 0 ||
+      image_plan.image_tokens !=
+        static_cast<std::size_t>(image_plan.merge_grid_x) *
+          image_plan.merge_grid_y) {
+    return Status::invalid_argument(
+      "Qwen3.5 image MRoPE position plan has invalid grid");
+  }
+  for (std::uint32_t row = 0; row < image_plan.merge_grid_y; ++row) {
+    for (std::uint32_t col = 0; col < image_plan.merge_grid_x; ++col) {
+      const auto token =
+        static_cast<std::size_t>(row) * image_plan.merge_grid_x + col;
+      auto t = qwen35_i32_position(position_start,
+                                   "Qwen3.5 image MRoPE t position");
+      auto y = qwen35_i32_position(position_start + row,
+                                   "Qwen3.5 image MRoPE y position");
+      auto x = qwen35_i32_position(position_start + col,
+                                   "Qwen3.5 image MRoPE x position");
+      if (!t.is_ok()) {
+        return t.status();
+      }
+      if (!y.is_ok()) {
+        return y.status();
+      }
+      if (!x.is_ok()) {
+        return x.status();
+      }
+      positions[token_offset + token] = t.value();
+      positions[total_tokens + token_offset + token] = y.value();
+      positions[2U * total_tokens + token_offset + token] = x.value();
+      positions[3U * total_tokens + token_offset + token] = 0;
+    }
+  }
+  return Status::ok();
+}
+
 bool qwen35_role_is_supported(std::string_view role) {
   return role == "system" || role == "user" || role == "assistant";
 }
@@ -2862,6 +2928,22 @@ Result<Qwen35MixedPrefillPlan> build_qwen35_mixed_prefill_plan(
     return Status::internal_error(
       "Qwen3.5 mixed prefill counters do not match token plan");
   }
+  mixed.mrope_positions.assign(mixed.total_tokens * 4U, 0);
+  for (const auto& chunk : mixed.chunks) {
+    Status status;
+    if (chunk.kind == Qwen35MultimodalPromptChunkKind::text) {
+      status = append_mixed_text_mrope_positions(
+        mixed.mrope_positions, mixed.total_tokens, chunk.start_token,
+        chunk.start_position, chunk.token_count);
+    } else {
+      status = append_mixed_image_mrope_positions(
+        mixed.mrope_positions, mixed.total_tokens, chunk.start_token,
+        chunk.start_position, chunk.image_plan);
+    }
+    if (!status.is_ok()) {
+      return status;
+    }
+  }
   return mixed;
 }
 
@@ -2877,6 +2959,8 @@ std::string format_qwen35_mixed_prefill_plan(
   output << "mixed prefill total_position_advance: "
          << plan.total_position_advance << '\n';
   output << "mixed prefill embedding_width: " << plan.embedding_width << '\n';
+  output << "mixed prefill mrope_positions: "
+         << plan.mrope_positions.size() << '\n';
   for (const auto& chunk : plan.chunks) {
     output << "- ";
     if (chunk.kind == Qwen35MultimodalPromptChunkKind::text) {

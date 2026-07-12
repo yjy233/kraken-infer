@@ -2776,6 +2776,8 @@ void test_qwen35_mmproj_metadata_validation() {
   assert(mixed_prefill.value().image_chunks == 1);
   assert(mixed_prefill.value().image_tokens == 9);
   assert(mixed_prefill.value().embedding_width == 12);
+  assert(mixed_prefill.value().mrope_positions.size() ==
+         mixed_prefill.value().total_tokens * 4U);
   assert(mixed_prefill.value().chunks[1].kind ==
          toyllm::Qwen35MultimodalPromptChunkKind::image);
   assert(mixed_prefill.value().chunks[1].image_embeddings.size() == 9U * 12U);
@@ -2791,12 +2793,40 @@ void test_qwen35_mmproj_metadata_validation() {
          mixed_prefill.value().text_tokens + 9U);
   assert(mixed_prefill.value().total_position_advance ==
          mixed_prefill.value().text_tokens + 3U);
+  const auto mixed_total_tokens = mixed_prefill.value().total_tokens;
+  const auto image_start_token = mixed_prefill.value().chunks[1].start_token;
+  const auto image_start_position =
+    mixed_prefill.value().chunks[1].start_position;
+  assert(mixed_prefill.value().mrope_positions[image_start_token] ==
+         static_cast<std::int32_t>(image_start_position));
+  assert(mixed_prefill.value().mrope_positions[mixed_total_tokens +
+                                                image_start_token + 1U] ==
+         static_cast<std::int32_t>(image_start_position));
+  assert(mixed_prefill.value().mrope_positions[2U * mixed_total_tokens +
+                                                image_start_token + 1U] ==
+         static_cast<std::int32_t>(image_start_position + 1U));
+  assert(mixed_prefill.value().mrope_positions[mixed_total_tokens +
+                                                image_start_token + 3U] ==
+         static_cast<std::int32_t>(image_start_position + 1U));
+  assert(mixed_prefill.value().mrope_positions[2U * mixed_total_tokens +
+                                                image_start_token + 3U] ==
+         static_cast<std::int32_t>(image_start_position));
+  const auto text_after_start_token = mixed_prefill.value().chunks[2].start_token;
+  const auto text_after_start_position =
+    mixed_prefill.value().chunks[2].start_position;
+  assert(mixed_prefill.value().mrope_positions[text_after_start_token] ==
+         static_cast<std::int32_t>(text_after_start_position));
+  assert(mixed_prefill.value().mrope_positions[mixed_total_tokens +
+                                                text_after_start_token] ==
+         static_cast<std::int32_t>(text_after_start_position));
   for (const auto value : mixed_prefill.value().chunks[1].image_embeddings) {
     assert(std::abs(value) < 1e-6F);
   }
   const auto mixed_summary =
     toyllm::format_qwen35_mixed_prefill_plan(mixed_prefill.value());
   assert(mixed_summary.find("mixed prefill image_tokens: 9") !=
+         std::string::npos);
+  assert(mixed_summary.find("mixed prefill mrope_positions: ") !=
          std::string::npos);
   assert(mixed_summary.find("start_position=") != std::string::npos);
 #endif
