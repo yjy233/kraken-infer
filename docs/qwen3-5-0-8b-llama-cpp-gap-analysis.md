@@ -143,17 +143,22 @@ kraken 当前视觉实现：
 
 - 已能解析 OpenAI `image_url` content array、data URL、图片 fingerprint。
 - 已能读取并校验 `qwen3vl_merger` mmproj metadata。
-- 当前真正推理是外部调用 `llama-mtmd-cli` 的桥接路径。
-- 进入 VL bridge 后，MTP 被显式关闭，原因是 `vl_bridge_uses_llama_mtmd_without_mtp`。
+- 已实现 native Qwen3.5 VL CPU vision encoder，把 image embeddings 与文本
+  embeddings 混合后送入同一个 Metal decoder。
+- mixed prefill 已使用图片 grid 推进 Qwen3.5 4 路 MRoPE logical position，并把
+  physical KV position 与 logical MRoPE position 分离。
+- 使用带 MTP 的 GGUF 时，图片请求也可以走 native MTP prefill/decode，并通过
+  `X-Kraken-MTP-*` headers 暴露统计。
 
-因此，当前 kraken 和 llama.cpp 的最大功能差距是原生视觉：kraken 还没有
-mmproj/vision graph、image embedding injection、image MRoPE position 与多模态 cache。
+因此，当前 kraken 和 llama.cpp 的视觉功能差距已经从“是否能原生跑通”变成
+性能和工程化差距：kraken 的 vision encoder 仍是 CPU reference path，真实大图会很慢；
+多模态 prefix cache、paged KV、多 slot 调度和成熟的 memory reuse 仍未对齐。
 
 ## 性能差距判断
 
-本轮 fused top-1 / token-only argmax / adaptive budget 后，MTP greedy 路径已经不再
-总是慢于 no-MTP。Debug build 在同一 prompt、`Qwen3.5-0.8B-Q4_K_M.gguf`、64
-completion tokens 下实测，wall time 有机器负载波动：
+本轮 fused top-1 / token-only argmax / conservative adaptive budget 后，MTP greedy
+路径已经功能完整并可观测，但在当前 Debug/MPS 实现上仍不保证 latency win。历史
+64-token sweep 曾出现 MTP 略快于 no-MTP 的结果，说明方向可行：
 
 - no-MTP：`real 15.17s`。
 - MTP `draft_tokens=3, p_min=0`：`real 14.38s`，
@@ -165,6 +170,20 @@ completion tokens 下实测，wall time 有机器负载波动：
   为 `real 10.44s`，`draft_tokens=2` 为 `real 10.67s`，
   `draft_tokens=3` 为 `real 10.92s`，同轮 no-MTP 为 `real 11.05s`。
 
+2026-07-12 复测更保守的 adaptive budget 后，32-token CLI sweep 为：
+
+- no-MTP：`5.61s`。
+- MTP `draft_tokens=3, p_min=0.30`：`6.31s`，
+  drafted=11、accepted=10、verify_steps=11、adaptive_budget=1。
+
+同一 prompt 的 OpenAI gateway 复测：
+
+- text `max_tokens=32`：no-MTP `6.05s`，MTP `7.39s`。
+- text `max_tokens=128`：no-MTP `6.94s`，MTP `9.29s`；该 prompt 在
+  40 completion tokens 提前 stop。
+- tiny PNG VL `max_tokens=2`：no-MTP 约 `10.58s`，MTP 约 `10.66s`；
+  CPU vision + prefill 主导。
+
 对比上一轮 full-logits draft head：
 
 - no-MTP：约 10.98s / 64 tokens。
@@ -172,8 +191,8 @@ completion tokens 下实测，wall time 有机器负载波动：
 - MTP `p_min=0.20`：约 12.80s。
 
 因此 fused head 解决了 draft LM head materialize 完整 vocab logits 的主要开销；
-token-only argmax 移除了 `p_min=0` 下不需要的 softmax denominator；adaptive budget
-会在低收益窗口把 draft budget 下调。剩余性能差距主要来自：
+token-only argmax 移除了 `p_min=0` 下不需要的 softmax denominator；conservative
+adaptive budget 会从 1 起步，只有全接受窗口才升档。剩余性能差距主要来自：
 
 1. MTP draft 每步仍完整跑 MTP block；当 `p_min=0` 时会产生更多低质量 draft，
    extra draft compute 容易抵消 verify step 减少。
@@ -183,7 +202,8 @@ token-only argmax 移除了 `p_min=0` 下不需要的 softmax denominator；adap
 3. kraken 的 custom Metal kernels 没有 ggml/llama.cpp 那套成熟 scheduler 与 memory
    复用能力。
 4. kraken 当前没有多 token/多 seq 的统一 speculative 调度，很多状态管理在请求 loop 内。
-5. VL bridge 走外部进程，不可能和本地 MTP 共享 context/cache。
+5. VL 请求的 CPU vision encoder/prefill 成本远高于短 decode，MTP 的收益很难在
+   `max_tokens` 很小时体现。
 
 ## 优先级建议
 
@@ -214,15 +234,15 @@ token-only argmax 移除了 `p_min=0` 下不需要的 softmax denominator；adap
   - `mtp_p_min = 0` 时只输出 draft token。
   - 不再计算不需要的 softmax denominator。
 - MTP decode loop 增加 adaptive draft budget：
-  - 窗口内 accepted/drafted 低于 50% 时降低 draft budget。
-  - 高于 75% 时允许逐步恢复到请求的 `mtp_draft_tokens`。
+  - 从 `adaptive_budget=1` 起步，避免默认深层 draft 过早放大开销。
+  - 高预算窗口 accepted/drafted 低于 75% 时降低 draft budget。
+  - 只有窗口内 draft 全部 accepted 时才允许逐步恢复到请求的 `mtp_draft_tokens`。
   - CLI、gateway headers 和 profiler 增加 `adaptive_budget` / `adaptive_changes`。
 
 仍未完成：
 
 - MTP draft top-k/common sampler parity。
-- native VL + native MTP 共用同一个 kraken context。当前图片请求仍走
-  `llama-mtmd-cli` bridge，进入 bridge 后会禁用 kraken MTP。
+- 多模态 prefix cache 与 MTP cache payload 还未合并。
 
 ## 优先级建议
 
@@ -241,8 +261,8 @@ token-only argmax 移除了 `p_min=0` 下不需要的 softmax denominator；adap
 中期：
 
 1. 把 MTP loop 拆成 target context / draft context 风格的内部抽象。
-2. 支持 image embedding batch 输入到 native qwen35 decoder。
-3. 实现 qwen3vl_merger vision graph，替代 `llama-mtmd-cli` 外部进程。
+2. 把 CPU vision encoder 迁移到 Metal/MPS，降低真实图片 prefill 成本。
+3. 合并多模态 prefix cache 与 MTP cache payload。
 
 长期：
 

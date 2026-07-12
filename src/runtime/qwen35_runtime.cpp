@@ -5413,7 +5413,9 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     mtp_state.disabled_reason = "prompt_cache_not_supported_with_mtp_yet";
   } else {
     mtp_state.enabled = true;
-    mtp_state.adaptive_budget = mtp_state.draft_tokens;
+    // Start conservatively and let the adaptive controller ramp up only when
+    // accepted drafts justify the extra MTP work on this machine/request.
+    mtp_state.adaptive_budget = 1;
     mtp_state.verified_by_position.assign(mtp_state.draft_tokens, 0);
     mtp_state.accepted_by_position.assign(mtp_state.draft_tokens, 0);
   }
@@ -6354,7 +6356,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     mtp_state.adaptive_window_drafted += drafted_count;
     mtp_state.adaptive_window_accepted += accepted_count;
     const auto sample_threshold =
-      std::max<std::size_t>(8U, mtp_state.adaptive_budget * 4U);
+      std::max<std::size_t>(16U, mtp_state.adaptive_budget * 8U);
     if (mtp_state.adaptive_window_drafted < sample_threshold) {
       return;
     }
@@ -6363,11 +6365,11 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     const auto window_accepted = mtp_state.adaptive_window_accepted;
     bool changed = false;
     if (mtp_state.adaptive_budget > 1U &&
-        window_accepted * 2U < window_drafted) {
+        window_accepted * 4U < window_drafted * 3U) {
       --mtp_state.adaptive_budget;
       changed = true;
     } else if (mtp_state.adaptive_budget < mtp_state.draft_tokens &&
-               window_accepted * 4U >= window_drafted * 3U) {
+               window_accepted == window_drafted) {
       ++mtp_state.adaptive_budget;
       changed = true;
     }

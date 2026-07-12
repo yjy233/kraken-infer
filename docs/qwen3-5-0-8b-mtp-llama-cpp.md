@@ -20,7 +20,7 @@ llama.cpp 的 Qwen3.5 MTP 不是把主 decoder 一次输出多个 token，而是
 5. target sampler 从每一行 logits 逐个采样；只要采样 token 和 draft token 相同就接受，
    第一个不相同处停止。
 
-截至 2026-07-10，`kraken-infer` 已完成第一版 correctness-first 原生文本 MTP：
+截至 2026-07-12，`kraken-infer` 已完成 correctness-first 原生 Qwen3.5 MTP：
 
 - `ModelConfig::mtp_num_hidden_layers` 已从 GGUF `nextn_predict_layers` 读取。
 - `Qwen35WeightMap` 已能映射 `Qwen35LayerKind::mtp` 和 `nextn.*` tensors。
@@ -42,8 +42,12 @@ llama.cpp 的 Qwen3.5 MTP 不是把主 decoder 一次输出多个 token，而是
   top-1 token 和 exact top-1 probability，不再 materialize 完整 vocab logits。
 - MPS backend 已增加 Q4_K/Q5_K/Q6_K token-only argmax LM head，`mtp_p_min = 0`
   时不再计算 softmax denominator。
-- decode loop 已增加 adaptive draft budget：低收益窗口降预算，高收益窗口逐步恢复，
+- decode loop 已增加 conservative adaptive draft budget：从 1 开始，低收益窗口降预算，
+  只有全接受窗口才逐步恢复到请求预算，
   并通过 CLI、headers、profiler 暴露 `adaptive_budget` / `adaptive_changes`。
+- native Qwen3.5 VL mixed prefill 已能把 CPU vision encoder 产出的 image embeddings
+  和文本 embeddings 喂给同一个 Metal decoder；MTP GGUF + mmproj 图片请求可以返回
+  `X-Kraken-MTP-Enabled: 1`。
 
 当前限制：
 
@@ -52,9 +56,9 @@ llama.cpp 的 Qwen3.5 MTP 不是把主 decoder 一次输出多个 token，而是
 - target verify 已经 batch decode；但 sampler/accept 仍是逐行 greedy argmax 对比，
   尚未接入 llama.cpp common sampler 风格的 top-k/top-p accept。
 - `cache_prompt` 与 MTP 暂不同时启用；attention KV cache 仍正常使用。
-- 图片请求仍通过 `llama-mtmd-cli` 桥接完成 VL，MTP headers 会标记 MTP 未启用。
-  llama.cpp 自身的 draft-mtp 代码也仍有 vision token TODO，因此这里不伪装成原生
-  VL+MTP。
+- VL vision encoder 当前是 CPU reference path，真实大图 prefill 会明显慢于纯文本请求。
+- MTP 当前是可测试、可观测的 speculative path；在本仓库 Debug/MPS 实现上不保证
+  每个 prompt 都比 no-MTP 快。
 
 ## 参考文件
 
@@ -675,22 +679,26 @@ Qwen3.5 有 recurrent linear attention。验证 draft 时如果部分拒绝，ta
 
 ### 与 VL/mmproj 的关系
 
-当前 kraken 的 VL 路径通过 llama.cpp `llama-mtmd-cli` 桥接，不走 native text runtime。
-MTP 第一阶段应在以下条件下禁用：
+早期设计阶段曾把 VL 请求桥接到 llama.cpp `llama-mtmd-cli`，因此图片请求不能共享
+native text runtime 的 `h_nextn` 和 cache。当前实现已经改成 native Qwen3.5 VL
+mixed prefill：
 
 ```text
-chat_messages_have_image_content(request.messages) == true
-request.mmproj_path not empty
+text tokens      -> token embedding
+image chunks     -> CPU vision encoder -> image embedding rows
+mixed prefill    -> native Metal decoder -> target h_nextn + MTP cache
 ```
 
-原因：
+当前状态：
 
-- llama.cpp MTP README 说明 `--mmproj` 暂不支持 MTP。
-- 多模态 prompt 中 image embedding 不是普通 token id；MTP process hook 当前只处理
-  token batch。
-- kraken 当前 VL bridge 不是 native cache path，无法共享 `h_nextn`。
-
-后续 native VL graph 完成后，再重新设计 image chunk 的 `h_nextn` / MTP process key。
+- image embedding row 会进入 target prefill，并为 MTP 维护 post-output-norm
+  `h_nextn`。
+- physical KV position 与 logical MRoPE position 已分离，图片 grid 按 Qwen3.5
+  VL 规则推进 logical position。
+- MTP GGUF + mmproj 图片请求可以启用 MTP；`make qwen35-vl-mtp-test` 会检查
+  `X-Kraken-MTP-Enabled=1`。
+- 仍未完成的是多模态 prefix cache 和 Metal/MPS vision encoder；当前 CPU vision
+  reference path 对真实大图较慢。
 
 ### 与 prefix cache 的关系
 
@@ -796,8 +804,8 @@ python3 scripts/test_qwen35_mtp_gateway.py --max-tokens 8 --use-default-mtp-para
 
 python3 scripts/test_qwen35_vl_gateway.py \
   --model models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf \
-  --expect-mtp-disabled-reason vl_bridge_uses_llama_mtmd_without_mtp
-{"mtp": {"x-kraken-mtp-enabled": "0", "x-kraken-mtp-layers": "1", ...}}
+  --expect-mtp-enabled
+{"mtp": {"x-kraken-mtp-enabled": "1", "x-kraken-mtp-layers": "1", ...}}
 ```
 
 ### 2026-07-10 性能测量
@@ -840,6 +848,33 @@ verify 步数收益；`p_min=0.30` 在这轮 sweep 中最稳定。CLI、OpenAI g
 用于保持多 token draft 能力；追求单 prompt 最低延迟时可以显式设为
 `--mtp-draft-tokens 1`。
 
+### 2026-07-12 conservative adaptive budget 复测
+
+这轮改动把运行时预算改为从 `1` 起步，并把升档条件收紧为窗口内 draft 全部被
+accepted；低于 75% acceptance 的高预算窗口会降档。目的是避免 Debug/MPS 路径里
+“接受率不错但额外 MTP block 仍更贵”的情况继续升档。
+
+同一 prompt、Debug build、`max-new-tokens=32`，使用
+`scripts/sweep_qwen35_mtp.py --draft-tokens 3 --p-min 0.30 --repeat 3`
+复测：
+
+| 模式 | wall time | 说明 |
+| --- | ---: | --- |
+| `--no-mtp` | 5.61s | baseline greedy decode |
+| `--mtp --mtp-draft-tokens 3 --mtp-p-min 0.30` | 6.31s | drafted=11 accepted=10 verify_steps=11 adaptive_budget=1 |
+
+OpenAI gateway 同 prompt 复测也显示 MTP 功能正常但不是 latency win：
+
+| 请求 | no-MTP | MTP | 说明 |
+| --- | ---: | ---: | --- |
+| text, `max_tokens=32` | 6.05s | 7.39s | MTP drafted=15 accepted=9 verify_steps=15 budget=1 |
+| text, `max_tokens=128` | 6.94s | 9.29s | prompt 在 40 completion tokens 提前 stop |
+| VL tiny PNG, `max_tokens=2` | 约 10.58s | 约 10.66s | CPU vision + prefill 主导，MTP 只 draft 1 个 token |
+
+结论：当前 MTP 已完整接入并可通过 headers/profiler 观测，但本机 Debug/MPS
+实现的主要价值还是 correctness/parity 与后续优化入口；追求单请求 latency 时应保留
+`--no-mtp` 基线，或显式设置 `--mtp-draft-tokens 1` 做较低风险对照。
+
 已实现 batch target verify 和 device-side draft chain：
 
 - target verify 会一次 decode `[sampled_token + draft_tokens]`。
@@ -849,8 +884,8 @@ verify 步数收益；`p_min=0.30` 在这轮 sweep 中最稳定。CLI、OpenAI g
   embedding row id，避免每个 draft token 都做 CPU readback 再启动下一图。
 - Q4_K/Q5_K/Q6_K fused top-1 head 让 draft 不再 materialize 完整 vocab logits。
 - Q4_K/Q5_K/Q6_K token-only argmax head 让 `p_min=0` 不再计算 softmax denominator。
-- adaptive budget 会在低 acceptance 窗口把 draft budget 从请求值逐步降下来，
-  减少低收益深层 draft 的 MTP block 计算。
+- adaptive budget 会从 1 起步，并只在全接受窗口升档，减少低收益深层 draft 的
+  MTP block 计算。
 
 现在推荐默认 `p_min=0.30`；`p_min=0` 通过 adaptive budget 减少了无效
 draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。后续要继续提速，
@@ -874,8 +909,8 @@ draft，但主要瓶颈仍是低置信 draft 带来的 MTP block 额外计算。
   `mtp_p_min`，输出 aggregate table、JSON 和可选 CSV，帮助选择默认参数。
 - `scripts/test_qwen35_mtp_gateway.py --use-default-mtp-params` 可验证 gateway
   默认 MTP 参数仍是 `draft_tokens=3`、`p_min=0.30`。
-- `scripts/test_qwen35_vl_gateway.py --expect-mtp-disabled-reason ...` 可验证使用
-  MTP GGUF 启动视觉 bridge 时，响应 headers 明确标记 MTP 未启用原因。
+- `scripts/test_qwen35_vl_gateway.py --expect-mtp-enabled` 可验证 MTP GGUF + mmproj
+  图片请求走 native VL mixed prefill，并返回启用状态的 MTP headers。
 
 示例：
 
@@ -908,7 +943,7 @@ python3 scripts/sweep_qwen35_mtp.py \
 - 新增 `scripts/compare_qwen35_llamacpp.py` 能生成 kraken/llama.cpp 对照 JSON。
 - 新增 `scripts/sweep_qwen35_mtp.py` 能生成 MTP 参数 sweep JSON/CSV。
 - `make qwen35-vl-mtp-test` 能验证 MTP GGUF + mmproj 图片请求路径，并检查
-  `X-Kraken-MTP-Disabled-Reason=vl_bridge_uses_llama_mtmd_without_mtp`。
+  `X-Kraken-MTP-Enabled=1`。
 
 第二阶段：
 
@@ -919,7 +954,6 @@ python3 scripts/sweep_qwen35_mtp.py \
 
 暂不做：
 
-- MTP + VL/mmproj。
 - 多 parallel slots。
 - Qwen3.5 MoE MTP。
 - 多 MTP head chain，例如 Step3.5 的 `nextn_layer_offset` 路径。
