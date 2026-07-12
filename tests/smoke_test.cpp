@@ -2586,6 +2586,33 @@ std::vector<TinyGgufTensorSpec> tiny_qwen35_mmproj_tensors() {
   };
 }
 
+toyllm::GgufTokenizer tiny_qwen35_ascii_tokenizer() {
+  toyllm::GgufTokenizer tokenizer;
+  tokenizer.model = "gpt2";
+  tokenizer.pre = "qwen35";
+
+  auto add_token = [&](std::string token, toyllm::GgufTokenType type) {
+    const auto id = static_cast<std::int64_t>(tokenizer.tokens.size());
+    tokenizer.token_to_id.emplace(token, id);
+    tokenizer.tokens.push_back(std::move(token));
+    tokenizer.token_types.push_back(static_cast<std::int64_t>(type));
+    return id;
+  };
+
+  add_token("<|im_start|>", toyllm::GgufTokenType::control);
+  tokenizer.eos_token_id =
+    add_token("<|im_end|>", toyllm::GgufTokenType::control);
+  add_token("<|vision_start|>", toyllm::GgufTokenType::control);
+  add_token("<|vision_end|>", toyllm::GgufTokenType::control);
+  add_token("<think>", toyllm::GgufTokenType::control);
+  add_token("</think>", toyllm::GgufTokenType::control);
+  add_token("\n", toyllm::GgufTokenType::normal);
+  for (char ch = 32; ch < 127; ++ch) {
+    add_token(std::string(1, ch), toyllm::GgufTokenType::normal);
+  }
+  return tokenizer;
+}
+
 void test_qwen35_mmproj_metadata_validation() {
   const auto temp_dir = unique_temp_dir("kraken-infer-mmproj-smoke");
   std::filesystem::create_directories(temp_dir);
@@ -2711,6 +2738,68 @@ void test_qwen35_mmproj_metadata_validation() {
     toyllm::format_qwen35_vision_encoder_result(encoder.value());
   assert(encoder_summary.find("vision encoder image_tokens: 9") !=
          std::string::npos);
+
+#if defined(KRAKEN_INFER_ENABLE_APPLE_IMAGEIO) && KRAKEN_INFER_ENABLE_APPLE_IMAGEIO
+  const auto red_png = toyllm::parse_qwen35_image_data_url(
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/"
+    "lV9SogAAAABJRU5ErkJggg==");
+  assert(red_png.is_ok());
+  toyllm::ChatContentPart mixed_text{
+    toyllm::ChatContentPartKind::text,
+    "hello ",
+    {},
+    {},
+  };
+  toyllm::ChatContentPart mixed_image{
+    toyllm::ChatContentPartKind::image_url,
+    {},
+    "data:image/png;base64,red",
+    "auto",
+  };
+  mixed_image.image_mime_type = red_png.value().mime_type;
+  mixed_image.image_bytes = red_png.value().bytes;
+  mixed_image.image_width = red_png.value().width;
+  mixed_image.image_height = red_png.value().height;
+  mixed_image.image_fingerprint = toyllm::qwen35_image_content_fingerprint(
+    mixed_image.image_url, mixed_image.image_mime_type, mixed_image.detail,
+    mixed_image.image_bytes);
+  toyllm::ChatMessage mixed_message;
+  mixed_message.role = "user";
+  mixed_message.content_parts = {mixed_text, mixed_image};
+  const auto mixed_prefill = toyllm::build_qwen35_mixed_prefill_plan(
+    tiny_qwen35_ascii_tokenizer(), metadata.value(), valid_path, {mixed_message},
+    true, false);
+  assert(mixed_prefill.is_ok());
+  assert(mixed_prefill.value().chunks.size() == 3);
+  assert(mixed_prefill.value().text_chunks == 2);
+  assert(mixed_prefill.value().image_chunks == 1);
+  assert(mixed_prefill.value().image_tokens == 9);
+  assert(mixed_prefill.value().embedding_width == 12);
+  assert(mixed_prefill.value().chunks[1].kind ==
+         toyllm::Qwen35MultimodalPromptChunkKind::image);
+  assert(mixed_prefill.value().chunks[1].image_embeddings.size() == 9U * 12U);
+  assert(mixed_prefill.value().chunks[1].start_token ==
+         mixed_prefill.value().chunks[0].token_count);
+  assert(mixed_prefill.value().chunks[1].start_position ==
+         mixed_prefill.value().chunks[0].position_advance);
+  assert(mixed_prefill.value().chunks[2].start_token ==
+         mixed_prefill.value().chunks[0].token_count + 9U);
+  assert(mixed_prefill.value().chunks[2].start_position ==
+         mixed_prefill.value().chunks[0].position_advance + 3U);
+  assert(mixed_prefill.value().total_tokens ==
+         mixed_prefill.value().text_tokens + 9U);
+  assert(mixed_prefill.value().total_position_advance ==
+         mixed_prefill.value().text_tokens + 3U);
+  for (const auto value : mixed_prefill.value().chunks[1].image_embeddings) {
+    assert(std::abs(value) < 1e-6F);
+  }
+  const auto mixed_summary =
+    toyllm::format_qwen35_mixed_prefill_plan(mixed_prefill.value());
+  assert(mixed_summary.find("mixed prefill image_tokens: 9") !=
+         std::string::npos);
+  assert(mixed_summary.find("start_position=") != std::string::npos);
+#endif
 
   const auto photo_plan =
     toyllm::plan_qwen35_image_embeddings(metadata.value(), 640, 480);

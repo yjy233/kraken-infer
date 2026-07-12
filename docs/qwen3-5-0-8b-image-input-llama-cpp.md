@@ -301,20 +301,26 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   blocks、post norm、`mm.0 -> GELU -> mm.2` projector，并在 deepstack 层存在时
   按 llama.cpp 规则把 deepstack projector 输出拼到主 projector 后。
   输出为 contiguous F32 `[image_tokens, projector_output_width]`。
+- 已新增 native mixed prefill plan builder：复用 tokenizer-aware multimodal token
+  plan，对 text chunk 保留 token ids，对 image chunk 执行 decode/preprocess/CPU
+  vision encoder，并记录每个 chunk 的 `start_token`、MRoPE `start_position`、
+  `token_count` 和 `position_advance`。这一步已经能产出 decoder 所需的 raw image
+  embeddings，但尚未把它们注入 Metal prefill layer loop。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
 - 图片请求没有 `--mmproj` 时返回 OpenAI 兼容 400。
 - 图片请求带了非 `qwen3vl_merger` mmproj 时返回 OpenAI 兼容 400。
-- 图片请求带了 `qwen3vl_merger` mmproj 时，当前 gateway 仍返回 OpenAI 兼容 501；
-  底层 CPU reference vision encoder 已具备，尚未接入 mixed prefill / decoder
-  embedding 注入。
+- 图片请求带了 `qwen3vl_merger` mmproj 时，当前 gateway 仍默认桥接
+  `llama-mtmd-cli` 完成端到端 VL 生成；底层 CPU reference vision encoder 和
+  mixed prefill plan 已具备，尚未接入 Metal decoder embedding 注入。
 
 当前还没有实现：
 
-- `tools/mtmd/models/qwen3vl.cpp` 对应的 vision tower / merger / deepstack graph 执行。
-  当前已经能校验 graph 所需 tensor/hparam shape，但还没有跑 MPS/MPSGraph/CPU forward。
-- mixed token/raw-embedding prefill。
+- `tools/mtmd/models/qwen3vl.cpp` 对应 vision tower / merger / deepstack 的
+  MPS/MPSGraph forward；当前 CPU reference path 已可执行完整 vision encoder。
+- Metal runtime 消费 `Qwen35MixedPrefillPlan`，把 text token embedding 与 image
+  raw embedding 合并进同一个 prefill hidden stream。
 - 多模态 block cache key 的真实 image chunk commit/restore。当前已有
   `image_fingerprint` 前置字段，但图片请求不会返回真实 KV cache hit。
 
@@ -407,8 +413,10 @@ GET http://127.0.0.1:18081/v1/openapi.json
   placeholder 长度。
 - tokenizer-aware multimodal token plan 已实现，可直接作为 mixed prefill scheduler
   的输入结构。
+- native mixed prefill plan builder 已实现：image chunk 会跑 CPU reference vision
+  encoder 并携带 raw F32 embeddings，text chunk 保留 token ids。
 - text chunk 走 token embedding path。
-- image chunk 走 raw embedding path。
+- 下一步是让 Metal prefill layer loop 消费 mixed prefill hidden stream。
 - MRoPE position buffer 支持 text broadcast 和 image `[t,y,x,z]`。
 - `n_past` / logical position 推进遵循 mtmd：text 按 token 数推进，image 按
   `max(nx, ny)` 推进。

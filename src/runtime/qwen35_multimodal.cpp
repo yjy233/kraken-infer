@@ -1171,6 +1171,19 @@ Result<Qwen35ImageDimensions> image_part_dimensions(const ChatContentPart& part)
     "Qwen3.5 multimodal prompt image part is missing dimensions");
 }
 
+std::vector<const ChatContentPart*> collect_qwen35_image_parts(
+  const std::vector<ChatMessage>& messages) {
+  std::vector<const ChatContentPart*> image_parts;
+  for (const auto& message : messages) {
+    for (const auto& part : message.content_parts) {
+      if (part.kind == ChatContentPartKind::image_url) {
+        image_parts.push_back(&part);
+      }
+    }
+  }
+  return image_parts;
+}
+
 int base64_value(char ch) {
   if (ch >= 'A' && ch <= 'Z') {
     return ch - 'A';
@@ -2749,6 +2762,136 @@ std::string format_qwen35_multimodal_token_plan(
              << chunk.image_plan.merge_grid_y;
     }
     output << " message=" << chunk.message_index
+           << " part=" << chunk.part_index << '\n';
+  }
+  return output.str();
+}
+
+Result<Qwen35MixedPrefillPlan> build_qwen35_mixed_prefill_plan(
+  const GgufTokenizer& tokenizer, const Qwen35MmprojMetadata& metadata,
+  const std::filesystem::path& mmproj_path,
+  const std::vector<ChatMessage>& messages, bool add_generation_prompt,
+  bool enable_thinking) {
+  if (mmproj_path.empty()) {
+    return Status::invalid_argument(
+      "Qwen3.5 mixed prefill requires a qwen3vl_merger mmproj path");
+  }
+  if (!qwen35_mmproj_is_qwen3vl_merger(metadata)) {
+    return Status::invalid_argument(
+      "Qwen3.5 mixed prefill requires qwen3vl_merger mmproj");
+  }
+  if (metadata.projector_output_width == 0) {
+    return Status::invalid_argument(
+      "Qwen3.5 mixed prefill requires non-zero projector_output_width");
+  }
+
+  auto prompt_plan = plan_qwen35_multimodal_prompt(
+    metadata, messages, add_generation_prompt, enable_thinking);
+  if (!prompt_plan.is_ok()) {
+    return prompt_plan.status();
+  }
+  auto token_plan =
+    tokenize_qwen35_multimodal_prompt(tokenizer, prompt_plan.value());
+  if (!token_plan.is_ok()) {
+    return token_plan.status();
+  }
+  const auto image_parts = collect_qwen35_image_parts(messages);
+
+  Qwen35MixedPrefillPlan mixed;
+  mixed.embedding_width = metadata.projector_output_width;
+  mixed.chunks.reserve(token_plan.value().chunks.size());
+  for (const auto& token_chunk : token_plan.value().chunks) {
+    Qwen35MixedPrefillChunk chunk;
+    chunk.kind = token_chunk.kind;
+    chunk.text_tokens = token_chunk.text_tokens;
+    chunk.message_index = token_chunk.message_index;
+    chunk.part_index = token_chunk.part_index;
+    chunk.image_index = token_chunk.image_index;
+    chunk.image_fingerprint = token_chunk.image_fingerprint;
+    chunk.image_plan = token_chunk.image_plan;
+    chunk.token_count = token_chunk.token_count;
+    chunk.position_advance = token_chunk.position_advance;
+    chunk.start_token = mixed.total_tokens;
+    chunk.start_position = mixed.total_position_advance;
+
+    if (token_chunk.kind == Qwen35MultimodalPromptChunkKind::text) {
+      ++mixed.text_chunks;
+      mixed.text_tokens += chunk.text_tokens.size();
+    } else {
+      if (chunk.image_index >= image_parts.size()) {
+        return Status::invalid_argument(
+          "Qwen3.5 mixed prefill image chunk index is out of range");
+      }
+      const auto* image_part = image_parts[chunk.image_index];
+      if (image_part == nullptr || image_part->image_bytes.empty()) {
+        return Status::unavailable(
+          "Qwen3.5 mixed prefill currently requires data URL image bytes");
+      }
+      Qwen35ImageDataUrl image;
+      image.mime_type = image_part->image_mime_type;
+      image.bytes = image_part->image_bytes;
+      image.width = image_part->image_width;
+      image.height = image_part->image_height;
+      auto preprocessed = preprocess_qwen35_image_for_vision(metadata, image);
+      if (!preprocessed.is_ok()) {
+        return preprocessed.status();
+      }
+      auto encoded = run_qwen35_vision_encoder_cpu(mmproj_path, preprocessed.value());
+      if (!encoded.is_ok()) {
+        return encoded.status();
+      }
+      if (encoded.value().image_token_count != chunk.token_count ||
+          encoded.value().projector_output_width != mixed.embedding_width) {
+        return Status::invalid_argument(
+          "Qwen3.5 mixed prefill image encoder output does not match prompt plan");
+      }
+      chunk.image_plan = encoded.value().image_plan;
+      chunk.image_embeddings = std::move(encoded.value().embeddings);
+      ++mixed.image_chunks;
+      mixed.image_tokens += chunk.token_count;
+    }
+
+    mixed.total_tokens += chunk.token_count;
+    mixed.total_position_advance += chunk.position_advance;
+    mixed.chunks.push_back(std::move(chunk));
+  }
+  if (mixed.total_tokens != token_plan.value().total_tokens ||
+      mixed.total_position_advance != token_plan.value().total_position_advance ||
+      mixed.text_tokens != token_plan.value().text_tokens ||
+      mixed.image_tokens != token_plan.value().image_tokens) {
+    return Status::internal_error(
+      "Qwen3.5 mixed prefill counters do not match token plan");
+  }
+  return mixed;
+}
+
+std::string format_qwen35_mixed_prefill_plan(
+  const Qwen35MixedPrefillPlan& plan) {
+  std::ostringstream output;
+  output << "mixed prefill chunks: " << plan.chunks.size() << '\n';
+  output << "mixed prefill text_chunks: " << plan.text_chunks << '\n';
+  output << "mixed prefill image_chunks: " << plan.image_chunks << '\n';
+  output << "mixed prefill text_tokens: " << plan.text_tokens << '\n';
+  output << "mixed prefill image_tokens: " << plan.image_tokens << '\n';
+  output << "mixed prefill total_tokens: " << plan.total_tokens << '\n';
+  output << "mixed prefill total_position_advance: "
+         << plan.total_position_advance << '\n';
+  output << "mixed prefill embedding_width: " << plan.embedding_width << '\n';
+  for (const auto& chunk : plan.chunks) {
+    output << "- ";
+    if (chunk.kind == Qwen35MultimodalPromptChunkKind::text) {
+      output << "text tokens=" << chunk.text_tokens.size();
+    } else {
+      output << "image index=" << chunk.image_index
+             << " tokens=" << chunk.token_count
+             << " embeddings=" << chunk.image_embeddings.size()
+             << " grid=" << chunk.image_plan.merge_grid_x << 'x'
+             << chunk.image_plan.merge_grid_y;
+    }
+    output << " start_token=" << chunk.start_token
+           << " start_position=" << chunk.start_position
+           << " pos_advance=" << chunk.position_advance
+           << " message=" << chunk.message_index
            << " part=" << chunk.part_index << '\n';
   }
   return output.str();

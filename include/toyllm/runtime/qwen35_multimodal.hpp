@@ -190,6 +190,32 @@ struct Qwen35MultimodalTokenPlan {
   std::size_t total_position_advance{0};
 };
 
+struct Qwen35MixedPrefillChunk {
+  Qwen35MultimodalPromptChunkKind kind{Qwen35MultimodalPromptChunkKind::text};
+  std::vector<std::int64_t> text_tokens;
+  std::vector<float> image_embeddings;
+  std::size_t message_index{0};
+  std::size_t part_index{0};
+  std::size_t image_index{0};
+  std::uint64_t image_fingerprint{0};
+  Qwen35ImageEmbeddingPlan image_plan;
+  std::size_t token_count{0};
+  std::size_t position_advance{0};
+  std::size_t start_token{0};
+  std::size_t start_position{0};
+};
+
+struct Qwen35MixedPrefillPlan {
+  std::vector<Qwen35MixedPrefillChunk> chunks;
+  std::size_t text_chunks{0};
+  std::size_t image_chunks{0};
+  std::size_t text_tokens{0};
+  std::size_t image_tokens{0};
+  std::size_t total_tokens{0};
+  std::size_t total_position_advance{0};
+  std::uint64_t embedding_width{0};
+};
+
 [[nodiscard]] Result<Qwen35MmprojMetadata> load_qwen35_mmproj_metadata(
   const std::filesystem::path& path);
 [[nodiscard]] bool qwen35_mmproj_is_qwen3vl_merger(
@@ -246,5 +272,11 @@ run_qwen35_vision_input_stage_cpu(const std::filesystem::path& mmproj_path,
   bool enable_thinking);
 [[nodiscard]] std::string format_qwen35_multimodal_token_plan(
   const Qwen35MultimodalTokenPlan& plan);
+[[nodiscard]] Result<Qwen35MixedPrefillPlan> build_qwen35_mixed_prefill_plan(
+  const GgufTokenizer& tokenizer, const Qwen35MmprojMetadata& metadata,
+  const std::filesystem::path& mmproj_path, const std::vector<ChatMessage>& messages,
+  bool add_generation_prompt, bool enable_thinking);
+[[nodiscard]] std::string format_qwen35_mixed_prefill_plan(
+  const Qwen35MixedPrefillPlan& plan);
 
 }  // namespace toyllm
