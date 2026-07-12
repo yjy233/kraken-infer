@@ -83,7 +83,7 @@ qwen35-vl-mtp-test: $(BUILD_DIR)/$(BINARY)
 		--model $(QWEN35_MTP_MODEL) \
 		--mmproj $(QWEN35_MMPROJ) $(if $(QWEN35_IMAGE),--image $(QWEN35_IMAGE),) \
 		--timeout 180 \
-		--expect-mtp-enabled
+		--expect-mtp-disabled-reason multimodal_prompt_not_supported_with_mtp
 
 cli: $(BUILD_DIR)/$(BINARY)
 	./$(BUILD_DIR)/$(BINARY) help

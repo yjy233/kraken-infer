@@ -116,8 +116,9 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
 图片输入已接通 OpenAI content array 的 `image_url` data URL 路径。Gateway 会解析
 `text` / `image_url`、校验 `qwen3vl_merger` mmproj，在本 runtime 内执行 Qwen3.5
 VL CPU vision encoder，并把 image embeddings 与文本 embeddings 混合喂给原生
-Metal decoder。使用带 MTP 的 GGUF 启动时，文本请求和图片请求都可以走原生 MTP；
-response headers 会返回 `X-Kraken-MTP-*` 统计。
+Metal decoder。使用带 MTP 的 GGUF 启动时，文本请求可以走原生 MTP；图片请求会
+回退为 no-MTP，并通过 `X-Kraken-MTP-Disabled-Reason:
+multimodal_prompt_not_supported_with_mtp` 标明原因。
 
 ### Prefix Cache
 
@@ -191,7 +192,7 @@ ctest --preset debug
   --stream
 ```
 
-启动本地 HTTP gateway（Qwen3.5 0.8B VL + MTP + F16 KV cache）：
+启动本地 HTTP gateway（Qwen3.5 0.8B VL + text MTP + F16 KV cache）：
 
 ```bash
 KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
@@ -199,7 +200,7 @@ KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
   --port 18080 \
   --model models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf \
   --mmproj models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf \
-  --model-id qwen3.5-0.8b-vl-mtp \
+  --model-id qwen3.5-0.8b-vl-text-mtp \
   --device mps \
   --max-new-tokens 128 \
   --prefill-chunk-tokens 32 \
@@ -211,14 +212,13 @@ KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
 ```
 
 该命令同时启用 OpenAI `image_url` 图片输入、原生 Qwen3.5 VL mixed prefill、
-MTP speculative decode，以及 Qwen3.5 full-attention F16 KV cache。图片请求会在
+文本 MTP speculative decode，以及 Qwen3.5 full-attention F16 KV cache。图片请求会在
 本 runtime 内执行 mmproj CPU vision encoder，再把 image embeddings 和文本
-embeddings 混合喂给 Metal decoder；跨请求 prompt prefix cache 见下方单独示例，
-第一版 MTP/VL 不和 `--cache-prompt` 同时启用。
+embeddings 混合喂给 Metal decoder，但图片请求不会启用 MTP；跨请求 prompt
+prefix cache 见下方单独示例。
 
-当前 MTP 是功能完整、可观测的 greedy speculative path，但在 Debug/MPS 路径上
-不保证每个 prompt 都加速。若只追求最低单请求延迟，可用 `--no-mtp` 做基线对照，
-或把 `--mtp-draft-tokens` 调到 `1`。
+当前文本 MTP 是功能完整、可观测的 greedy speculative path；release CLI 文本路径
+已经能看到正收益。若只追求最低单请求延迟，仍建议用 `--no-mtp` 做基线对照。
 
 浏览器对话页：
 
@@ -240,7 +240,7 @@ Chat completion：
 curl http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl-mtp",
+    "model": "qwen3.5-0.8b-vl-text-mtp",
     "messages": [{"role": "user", "content": "用一句话介绍你自己"}],
     "max_completion_tokens": 128,
     "mtp": true,
@@ -257,7 +257,7 @@ Streaming thinking：
 curl -N http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl-mtp",
+    "model": "qwen3.5-0.8b-vl-text-mtp",
     "messages": [{"role": "user", "content": "计算 23 * 19，并给出答案"}],
     "max_completion_tokens": 128,
     "stream": true,
@@ -273,7 +273,7 @@ Text completion：
 curl http://127.0.0.1:18080/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl-mtp",
+    "model": "qwen3.5-0.8b-vl-text-mtp",
     "prompt": "hello",
     "max_tokens": 32,
     "mtp": true,
@@ -289,7 +289,7 @@ Forced tool call protocol compatibility：
 curl http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-0.8b-vl-mtp",
+    "model": "qwen3.5-0.8b-vl-text-mtp",
     "messages": [{"role": "user", "content": "weather?"}],
     "tools": [{
       "type": "function",
@@ -506,8 +506,8 @@ web/                     Static browser chat page assets
 
 ## Current Boundaries
 
-- 当前主线覆盖 dense Qwen3.5 0.8B GGUF 文本、Qwen3.5 VL mixed prefill 和
-  greedy MTP/NextN speculative decode。
+- 当前主线覆盖 dense Qwen3.5 0.8B GGUF 文本、文本 greedy MTP/NextN speculative
+  decode，以及 no-MTP 的 Qwen3.5 VL mixed prefill。
 - batched speculative、多 sequence、paged KV 和 Omni 多模态 graph 仍是后续工作。
 - Qwen3.5 MoE 仍是后续工作。
 - Qwen3.5 VL vision encoder 当前是 CPU reference path，大图会明显慢于纯文本请求。

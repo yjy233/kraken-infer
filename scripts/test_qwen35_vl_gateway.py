@@ -139,7 +139,8 @@ def main() -> int:
         "--max-new-tokens",
         str(args.max_tokens),
     ]
-    if args.expect_mtp_enabled:
+    check_mtp_headers = args.expect_mtp_enabled or bool(args.expect_mtp_disabled_reason)
+    if check_mtp_headers:
         command.extend(
             [
                 "--mtp",
@@ -188,7 +189,7 @@ def main() -> int:
         }
         if args.temperature is not None:
             payload["temperature"] = args.temperature
-        if args.expect_mtp_enabled:
+        if check_mtp_headers:
             payload["mtp"] = True
             payload["mtp_draft_tokens"] = args.mtp_draft_tokens
             payload["mtp_p_min"] = args.mtp_p_min
@@ -213,7 +214,7 @@ def main() -> int:
             reason = headers.get("x-kraken-mtp-disabled-reason")
             if enabled != "1":
                 raise RuntimeError(
-                    "expected native VL MTP to be enabled: "
+                    "expected VL MTP headers to report enabled: "
                     f"enabled={enabled}, reason={reason}, headers={headers}"
                 )
         print(content)
