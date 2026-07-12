@@ -306,15 +306,16 @@ Qwen3.5 图片输入会改变跨请求 cache 的 key：
   vision encoder，并记录每个 chunk 的 `start_token`、MRoPE `start_position`、
   `token_count` 和 `position_advance`。这一步已经能产出 decoder 所需的 raw image
   embeddings 和按 llama.cpp mtmd 规则排布的 `[t, y, x, z]` MRoPE position buffer，
-  但尚未把它们注入 Metal prefill layer loop。
+  并已注入 Metal prefill layer loop。
 - gateway 图片请求预检会运行 multimodal prompt plan，提前暴露缺失图片尺寸等
   native VL 前置错误。
 - gateway 启动日志会打印 native image plan 的 patch/merge/token limit 摘要。
 - 图片请求没有 `--mmproj` 时返回 OpenAI 兼容 400。
 - 图片请求带了非 `qwen3vl_merger` mmproj 时返回 OpenAI 兼容 400。
-- 图片请求带了 `qwen3vl_merger` mmproj 时，当前 gateway 仍默认桥接
-  `llama-mtmd-cli` 完成端到端 VL 生成；底层 CPU reference vision encoder 和
-  mixed prefill plan 已具备，尚未接入 Metal decoder embedding 注入。
+- 图片请求带了 `qwen3vl_merger` mmproj 时，gateway 默认走 native VL mixed
+  prefill：CPU reference vision encoder 产出 image embeddings，runtime 将其与
+  text token embeddings 拼成 decoder hidden stream，并使用独立的 physical KV
+  cache position 与 logical MRoPE position。
 
 当前还没有实现：
 
@@ -420,8 +421,11 @@ GET http://127.0.0.1:18081/v1/openapi.json
   image chunk 为 `t=pos0, y=pos0+row, x=pos0+col, z=0`，并按
   llama.cpp `set_position_mrope_2d()` 的 section-major layout 存储。
 - text chunk 走 token embedding path。
-- 下一步是让 Metal prefill layer loop 消费 mixed prefill hidden stream。
-- MRoPE position buffer 支持 text broadcast 和 image `[t,y,x,z]`。
+- Metal prefill layer loop 已消费 mixed prefill hidden stream，并在 full-attention
+  chunk 中使用 chunk-local MRoPE position slice。
+- runtime 已拆分 physical KV cache row 与 logical MRoPE position；纯文本两者相同，
+  image chunk 使用真实 image token rows 写 cache，但按 `max(nx, ny)` 推进 decode
+  后续文本位置。
 - `n_past` / logical position 推进遵循 mtmd：text 按 token 数推进，image 按
   `max(nx, ny)` 推进。
 

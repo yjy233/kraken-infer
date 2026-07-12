@@ -212,10 +212,11 @@ KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
   --profile summary
 ```
 
-该命令同时启用 OpenAI `image_url` 图片输入、文本请求的原生 MTP speculative decode，
-以及 Qwen3.5 full-attention F16 KV cache。当前图片请求通过 llama.cpp
-`llama-mtmd-cli` 桥接完成视觉理解；跨请求 prompt prefix cache 见下方单独示例，
-第一版 MTP 不和 `--cache-prompt` 同时启用。
+该命令同时启用 OpenAI `image_url` 图片输入、原生 Qwen3.5 VL mixed prefill、
+MTP speculative decode，以及 Qwen3.5 full-attention F16 KV cache。图片请求会在
+本 runtime 内执行 mmproj CPU vision encoder，再把 image embeddings 和文本
+embeddings 混合喂给 Metal decoder；跨请求 prompt prefix cache 见下方单独示例，
+第一版 MTP/VL 不和 `--cache-prompt` 同时启用。
 
 浏览器对话页：
 

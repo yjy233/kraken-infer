@@ -14,6 +14,12 @@ import urllib.request
 from pathlib import Path
 
 
+DEFAULT_IMAGE_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/"
+    "lV9SogAAAABJRU5ErkJggg=="
+)
+
+
 def lower_headers(headers) -> dict[str, str]:
     return {key.lower(): value for key, value in headers.items()}
 
@@ -70,7 +76,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--image",
-        default="/Users/bill/code/llama.cpp/tools/mtmd/test-1.jpeg",
+        default="",
+        help="optional image path; omitted uses an embedded 1x1 PNG smoke image",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18183)
@@ -81,44 +88,71 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="optional sampling temperature; omit for greedy MTP-compatible decode",
+    )
+    parser.add_argument(
         "--expect-mtp-disabled-reason",
         default="",
         help="assert that MTP is available but disabled with this reason",
     )
+    parser.add_argument(
+        "--expect-mtp-enabled",
+        action="store_true",
+        help="assert that the gateway enables native MTP for the VL request",
+    )
+    parser.add_argument("--mtp-draft-tokens", type=int, default=3)
+    parser.add_argument("--mtp-p-min", type=float, default=0.30)
     args = parser.parse_args()
 
     binary = Path(args.binary)
     model = Path(args.model)
     mmproj = Path(args.mmproj)
-    image = Path(args.image)
+    image = Path(args.image) if args.image else None
     for label, path in {
         "binary": binary,
         "model": model,
         "mmproj": mmproj,
-        "image": image,
     }.items():
         if not path.exists():
             raise FileNotFoundError(f"{label} not found: {path}")
+    if image is not None and not image.exists():
+        raise FileNotFoundError(f"image not found: {image}")
 
+    command = [
+        str(binary),
+        "serve",
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--model",
+        str(model),
+        "--model-id",
+        "qwen35-vl-test",
+        "--device",
+        "mps",
+        "--mmproj",
+        str(mmproj),
+        "--max-new-tokens",
+        str(args.max_tokens),
+    ]
+    if args.expect_mtp_enabled:
+        command.extend(
+            [
+                "--mtp",
+                "--mtp-draft-tokens",
+                str(args.mtp_draft_tokens),
+                "--mtp-p-min",
+                str(args.mtp_p_min),
+            ]
+        )
+
+    success = False
     server = subprocess.Popen(
-        [
-            str(binary),
-            "serve",
-            "--host",
-            args.host,
-            "--port",
-            str(args.port),
-            "--model",
-            str(model),
-            "--model-id",
-            "qwen35-vl-test",
-            "--device",
-            "mps",
-            "--mmproj",
-            str(mmproj),
-            "--max-new-tokens",
-            str(args.max_tokens),
-        ],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -127,7 +161,12 @@ def main() -> int:
         base_url = f"http://{args.host}:{args.port}"
         wait_for_health(f"{base_url}/health", 15.0)
 
-        encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+        if image is None:
+            encoded = DEFAULT_IMAGE_BASE64
+            mime_type = "image/png"
+        else:
+            encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+            mime_type = image_mime(image)
         payload = {
             "model": "qwen35-vl-test",
             "messages": [
@@ -138,7 +177,7 @@ def main() -> int:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:{image_mime(image)};base64,{encoded}",
+                                "url": f"data:{mime_type};base64,{encoded}",
                                 "detail": "auto",
                             },
                         },
@@ -146,8 +185,13 @@ def main() -> int:
                 }
             ],
             "max_tokens": args.max_tokens,
-            "temperature": 0,
         }
+        if args.temperature is not None:
+            payload["temperature"] = args.temperature
+        if args.expect_mtp_enabled:
+            payload["mtp"] = True
+            payload["mtp_draft_tokens"] = args.mtp_draft_tokens
+            payload["mtp_p_min"] = args.mtp_p_min
         response, headers = post_json(
             f"{base_url}/v1/chat/completions",
             payload,
@@ -164,6 +208,14 @@ def main() -> int:
                     "unexpected VL MTP headers: "
                     f"enabled={enabled}, reason={reason}, headers={headers}"
                 )
+        if args.expect_mtp_enabled:
+            enabled = headers.get("x-kraken-mtp-enabled")
+            reason = headers.get("x-kraken-mtp-disabled-reason")
+            if enabled != "1":
+                raise RuntimeError(
+                    "expected native VL MTP to be enabled: "
+                    f"enabled={enabled}, reason={reason}, headers={headers}"
+                )
         print(content)
         summary = {"usage": response.get("usage", {})}
         mtp_headers = {
@@ -173,6 +225,7 @@ def main() -> int:
         if mtp_headers:
             summary["mtp"] = mtp_headers
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        success = True
         return 0
     finally:
         server.terminate()
@@ -181,7 +234,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             server.kill()
             stdout, _ = server.communicate(timeout=5)
-        if server.returncode not in {0, -15, -2, 1} and stdout:
+        if stdout and (not success or server.returncode not in {0, -15, -2, 1}):
             print(stdout, file=sys.stderr)
 
 

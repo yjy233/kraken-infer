@@ -6,7 +6,7 @@ CHAT_TOKENS ?= 16
 QWEN35_MODEL ?= models/qwen3.5-0.8b
 QWEN35_MTP_MODEL ?= models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf
 QWEN35_MMPROJ ?= models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
-QWEN35_IMAGE ?= /Users/bill/code/llama.cpp/tools/mtmd/test-1.jpeg
+QWEN35_IMAGE ?=
 BINARY := kraken-infer
 SMOKE_TEST := kraken-infer-smoke-test
 
@@ -74,16 +74,16 @@ qwen35-vl-test: $(BUILD_DIR)/$(BINARY)
 	python3 scripts/test_qwen35_vl_gateway.py \
 		--binary ./$(BUILD_DIR)/$(BINARY) \
 		--model $(QWEN35_MODEL) \
-		--mmproj $(QWEN35_MMPROJ) \
-		--image $(QWEN35_IMAGE)
+		--mmproj $(QWEN35_MMPROJ) $(if $(QWEN35_IMAGE),--image $(QWEN35_IMAGE),) \
+		--timeout 180
 
 qwen35-vl-mtp-test: $(BUILD_DIR)/$(BINARY)
 	python3 scripts/test_qwen35_vl_gateway.py \
 		--binary ./$(BUILD_DIR)/$(BINARY) \
 		--model $(QWEN35_MTP_MODEL) \
-		--mmproj $(QWEN35_MMPROJ) \
-		--image $(QWEN35_IMAGE) \
-		--expect-mtp-disabled-reason vl_bridge_uses_llama_mtmd_without_mtp
+		--mmproj $(QWEN35_MMPROJ) $(if $(QWEN35_IMAGE),--image $(QWEN35_IMAGE),) \
+		--timeout 180 \
+		--expect-mtp-enabled
 
 cli: $(BUILD_DIR)/$(BINARY)
 	./$(BUILD_DIR)/$(BINARY) help
