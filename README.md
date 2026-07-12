@@ -208,15 +208,15 @@ KRAKEN_QWEN35_F16_KV=1 ./build/debug/kraken-infer serve \
   --mtp \
   --mtp-draft-tokens 3 \
   --mtp-p-min 0.30 \
-  --no-cache-prompt \
   --profile summary
 ```
 
 该命令同时启用 OpenAI `image_url` 图片输入、原生 Qwen3.5 VL mixed prefill、
 文本 MTP speculative decode，以及 Qwen3.5 full-attention F16 KV cache。图片请求会在
 本 runtime 内执行 mmproj CPU vision encoder，再把 image embeddings 和文本
-embeddings 混合喂给 Metal decoder，但图片请求不会启用 MTP；跨请求 prompt
-prefix cache 见下方单独示例。
+embeddings 混合喂给 Metal decoder，但图片请求不会启用 MTP。Prompt cache 默认开启；
+当文本 MTP 实际启用或请求包含图片时，cache 会自动跳过。需要强制关闭 cache 时使用
+`--no-cache-prompt` 或请求字段 `"cache_prompt": false`。
 
 当前文本 MTP 是功能完整、可观测的 greedy speculative path；release CLI 文本路径
 已经能看到正收益。若只追求最低单请求延迟，仍建议用 `--no-mtp` 做基线对照。
@@ -306,9 +306,11 @@ curl http://127.0.0.1:18080/v1/chat/completions \
 
 ## Prefix Cache Example
 
-Start gateway with Qwen3.5 0.8B VL and prompt cache enabled. Keep
-`--cache-block-tokens` aligned with `--prefill-chunk-tokens` for the current
-implementation.
+Start gateway with Qwen3.5 0.8B VL and prompt cache defaults. Prompt cache is
+enabled by default; keep `--cache-block-tokens` aligned with
+`--prefill-chunk-tokens` for the current implementation. MTP and multimodal
+requests currently skip prompt cache, so this cache-focused example disables
+MTP.
 
 ```bash
 ./build/debug/kraken-infer serve \
@@ -320,7 +322,7 @@ implementation.
   --device mps \
   --max-new-tokens 32 \
   --prefill-chunk-tokens 32 \
-  --cache-prompt \
+  --no-mtp \
   --cache-reuse 32 \
   --cache-block-tokens 32 \
   --cache-capacity-blocks 16
@@ -336,7 +338,6 @@ curl -i http://127.0.0.1:18080/v1/chat/completions \
     "messages": [{"role": "user", "content": "请用三段话解释 KV cache 的作用、prefill 和 decode 的区别，以及为什么相同 system prompt 能复用 cache。每段都要包含一个具体例子。"}],
     "max_completion_tokens": 32,
     "prefill_chunk_tokens": 32,
-    "cache_prompt": true,
     "cache_block_tokens": 32,
     "n_cache_reuse": 32,
     "chat_template_kwargs": {"enable_thinking": false}

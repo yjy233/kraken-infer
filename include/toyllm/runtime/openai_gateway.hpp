@@ -21,7 +21,7 @@ struct OpenAIGatewayConfig {
   std::size_t prefill_chunk_tokens{0};
   std::size_t context_size{0};
   std::size_t parallel_slots{1};
-  bool cache_prompt{false};
+  bool cache_prompt{true};
   std::size_t cache_reuse_min_tokens{0};
   std::size_t cache_block_tokens{0};
   std::size_t cache_capacity_blocks{16};

@@ -5409,8 +5409,6 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     mtp_state.disabled_reason = "sampling_not_supported_in_first_mtp_pass";
   } else if (request.mtp_draft_tokens == 0) {
     mtp_state.disabled_reason = "draft_tokens_zero";
-  } else if (request.cache_prompt) {
-    mtp_state.disabled_reason = "prompt_cache_not_supported_with_mtp_yet";
   } else if (mixed_prefill.has_value()) {
     mtp_state.disabled_reason = "multimodal_prompt_not_supported_with_mtp";
   } else {

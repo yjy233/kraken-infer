@@ -359,11 +359,11 @@ CLI server flags：
 - `--cache-capacity-blocks N`
 - `--cache-reuse N`
 
-OpenAI-compatible request fields：
+Prompt cache 默认开启。OpenAI-compatible request 可用本地扩展字段覆盖默认值：
 
 ```json
 {
-  "cache_prompt": true,
+  "cache_prompt": false,
   "n_cache_reuse": 1024
 }
 ```
@@ -371,8 +371,9 @@ OpenAI-compatible request fields：
 字段语义：
 
 - `cache_prompt=false`：本请求不查 cache，也不 commit 新 blocks。
-- `cache_prompt=true`：允许 exact prefix block cache。
+- `cache_prompt=true`：允许 exact prefix block cache；这是 gateway 默认策略，通常无需显式传。
 - `n_cache_reuse`：第一版作为最小复用 token 数，不实现 llama.cpp 的中间 chunk shifting。
+- MTP 和多模态请求当前与 prompt cache 互斥；实际启用 MTP 或图片输入时会自动跳过 cache。
 
 响应观测：
 
@@ -414,7 +415,7 @@ token 数；多模态时第一版仍按 decoder 输入单元计数，并必须 c
   --device mps \
   --max-new-tokens 1 \
   --prefill-chunk-tokens 16 \
-  --cache-prompt \
+  --no-mtp \
   --cache-block-tokens 16 \
   --cache-capacity-blocks 8
 ```
@@ -446,7 +447,6 @@ cat >/tmp/kraken-cache-request.json <<'JSON'
     }
   ],
   "max_tokens": 1,
-  "cache_prompt": true,
   "cache_block_tokens": 16,
   "cache_capacity_blocks": 8
 }
