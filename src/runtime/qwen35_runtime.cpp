@@ -3035,8 +3035,10 @@ Result<mps::MpsBuffer> run_qwen35_full_attention_layer_chunk(
   const mps::MpsBuffer& hidden, std::size_t tokens, std::size_t hidden_size,
   std::size_t attention_heads, std::size_t kv_heads, std::size_t head_dim,
   std::size_t full_attention_layer_index, std::size_t start_position,
-  std::size_t capacity_tokens, const std::array<std::size_t, 4>& mrope_sections,
-  float rope_theta, float rms_eps, RequestProfiler* profiler) {
+  std::size_t mrope_start_position, std::size_t capacity_tokens,
+  const std::array<std::size_t, 4>& mrope_sections,
+  float rope_theta, float rms_eps, RequestProfiler* profiler,
+  const mps::MpsBuffer* mrope_position_buffer = nullptr) {
   if (layer.kind != Qwen35LayerKind::full_attention) {
     return Status::invalid_argument("Qwen3.5 chunk full attention runner requires a full layer");
   }
@@ -3151,11 +3153,23 @@ Result<mps::MpsBuffer> run_qwen35_full_attention_layer_chunk(
     return status;
   }
 
-  auto positions = make_qwen35_mrope_positions(context, start_position, tokens);
-  if (!positions.is_ok()) {
-    return positions.status();
+  std::optional<mps::MpsBuffer> generated_positions;
+  const mps::MpsBuffer* positions = mrope_position_buffer;
+  if (positions == nullptr) {
+    auto generated =
+      make_qwen35_mrope_positions(context, mrope_start_position, tokens);
+    if (!generated.is_ok()) {
+      return generated.status();
+    }
+    generated_positions = std::move(generated.value());
+    positions = &generated_positions.value();
+  } else if (tokens > std::numeric_limits<std::size_t>::max() /
+                         (4U * sizeof(std::int32_t)) ||
+             positions->byte_size() < tokens * 4U * sizeof(std::int32_t)) {
+    return Status::invalid_argument(
+      "Qwen3.5 chunk MRoPE position buffer is too small");
   }
-  status = context.mrope_f32_in_place(query.value(), positions.value(), tokens,
+  status = context.mrope_f32_in_place(query.value(), *positions, tokens,
                                       attention_heads, head_dim, mrope_dims,
                                       mrope_sections[0], mrope_sections[1],
                                       mrope_sections[2], mrope_sections[3],
@@ -3163,7 +3177,7 @@ Result<mps::MpsBuffer> run_qwen35_full_attention_layer_chunk(
   if (!status.is_ok()) {
     return status;
   }
-  status = context.mrope_f32_in_place(key.value(), positions.value(), tokens,
+  status = context.mrope_f32_in_place(key.value(), *positions, tokens,
                                       kv_heads, head_dim, mrope_dims,
                                       mrope_sections[0], mrope_sections[1],
                                       mrope_sections[2], mrope_sections[3],
@@ -3734,7 +3748,8 @@ Result<Qwen35MainForwardOutput> run_qwen35_decode_tokens(
   Qwen35MetalCache& cache, const Qwen35WeightMap& map,
   const ModelConfig& model, const Qwen35ExecutionPlan& plan,
   const std::array<std::size_t, 4>& mrope_sections,
-  const std::vector<std::int64_t>& token_ids, std::size_t start_position) {
+  const std::vector<std::int64_t>& token_ids, std::size_t start_position,
+  std::size_t mrope_start_position) {
   if (token_ids.empty()) {
     return Status::invalid_argument("Qwen3.5 decode requires at least one token");
   }
@@ -3782,6 +3797,7 @@ Result<Qwen35MainForwardOutput> run_qwen35_decode_tokens(
           context, weights, cache, layer, current_hidden, token_ids.size(), plan.hidden_size,
           plan.attention_heads, plan.kv_heads, plan.head_dim,
           full_attention_layers_executed, start_position,
+          mrope_start_position,
           plan.cache.attention_capacity_tokens, mrope_sections,
           static_cast<float>(model.rope_theta),
           static_cast<float>(model.rms_norm_eps), nullptr);
@@ -3813,7 +3829,8 @@ Result<Qwen35MainForwardOutput> run_qwen35_decode_tokens(
   std::int64_t token_id, std::size_t position) {
   const std::vector<std::int64_t> token_ids{token_id};
   auto output = run_qwen35_decode_tokens(
-    context, weights, cache, map, model, plan, mrope_sections, token_ids, position);
+    context, weights, cache, map, model, plan, mrope_sections, token_ids,
+    position, position);
   if (!output.is_ok()) {
     return output.status();
   }
@@ -3856,9 +3873,9 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens_from_id_buffer(
   const std::array<std::size_t, 4>& mrope_sections,
   std::size_t token_count, const mps::MpsBuffer& token_id_buffer,
   const mps::MpsBuffer& h_rows, std::size_t start_position,
-  const Qwen35ExecutionPlan& plan, float rope_theta, float rms_eps,
-  bool compute_logits, bool compute_argmax, bool compute_top1_probability = false,
-  RequestProfiler* profiler = nullptr) {
+  std::size_t mrope_start_position, const Qwen35ExecutionPlan& plan,
+  float rope_theta, float rms_eps, bool compute_logits, bool compute_argmax,
+  bool compute_top1_probability = false, RequestProfiler* profiler = nullptr) {
   if (layer.kind != Qwen35LayerKind::mtp) {
     return Status::invalid_argument("Qwen3.5 MTP runner requires an MTP layer");
   }
@@ -3946,8 +3963,8 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens_from_id_buffer(
   auto block_out = run_qwen35_full_attention_layer_chunk(
     context, weights, mtp_cache, full_layer, projected.value(), token_count,
     plan.hidden_size, plan.attention_heads, plan.kv_heads, plan.head_dim, 0,
-    start_position, plan.cache.attention_capacity_tokens, mrope_sections,
-    rope_theta, rms_eps, profiler);
+    start_position, mrope_start_position, plan.cache.attention_capacity_tokens,
+    mrope_sections, rope_theta, rms_eps, profiler);
   if (!block_out.is_ok()) {
     return block_out.status();
   }
@@ -3986,9 +4003,10 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens(
   const Qwen35MetalWeight& fallback_output_weight,
   const std::array<std::size_t, 4>& mrope_sections,
   const std::vector<std::int64_t>& token_ids, const mps::MpsBuffer& h_rows,
-  std::size_t start_position, const Qwen35ExecutionPlan& plan,
-  float rope_theta, float rms_eps, bool compute_logits, bool compute_argmax,
-  bool compute_top1_probability = false, RequestProfiler* profiler = nullptr) {
+  std::size_t start_position, std::size_t mrope_start_position,
+  const Qwen35ExecutionPlan& plan, float rope_theta, float rms_eps,
+  bool compute_logits, bool compute_argmax, bool compute_top1_probability = false,
+  RequestProfiler* profiler = nullptr) {
   if (layer.kind != Qwen35LayerKind::mtp) {
     return Status::invalid_argument("Qwen3.5 MTP runner requires an MTP layer");
   }
@@ -4081,8 +4099,8 @@ Result<Qwen35MtpForwardOutput> run_qwen35_mtp_tokens(
   auto block_out = run_qwen35_full_attention_layer_chunk(
     context, weights, mtp_cache, full_layer, projected.value(), token_ids.size(),
     plan.hidden_size, plan.attention_heads, plan.kv_heads, plan.head_dim, 0,
-    start_position, plan.cache.attention_capacity_tokens, mrope_sections,
-    rope_theta, rms_eps, profiler);
+    start_position, mrope_start_position, plan.cache.attention_capacity_tokens,
+    mrope_sections, rope_theta, rms_eps, profiler);
   if (!block_out.is_ok()) {
     return block_out.status();
   }
@@ -5441,6 +5459,11 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     }
 
     auto current_hidden = std::move(chunk_hidden.value());
+    auto chunk_mrope_positions =
+      make_qwen35_mrope_positions(context.value(), chunk_start, chunk_tokens);
+    if (!chunk_mrope_positions.is_ok()) {
+      return chunk_mrope_positions.status();
+    }
     std::size_t linear_layers_executed = 0;
     std::size_t full_attention_layers_executed = 0;
     std::size_t main_layers_executed = 0;
@@ -5480,9 +5503,11 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
             chunk_tokens, plan.value().hidden_size, plan.value().attention_heads,
             plan.value().kv_heads, plan.value().head_dim,
             full_attention_layers_executed, chunk_start,
+            chunk_start,
             plan.value().cache.attention_capacity_tokens, mrope_sections.value(),
             static_cast<float>(bundle.value().model.rope_theta),
-            static_cast<float>(bundle.value().model.rms_norm_eps), &profiler);
+            static_cast<float>(bundle.value().model.rms_norm_eps), &profiler,
+            &chunk_mrope_positions.value());
           if (!layer_output.is_ok()) {
             return layer_output.status();
           }
@@ -5533,7 +5558,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       auto mtp_process = run_qwen35_mtp_tokens(
         context.value(), weights.value(), mtp_state.cache, mtp_layer,
         *token_embedding, *output_norm, *output_weight, mrope_sections.value(),
-        chunk_token_ids, shifted_h.value(), chunk_start, plan.value(),
+        chunk_token_ids, shifted_h.value(), chunk_start, chunk_start, plan.value(),
         static_cast<float>(bundle.value().model.rope_theta),
         static_cast<float>(bundle.value().model.rms_norm_eps),
         false, false, false, &profiler);
@@ -5816,7 +5841,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     auto decoded = run_qwen35_decode_tokens(
       context.value(), weights.value(), cache.value(), map.value(),
       bundle.value().model, plan.value(), mrope_sections.value(),
-      token_ids, position);
+      token_ids, position, position);
     if (!decoded.is_ok()) {
       return decoded.status();
     }
@@ -5904,7 +5929,8 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
         auto mtp_out = run_qwen35_mtp_tokens_from_id_buffer(
           context.value(), weights.value(), mtp_state.cache, mtp_layer,
           *token_embedding, *output_norm, *output_weight, mrope_sections.value(),
-          1, *token_input, *h_input, start_position + index, plan.value(),
+          1, *token_input, *h_input, start_position + index,
+          start_position + index, plan.value(),
           static_cast<float>(bundle.value().model.rope_theta),
           static_cast<float>(bundle.value().model.rms_norm_eps),
           true, true, mtp_state.p_min > 0.0, &profiler);
@@ -5963,7 +5989,8 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       auto mtp_out = run_qwen35_mtp_tokens(
         context.value(), weights.value(), mtp_state.cache, mtp_layer,
         *token_embedding, *output_norm, *output_weight, mrope_sections.value(),
-        token_ids, *h_input, start_position + index, plan.value(),
+        token_ids, *h_input, start_position + index, start_position + index,
+        plan.value(),
         static_cast<float>(bundle.value().model.rope_theta),
         static_cast<float>(bundle.value().model.rms_norm_eps),
         true, true, mtp_state.p_min > 0.0, &profiler);
