@@ -111,7 +111,8 @@ Gateway 是一个顺序 POSIX HTTP server，提供 OpenAI-compatible 子集：
   响应会返回 `X-Kraken-MTP-*` headers，包括 adaptive budget 统计。
 - `cache_prompt` / `n_cache_reuse` exact-prefix prompt cache。
 - 基础 tools/tool_choice 协议兼容，返回 OpenAI-style `tool_calls`，但不执行外部工具。
-- 浏览器对话页 `/chat_page`，支持 max new tokens、streaming 和 thinking 开关。
+- 浏览器对话页 `/chat_page`，支持 max new tokens、streaming、thinking 开关，以及
+  在 gateway 使用 `--mmproj` 启动时发送图片。
 
 图片输入已接通 OpenAI content array 的 `image_url` data URL 路径。Gateway 会解析
 `text` / `image_url`、校验 `qwen3vl_merger` mmproj，在本 runtime 内执行 Qwen3.5

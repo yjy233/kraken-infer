@@ -1074,7 +1074,8 @@ std::string chat_page_config_body(const OpenAIGatewayConfig& config) {
   std::ostringstream output;
   output << "{\"model\":\"" << json_escape(config.model_id) << "\",\"device\":\""
          << json_escape(config.compute_device.to_string()) << "\",\"max_new_tokens\":"
-         << config.default_max_tokens << '}';
+         << config.default_max_tokens << ",\"has_mmproj\":"
+         << (config.mmproj_path.empty() ? "false" : "true") << '}';
   return output.str();
 }
 

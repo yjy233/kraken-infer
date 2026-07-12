@@ -50,7 +50,12 @@
         <div class="empty" id="empty">No messages</div>
       </section>
       <form id="composer">
-        <textarea id="prompt" rows="2" autocomplete="off" spellcheck="true"></textarea>
+        <div class="compose-main">
+          <div class="attachments" id="attachments" hidden></div>
+          <textarea id="prompt" rows="2" autocomplete="off" spellcheck="true"></textarea>
+        </div>
+        <input id="image-input" type="file" accept="image/*" multiple hidden>
+        <button id="attach" class="secondary" type="button">Image</button>
         <button id="send" type="submit">Send</button>
         <button id="stop" class="secondary" type="button" disabled>Stop</button>
       </form>
