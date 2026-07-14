@@ -1951,6 +1951,7 @@ Status errno_status(std::string_view operation) {
 
 }  // namespace
 
+// openapi gateway server 
 Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
   if (config.port <= 0 || config.port > 65535) {
     return Status::invalid_argument("gateway port must be in 1..65535");
@@ -1967,6 +1968,7 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
     }
     std::cout << "MPSGraph warmup complete" << std::endl;
   }
+  // 
   std::optional<Qwen35MmprojMetadata> mmproj_metadata;
   if (!config.mmproj_path.empty()) {
     const auto metadata = load_qwen35_mmproj_metadata(config.mmproj_path);
