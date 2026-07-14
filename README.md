@@ -158,6 +158,31 @@ models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
 models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf
 ```
 
+下载模型文件：
+
+```bash
+mkdir -p models/qwen3.5-0.8b models/qwen3.5-0.8b-mtp
+
+# 基础 Qwen3.5 0.8B 文本 GGUF
+curl -L \
+  -o models/qwen3.5-0.8b/Qwen3.5-0.8B-Q4_K_M.gguf \
+  https://hf-mirror.com/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf
+
+# Qwen3.5 VL mmproj；远端文件名是 mmproj-BF16.gguf，本地保存为更明确的名字
+curl -L \
+  -o models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf \
+  https://hf-mirror.com/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-BF16.gguf
+
+# 带 MTP/NextN 的 Qwen3.5 0.8B 文本 GGUF，用于推荐 gateway 启动命令
+curl -L \
+  -o models/qwen3.5-0.8b-mtp/Qwen3.5-0.8B-Q4_K_M.gguf \
+  https://hf-mirror.com/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf
+```
+
+如果直连 Hugging Face 更快，把上述 URL 的 `https://hf-mirror.com` 替换成
+`https://huggingface.co` 即可。对应仓库是
+`unsloth/Qwen3.5-0.8B-GGUF` 和 `unsloth/Qwen3.5-0.8B-MTP-GGUF`。
+
 构建和测试：
 
 ```bash
