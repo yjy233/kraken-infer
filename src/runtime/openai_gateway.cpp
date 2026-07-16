@@ -1968,9 +1968,47 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
     }
     std::cout << "MPSGraph warmup complete" << std::endl;
   }
-  // 
   std::optional<Qwen35MmprojMetadata> mmproj_metadata;
   if (!config.mmproj_path.empty()) {
+    /*
+      Example Qwen3.5 0.8B mmproj metadata loaded from:
+      models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
+
+      {
+        "path": "models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf",
+        "architecture": "clip",
+        "projector_type": "qwen3vl_merger",
+        "vision_projector_type": "",
+        "spatial_merge_size": 2,
+        "patch_size": 16,
+        "image_min_pixels": 8192,
+        "image_max_pixels": 4194304,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+        "image_mean_std_present": true,
+        "image_size": 768,
+        "projection_dim": 1024,
+        "vision_feed_forward_length": 3072,
+        "vision_attention_head_count": 12,
+        "vision_attention_layer_norm_epsilon": 0.000001,
+        "deepstack_layer_flags": [
+          false, false, false, false, false, false,
+          false, false, false, false, false, false
+        ],
+        "vision_block_count": 12,
+        "vision_embedding_length": 768,
+        "tensor_count": 154,
+        "metadata_count": 23,
+        "file_size": 207345952,
+        "deepstack_layer_count": 0,
+        "projector_output_width": 1024,
+        "qwen3vl_required_tensors_present": true,
+        "missing_required_tensors": []
+      }
+
+      image_min_pixels/image_max_pixels are derived by the loader when the GGUF
+      omits clip.vision.image_min_pixels and clip.vision.image_max_pixels.
+    */
     const auto metadata = load_qwen35_mmproj_metadata(config.mmproj_path);
     if (!metadata.is_ok()) {
       return Status::invalid_argument("failed to load --mmproj: " +
