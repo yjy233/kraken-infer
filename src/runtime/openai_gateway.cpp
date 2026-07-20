@@ -1971,38 +1971,67 @@ Status serve_openai_gateway(const OpenAIGatewayConfig& config) {
   std::optional<Qwen35MmprojMetadata> mmproj_metadata;
   if (!config.mmproj_path.empty()) {
     /*
-      Example Qwen3.5 0.8B mmproj metadata loaded from:
+      After metadata.value() is assigned below, mmproj_metadata is logically
+      equivalent to the following JSON object (the C++ value is a
+      Qwen35MmprojMetadata struct, not a JSON string).
+
+      Values were read from the real Qwen3.5 0.8B mmproj at:
       models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf
 
+      This is JSONC because it includes explanatory comments. Some fields are
+      read directly from GGUF metadata, while the loader derives image pixel
+      limits and tensor-dependent fields.
+
       {
+        // Source mmproj file; it contains the vision encoder and projector.
         "path": "models/qwen3.5-0.8b/mmproj-Qwen3.5-0.8B-BF16.gguf",
+        // GGUF architecture. An mmproj must identify itself as CLIP.
         "architecture": "clip",
+        // Selects the Qwen3-VL merger that maps vision features to text embeddings.
         "projector_type": "qwen3vl_merger",
+        // Alternate metadata key for projector_type; empty in this file.
         "vision_projector_type": "",
+        // Merge each 2x2 group of vision patches into one image token.
         "spatial_merge_size": 2,
+        // Width and height, in pixels, of one vision patch.
         "patch_size": 16,
+        // Accepted image area bounds; 8192..4194304 pixels becomes 8..4096 tokens.
         "image_min_pixels": 8192,
         "image_max_pixels": 4194304,
+        // Per-channel RGB normalization: normalized = (pixel - mean) / std.
         "image_mean": [0.5, 0.5, 0.5],
         "image_std": [0.5, 0.5, 0.5],
+        // True when both normalization arrays were present in the GGUF.
         "image_mean_std_present": true,
+        // Nominal vision input size recorded by the model; inputs may be dynamic.
         "image_size": 768,
+        // Vision projection dimension before/within the merger.
         "projection_dim": 1024,
+        // Hidden width of each vision transformer's feed-forward network.
         "vision_feed_forward_length": 3072,
+        // Number of attention heads in each vision transformer block.
         "vision_attention_head_count": 12,
+        // Epsilon used by vision layer normalization.
         "vision_attention_layer_norm_epsilon": 0.000001,
+        // One flag per vision block; true would expose that block via deepstack.
         "deepstack_layer_flags": [
           false, false, false, false, false, false,
           false, false, false, false, false, false
         ],
+        // Number of transformer blocks and their input embedding width.
         "vision_block_count": 12,
         "vision_embedding_length": 768,
+        // Raw GGUF inventory and on-disk size, useful for diagnostics.
         "tensor_count": 154,
         "metadata_count": 23,
         "file_size": 207345952,
+        // Derived count of blocks marked true in deepstack_layer_flags.
         "deepstack_layer_count": 0,
+        // Derived from projector tensor shapes; must equal text-model hidden_size.
         "projector_output_width": 1024,
+        // Loader validation result for all tensors required by qwen3vl_merger.
         "qwen3vl_required_tensors_present": true,
+        // Names would be listed here when required projector tensors are absent.
         "missing_required_tensors": []
       }
 

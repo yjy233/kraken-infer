@@ -5235,7 +5235,7 @@ std::string format_qwen35_attention_bench_result(
   output << "Sample checksum: " << result.sample_checksum << '\n';
   return output.str();
 }
-
+// qwen3.5 0.8b 核心入口
 Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& request) {
   if (request.prompt.empty() && request.messages.empty()) {
     return Status::invalid_argument("prompt must not be empty");
@@ -5298,6 +5298,26 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
       return compatibility;
     }
   }
+  /*
+    默认 CpuSamplingConfig 与 Qwen3.5 GGUF generation config 合并后，
+    sampling.value() 逻辑上等价于下面的 JSONC：
+
+    {
+      // false 表示使用 greedy decoding，每次直接选择概率最高的 token。
+      "do_sample": false,
+      // 温度越高分布越随机；greedy decoding 下不参与 token 选择。
+      "temperature": 1.0,
+      // 0 表示不限制只从概率最高的 K 个 token 中采样。
+      "top_k": 0,
+      // 1.0 表示不通过累计概率截断候选 token。
+      "top_p": 1.0,
+      // 随机数种子；greedy decoding 不使用随机采样，因此默认为 0。
+      "seed": 0
+    }
+
+    request.sampling 中显式设置的 temperature/top_k/top_p 会覆盖模型默认值；
+    do_sample=false 时这些采样参数不会改变最终选择的 token。
+  */
   auto sampling = make_qwen35_effective_sampling(bundle.value().generation,
                                                  request.sampling);
   if (!sampling.is_ok()) {
@@ -5313,6 +5333,55 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
     return gguf.status();
   }
 
+  /*
+    对当前 Qwen3.5-0.8B GGUF，map.value() 逻辑上类似下面的 JSONC。
+    它只保存 tensor 的定位和布局信息，不复制 tensor 数据；每个 binding
+    实际还包含 type、offset、absolute_offset 和 byte_size。
+
+    {
+      "token_embedding": {
+        "name": "token_embd.weight",
+        "shape": [1024, 248320]
+      },
+      "output_norm": {
+        "name": "output_norm.weight",
+        "shape": [1024]
+      },
+      // 当前模型没有独立 output.weight，LM Head 复用 token embedding。
+      "output": {
+        "name": "token_embd.weight",
+        "shape": [1024, 248320]
+      },
+      "output_tied_to_token_embedding": true,
+      "layers": [
+        {
+          "index": 0,
+          "kind": "linear_attention",
+          "attn_norm": {"name": "blk.0.attn_norm.weight"},
+          "attn_post_norm": {"name": "blk.0.post_attention_norm.weight"},
+          "ffn_gate": {"name": "blk.0.ffn_gate.weight"},
+          "ffn_up": {"name": "blk.0.ffn_up.weight"},
+          "ffn_down": {"name": "blk.0.ffn_down.weight"},
+          "linear_attention": {
+            "qkv": {"name": "blk.0.attn_qkv.weight"},
+            "gate": {"name": "blk.0.attn_gate.weight"},
+            "conv1d": {"name": "blk.0.ssm_conv1d.weight"},
+            "dt_bias": {"name": "blk.0.ssm_dt.bias"},
+            "a": {"name": "blk.0.ssm_a"},
+            "beta": {"name": "blk.0.ssm_beta.weight"},
+            "alpha": {"name": "blk.0.ssm_alpha.weight"},
+            "norm": {"name": "blk.0.ssm_norm.weight"},
+            "output": {"name": "blk.0.ssm_out.weight"}
+          }
+        }
+        // 其余 23 层结构相同，kind 决定使用 linear_attention、
+        // full_attention 或 mtp binding。
+      ],
+      "full_attention_layers": 6,
+      "linear_attention_layers": 18,
+      "mtp_layers": 0
+    }
+  */
   auto map = [&]() {
     auto span = profiler.scoped("qwen35.weight_map");
     return build_qwen35_weight_map(bundle.value().model, gguf.value());
@@ -5320,6 +5389,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!map.is_ok()) {
     return map.status();
   }
+  // tokenizer 错误会导致后续 prefill/decoding 失败，因此在这里提前返回错误。
   auto tokenizer = [&]() {
     auto span = profiler.scoped("request.tokenize.load");
     return load_gguf_tokenizer(gguf.value());
@@ -5327,6 +5397,7 @@ Result<CpuGenerationResult> generate_qwen35_metal(const CpuGenerationRequest& re
   if (!tokenizer.is_ok()) {
     return tokenizer.status();
   }
+  // 用户输入
   std::string prompt = request.prompt;
   Result<std::vector<std::int64_t>> prompt_tokens{std::vector<std::int64_t>{}};
   std::optional<Qwen35MixedPrefillPlan> mixed_prefill;

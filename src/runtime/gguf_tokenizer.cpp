@@ -773,7 +773,7 @@ Result<std::string> gguf_decode_token_text(const GgufTokenizer& tokenizer,
   }
   return output;
 }
-
+// 真理prompt 插入 <im_start>user <|im_endqq|>
 Result<std::string> format_qwen35_chat_prompt(const GgufTokenizer& tokenizer,
                                               const std::vector<ChatMessage>& messages,
                                               bool add_generation_prompt,
@@ -794,6 +794,9 @@ Result<std::string> format_qwen35_chat_prompt(const GgufTokenizer& tokenizer,
     }
     append_chat_message(prompt, message);
   }
+  // 就基本固定时true， 就时添加一个开头<|im_start|>user
+  // 你好<|im_end|>
+  // <|im_start|>assistant
   if (add_generation_prompt) {
     prompt << "<|im_start|>assistant\n";
     if (enable_thinking) {
